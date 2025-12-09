@@ -23,13 +23,42 @@ def test_geocoding():
     ]
 
     for address in addresses:
-        lat, lon = maps_service.geocode_address_sync(address)
+        lat, lon, _ = maps_service.geocode_address_sync(address)
         print(f"📍 {address}")
         if lat and lon:
             print(f"   ✅ Координаты: {lat:.4f}, {lon:.4f}")
         else:
             print("   ❌ Не удалось определить координаты")
         print()
+
+
+def test_links_generation():
+    """Тест генерации ссылок для маршрутов и точек"""
+    print("🔗 Тестирование генерации ссылок...")
+
+    maps_service = MapsService()
+
+    # Тестовые координаты
+    start_lat, start_lon = 59.9343, 30.3351  # СПб, центр
+    end_lat, end_lon = 59.9391, 30.3156     # СПб, другое место
+
+    # Тест с gid (как в реальном использовании)
+    start_gis_id = "5348660212750302"  # Пример gid для 2ГИС
+    end_gis_id = "5348552840994943"    # Пример gid для 2ГИС
+
+    # Тест маршрута
+    route_links = maps_service.build_route_links(start_lat, start_lon, end_lat, end_lon, start_gis_id, end_gis_id)
+    print("🚗 Ссылки на маршрут:")
+    print(f"   2ГИС: {route_links['2gis']}")
+    print(f"   Яндекс: {route_links['yandex']}")
+    print()
+
+    # Тест точки с gid
+    point_links = maps_service.build_point_links(end_lat, end_lon, end_gis_id)
+    print("📍 Ссылки на точку:")
+    print(f"   2ГИС: {point_links['2gis']}")
+    print(f"   Яндекс: {point_links['yandex']}")
+    print()
 
 
 def test_route_optimization():
@@ -90,6 +119,9 @@ def main():
 
     # Тест геокодирования
     test_geocoding()
+
+    # Тест генерации ссылок
+    test_links_generation()
 
     # Тест оптимизации
     test_route_optimization()

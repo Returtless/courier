@@ -9,6 +9,7 @@ class Settings(BaseSettings):
 
     # Maps API
     yandex_maps_api_key: Optional[str] = None
+    two_gis_api_key: Optional[str] = None
     google_maps_api_key: Optional[str] = None
 
     # Database

@@ -28,9 +28,10 @@ class RouteOptimizer:
         geocoded_orders = []
         for order in orders:
             if order.latitude is None or order.longitude is None:
-                lat, lon = self.maps_service.geocode_address_sync(order.address)
+                lat, lon, gid = self.maps_service.geocode_address_sync(order.address)
                 order.latitude = lat
                 order.longitude = lon
+                order.gis_id = gid
             geocoded_orders.append(order)
 
         # Calculate distance/time matrix
@@ -151,13 +152,14 @@ class RouteOptimizer:
 
             delivery_callback_index = routing.RegisterTransitCallback(delivery_time_callback)
 
-            time_dimension = routing.AddDimension(
+            routing.AddDimension(
                 delivery_callback_index,
                 0,  # no slack
                 24 * 60 * 60,  # max time in seconds (24 hours)
                 False,  # don't fix start cumul to zero
                 "Time"
             )
+            time_dimension = routing.GetDimensionOrDie("Time")
 
             # Add time window constraints for each order
             for i, order in enumerate(orders):
@@ -170,8 +172,9 @@ class RouteOptimizer:
                     start_seconds = start_minutes * 60
                     end_seconds = end_minutes * 60
 
-                    # Add time window constraint for this order (index i+1, since 0 is depot)
-                    time_dimension.CumulVar(routing.Start(i + 1)).SetRange(start_seconds, end_seconds)
+                    # Add time window constraint for this order (node index i+1, depot is 0)
+                    node_index = manager.NodeToIndex(i + 1)
+                    time_dimension.CumulVar(node_index).SetRange(start_seconds, end_seconds)
 
             # Set advanced search parameters
             search_parameters = pywrapcp.DefaultRoutingSearchParameters()

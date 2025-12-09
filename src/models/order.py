@@ -45,6 +45,8 @@ class Order(BaseModel):
     order_number: Optional[str] = None  # Номер заказа из внешней системы
     delivery_time_window: Optional[str] = None  # Временное окно доставки (строка)
     entrance_number: Optional[str] = None  # Номер подъезда для точного адреса
+    apartment_number: Optional[str] = None  # Номер квартиры
+    gis_id: Optional[str] = None  # ID объекта 2ГИС (для точного открытия точки)
 
     def __init__(self, *args, **kwargs):
         # Поддержка позиционных аргументов для обратной совместимости

@@ -22,7 +22,56 @@ except ImportError:
 class MapsService:
     def __init__(self):
         self.yandex_api_key = settings.yandex_maps_api_key
+        self.two_gis_api_key = settings.two_gis_api_key
         self.session: Optional[aiohttp.ClientSession] = None
+
+    @staticmethod
+    def build_route_links(
+        start_lat: float,
+        start_lon: float,
+        end_lat: float,
+        end_lon: float,
+        start_gis_id: Optional[str] = None,
+        end_gis_id: Optional[str] = None,
+        zoom: float = 15.8
+    ) -> dict:
+        """Сформировать ссылки на маршрут (2ГИС, Яндекс).
+        Для 2ГИС используем format directions/points/... и, если есть, gid точек.
+        """
+        # 2ГИС: directions/points/lon,lat;gid|lon,lat;gid?m=center_lon,center_lat/zoom
+        start_part = f"{start_lon}%2C{start_lat}" + (f"%3B{start_gis_id}" if start_gis_id else "")
+        end_part = f"{end_lon}%2C{end_lat}" + (f"%3B{end_gis_id}" if end_gis_id else "")
+        center_lon = (start_lon + end_lon) / 2
+        center_lat = (start_lat + end_lat) / 2
+        dg_route = (
+            f"https://2gis.ru/spb/directions/points/"
+            f"{start_part}%7C{end_part}?m={center_lon}%2C{center_lat}%2F{zoom}"
+        )
+        # Яндекс: rtext start~end
+        return {
+            "2gis": dg_route,
+            "yandex": f"https://yandex.ru/maps/?rtext={start_lat},{start_lon}~{end_lat},{end_lon}&rtt=auto"
+        }
+
+    def build_point_links(self, lat: float, lon: float, gid: Optional[str] = None, zoom: float = 17.87) -> dict:
+        """Сформировать ссылки на точку (2ГИС, Яндекс). Если есть gid (id 2ГИС), используем его."""
+        if gid:
+            dg_point = f"https://2gis.ru/geo/{gid}?m={lon}%2C{lat}%2F{zoom}"
+        else:
+            dg_point = f"https://2gis.ru/geo/{lat}%2C{lon}?m={lon}%2C{lat}%2F{zoom}"
+
+        # Для Яндекса пытаемся получить house ID через геокодер
+        yandex_point = self._get_yandex_house_link(lat, lon, zoom)
+
+        return {
+            "2gis": dg_point,
+            "yandex": yandex_point
+        }
+
+    def _get_yandex_house_link(self, lat: float, lon: float, zoom: float = 17) -> str:
+        """Получить ссылку на точку в Яндекс Картах через координаты"""
+        # Используем простой формат с whatshere[point] - не требует геокодера
+        return f"https://yandex.ru/maps/?whatshere[point]={lon},{lat}&whatshere[zoom]={int(zoom)}"
 
     async def __aenter__(self):
         if AIOHTTP_AVAILABLE:
@@ -33,34 +82,52 @@ class MapsService:
         if AIOHTTP_AVAILABLE and self.session:
             await self.session.close()
 
-    async def geocode_address(self, address: str) -> Tuple[Optional[float], Optional[float]]:
-        """Получить координаты по адресу через Yandex Maps API"""
+    async def geocode_address(self, address: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+        """Получить координаты и id объекта (2ГИС) по адресу через 2GIS/Yandex (если нет) или fallback.
+        Возвращает: lat, lon, gis_id
+        """
         if not AIOHTTP_AVAILABLE:
             print("aiohttp not available, using sync geocoding")
             return self.geocode_address_sync(address)
 
-        if not self.yandex_api_key:
-            # Fallback to simple geocoding
-            return self.geocode_address_sync(address)
-
         try:
-            url = "https://geocode-maps.yandex.ru/1.x/"
-            params = {
-                "apikey": self.yandex_api_key,
-                "format": "json",
-                "geocode": address
-            }
+            # 1) Попробуем 2GIS геокодирование
+            if self.two_gis_api_key:
+                url = "https://catalog.api.2gis.com/3.0/items"
+                params = {
+                    "key": self.two_gis_api_key,
+                    "q": address,
+                    "fields": "items.point"
+                }
+                async with self.session.get(url, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        items = data.get("result", {}).get("items", [])
+                        if items and items[0].get("point"):
+                            point = items[0]["point"]
+                            lat = float(point.get("lat"))
+                            lon = float(point.get("lon"))
+                            gid = items[0].get("id")
+                            return lat, lon, gid
 
-            async with self.session.get(url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    # Parse Yandex response
-                    members = data.get("response", {}).get("GeoObjectCollection", {}).get("featureMember", [])
-                    if members:
-                        pos = members[0].get("GeoObject", {}).get("Point", {}).get("pos", "")
-                        if pos:
-                            lon, lat = map(float, pos.split())
-                            return lat, lon
+            # 2) Если есть ключ Яндекса — используем его
+            if self.yandex_api_key:
+                url = "https://geocode-maps.yandex.ru/1.x/"
+                params = {
+                    "apikey": self.yandex_api_key,
+                    "format": "json",
+                    "geocode": address
+                }
+
+                async with self.session.get(url, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        members = data.get("response", {}).get("GeoObjectCollection", {}).get("featureMember", [])
+                        if members:
+                            pos = members[0].get("GeoObject", {}).get("Point", {}).get("pos", "")
+                            if pos:
+                                lon, lat = map(float, pos.split())
+                                return lat, lon, None
         except Exception as e:
             print(f"Async geocoding error: {e}")
             # Fallback to sync geocoding
@@ -68,9 +135,31 @@ class MapsService:
 
         return self.geocode_address_sync(address)
 
-    def geocode_address_sync(self, address: str) -> Tuple[Optional[float], Optional[float]]:
-        """Синхронное геокодирование с fallback на geopy"""
-        # Сначала попробуем Yandex API
+    def geocode_address_sync(self, address: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+        """Синхронное геокодирование с fallback на 2GIS → Yandex → geopy. Возврат: lat, lon, gis_id"""
+        # 1) 2GIS
+        if self.two_gis_api_key:
+            try:
+                url = "https://catalog.api.2gis.com/3.0/items"
+                params = {
+                    "key": self.two_gis_api_key,
+                    "q": address,
+                    "fields": "items.point"
+                }
+                response = requests.get(url, params=params, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    items = data.get("result", {}).get("items", [])
+                    if items and items[0].get("point"):
+                        point = items[0]["point"]
+                        lat = float(point.get("lat"))
+                        lon = float(point.get("lon"))
+                        gid = items[0].get("id")
+                        return lat, lon, gid
+            except Exception as e:
+                print(f"2GIS geocoding error: {e}")
+
+        # 2) Yandex
         if self.yandex_api_key:
             try:
                 url = "https://geocode-maps.yandex.ru/1.x/"
@@ -88,7 +177,7 @@ class MapsService:
                         pos = members[0].get("GeoObject", {}).get("Point", {}).get("pos", "")
                         if pos:
                             lon, lat = map(float, pos.split())
-                            return lat, lon
+                            return lat, lon, None
             except Exception as e:
                 print(f"Yandex geocoding error: {e}")
 
@@ -102,15 +191,57 @@ class MapsService:
             except Exception as e:
                 print(f"Geopy geocoding error: {e}")
 
-        return None, None
+        return None, None, None
 
     def get_route_sync(self, start_lat: float, start_lon: float, end_lat: float, end_lon: float) -> Tuple[float, float]:
-        """Синхронный расчет маршрута"""
+        """Синхронный расчет маршрута через 2GIS (если есть ключ) с fallback."""
+        # 1) 2GIS Routing API с учетом дорожной сети (traffic_mode=jam при наличии тарифа)
+        if self.two_gis_api_key:
+            try:
+                # Используем версию 7.0.0, как в рабочем примере Postman
+                url = "https://routing.api.2gis.com/routing/7.0.0/global"
+                params = {"key": self.two_gis_api_key}
+                payload_base = {
+                    "points": [
+                        {"type": "stop", "lon": start_lon, "lat": start_lat},
+                        {"type": "stop", "lon": end_lon, "lat": end_lat},
+                    ],
+                    "locale": "ru",
+                    "transport": "driving",
+                    "route_mode": "fastest",
+                }
+                # Пробуем с пробками (jam). При 429 сразу уходим в fallback.
+                payload = dict(payload_base, traffic_mode="jam")
+                response = requests.post(url, params=params, json=payload, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    result = None
+                    if isinstance(data, dict):
+                        result = data.get("result")
+                    elif isinstance(data, list) and data:
+                        result = data[0].get("result")
+
+                    if isinstance(result, list) and result:
+                        route_obj = result[0]
+                        distance = route_obj.get("total_distance", 0) / 1000  # метры → км
+                        time_seconds = route_obj.get("total_duration", 0)  # секунды
+                        time_minutes = time_seconds / 60
+                        return distance, time_minutes
+                elif response.status_code == 429:
+                    print("2GIS route rate-limited (429), fallback to other providers")
+                else:
+                    try:
+                        resp_text = response.text[:400]
+                    except Exception:
+                        resp_text = ""
+                    print(f"2GIS route HTTP {response.status_code} (traffic_mode=jam): {resp_text}")
+            except Exception as e:
+                print(f"2GIS route error: {e}")
+
+        # 2) Yandex (если есть ключ)
         if self.yandex_api_key:
             try:
                 url = "https://api.routing.yandex.net/v2/route"
-
-                # Формат waypoints для Routing API: lon1,lat1|lon2,lat2
                 params = {
                     "apikey": self.yandex_api_key,
                     "waypoints": f"{start_lon},{start_lat}|{end_lon},{end_lat}",
@@ -144,42 +275,79 @@ class MapsService:
         end_lon: float
     ) -> Tuple[float, float]:
         """
-        Получить маршрут (пробки не поддерживаются текущей версией API)
+        Получить маршрут с учетом дорожной сети (2GIS) или fallback.
         Возвращает: (distance_km, time_minutes)
         """
         if not AIOHTTP_AVAILABLE:
             print("aiohttp not available, using sync routing")
             return self.get_route_sync(start_lat, start_lon, end_lat, end_lon)
 
-        if not self.yandex_api_key:
-            # Fallback: calculate straight line distance
-            return self.get_route_sync(start_lat, start_lon, end_lat, end_lon)
+        # 1) 2GIS при наличии ключа
+        if self.two_gis_api_key:
+            try:
+                url = "https://routing.api.2gis.com/routing/7.0.0/global"
+                params = {"key": self.two_gis_api_key}
+                payload_base = {
+                    "points": [
+                        {"type": "stop", "lon": start_lon, "lat": start_lat},
+                        {"type": "stop", "lon": end_lon, "lat": end_lat},
+                    ],
+                    "locale": "ru",
+                    "transport": "driving",
+                    "route_mode": "fastest",
+                }
+                payload = dict(payload_base, traffic_mode="jam")
+                async with self.session.post(url, params=params, json=payload) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        result = None
+                        if isinstance(data, dict):
+                            result = data.get("result")
+                        elif isinstance(data, list) and data:
+                            result = data[0].get("result")
 
-        try:
-            url = "https://api.routing.yandex.net/v2/route"
+                        if isinstance(result, list) and result:
+                            route_obj = result[0]
+                            distance = route_obj.get("total_distance", 0) / 1000
+                            time_seconds = route_obj.get("total_duration", 0)
+                            time_minutes = time_seconds / 60
+                            return distance, time_minutes
+                    elif response.status == 429:
+                        print("Async 2GIS route rate-limited (429), fallback to other providers")
+                    else:
+                        text = ""
+                        try:
+                            text = (await response.text())[:400]
+                        except Exception:
+                            pass
+                        print(f"Async 2GIS route HTTP {response.status} (traffic_mode=jam): {text}")
+            except Exception as e:
+                print(f"Async 2GIS route error: {e}")
 
-            # Формат waypoints для Routing API: lon1,lat1|lon2,lat2
-            params = {
-                "apikey": self.yandex_api_key,
-                "waypoints": f"{start_lon},{start_lat}|{end_lon},{end_lat}",
-                "mode": "driving"
-            }
+        # 2) Yandex при наличии ключа
+        if self.yandex_api_key:
+            try:
+                url = "https://api.routing.yandex.net/v2/route"
+                params = {
+                    "apikey": self.yandex_api_key,
+                    "waypoints": f"{start_lon},{start_lat}|{end_lon},{end_lat}",
+                    "mode": "driving"
+                }
 
-            async with self.session.get(url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    route = data.get("route", {})
-                    if route:
-                        distance = route.get("distance", 0) / 1000  # meters to km
-                        time_seconds = route.get("duration", 0)  # Без учета пробок
-                        time_minutes = time_seconds / 60
-                        return distance, time_minutes
-        except Exception as e:
-            print(f"Async route calculation error: {e}")
-            # Fallback to sync routing
-            return self.get_route_sync(start_lat, start_lon, end_lat, end_lon)
+                async with self.session.get(url, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        route = data.get("route", {})
+                        if route:
+                            distance = route.get("distance", 0) / 1000  # meters to km
+                            time_seconds = route.get("duration", 0)  # Без учета пробок
+                            time_minutes = time_seconds / 60
+                            return distance, time_minutes
+            except Exception as e:
+                print(f"Async route calculation error: {e}")
+                return self.get_route_sync(start_lat, start_lon, end_lat, end_lon)
 
-        # Fallback
+        # 3) Fallback
         return self.get_route_sync(start_lat, start_lon, end_lat, end_lon)
 
     def _calculate_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
