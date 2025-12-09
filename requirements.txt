@@ -1,0 +1,18 @@
+# Core dependencies
+pyTelegramBotAPI==4.14.0
+sqlalchemy==2.0.23
+pydantic==2.5.2
+pydantic-settings==2.1.0
+python-dotenv==1.0.0
+requests==2.31.0
+
+# Maps and geocoding
+geopy==2.4.1
+
+# Route optimization
+ortools==9.14.6206
+
+# LLM (optional - can be installed later)
+# transformers
+# torch
+# accelerate
