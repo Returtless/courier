@@ -143,14 +143,12 @@ class CourierBot:
 
     def setup_traffic_callbacks(self):
         """Настроить callbacks для мониторинга пробок"""
-        def traffic_change_callback(changes, total_time):
-            # Отправить уведомление всем пользователям с активными маршрутами
-            for user_id, state in self.user_states.items():
-                if state.get('route_summary'):
-                    try:
-                        self.send_traffic_alert(user_id, changes, total_time)
-                    except Exception as e:
-                        logger.warning(f"Ошибка отправки уведомления пользователю {user_id}: {e}", exc_info=True)
+        def traffic_change_callback(user_id, changes, total_time):
+            # Отправить уведомление конкретному пользователю
+            try:
+                self.send_traffic_alert(user_id, changes, total_time)
+            except Exception as e:
+                logger.warning(f"Ошибка отправки уведомления пользователю {user_id}: {e}", exc_info=True)
 
         self.traffic_monitor.add_callback(traffic_change_callback)
 
@@ -560,6 +558,21 @@ class CourierBot:
             self.update_user_state(user_id, 'route_points_data', route_points_data)
             self.update_user_state(user_id, 'call_schedule', call_schedule)
             self.update_user_state(user_id, 'route_order', route_order)
+            # Сохраняем optimized_route для мониторинга пробок
+            self.update_user_state(user_id, 'optimized_route', optimized_route)
+            self.update_user_state(user_id, 'optimized_orders', orders)
+            start_location_tuple = None
+            if start_location_data:
+                if start_location_data.get('latitude') and start_location_data.get('longitude'):
+                    start_location_tuple = (start_location_data['latitude'], start_location_data['longitude'])
+            self.update_user_state(user_id, 'start_location', start_location_tuple)
+            if start_location_data and start_location_data.get('start_time'):
+                start_time_str = start_location_data['start_time']
+                if isinstance(start_time_str, str):
+                    start_time = datetime.fromisoformat(start_time_str)
+                else:
+                    start_time = start_time_str
+                self.update_user_state(user_id, 'start_time', start_time.isoformat() if isinstance(start_time, datetime) else start_time)
 
             # Формируем итоговое сообщение (форматируем маршрут для отображения)
             orders_data = self.db_service.get_today_orders(user_id)
@@ -1880,53 +1893,36 @@ class CourierBot:
         user_id = message.from_user.id
         state_data = self.get_user_state(user_id)
 
-        route_summary = state_data.get('route_summary', [])
-        orders_data = state_data.get('orders', [])
+        # Получаем сохраненный маршрут из state (сохранен после оптимизации)
+        optimized_route = state_data.get('optimized_route')
+        orders = state_data.get('optimized_orders', [])
+        start_location = state_data.get('start_location')
         start_time_str = state_data.get('start_time')
 
-        if not route_summary or not orders_data:
+        if not optimized_route or not orders or not start_location or not start_time_str:
             self.bot.reply_to(message, "❌ Сначала оптимизируйте маршрут командой /optimize_route", reply_markup=self._main_menu_markup())
             return
 
-        # Восстановить данные маршрута
-        orders = [Order(**order_data) for order_data in orders_data]
-        start_location = (55.7558, 37.6173)  # Default Moscow center, should be saved
-        start_datetime = datetime.fromisoformat(start_time_str)
+        # Преобразуем start_time в datetime
+        if isinstance(start_time_str, str):
+            start_datetime = datetime.fromisoformat(start_time_str)
+        else:
+            start_datetime = start_time_str
 
-        # Создать объект маршрута для мониторинга
-        from src.models.order import OptimizedRoute, RoutePoint
-        points = []
-        for i, order_data in enumerate(orders_data, 1):
-            order = Order(**order_data)
-            # Примерные данные, в реальности нужно сохранять полную информацию
-            estimated_arrival = start_datetime + timedelta(minutes=30 * i)
-            point = RoutePoint(
-                order=order,
-                estimated_arrival=estimated_arrival,
-                distance_from_previous=5.0,
-                time_from_previous=15.0
-            )
-            points.append(point)
-
-        route = OptimizedRoute(
-            points=points,
-            total_distance=25.0,
-            total_time=120.0,
-            estimated_completion=start_datetime + timedelta(hours=2)
-        )
-
-        # Запустить мониторинг
-        self.traffic_monitor.start_monitoring(route, orders, start_location, start_datetime)
+        # Запустить мониторинг для этого пользователя
+        self.traffic_monitor.start_monitoring(user_id, optimized_route, orders, start_location, start_datetime)
         self.bot.reply_to(message, "🚦 <b>Мониторинг пробок запущен!</b>\n\nБуду проверять пробки каждые 5 минут и уведомлять об изменениях.", parse_mode='HTML', reply_markup=self._main_menu_markup())
 
     def handle_stop_monitor(self, message):
         """Handle /stop_monitor command"""
-        self.traffic_monitor.stop_monitoring()
+        user_id = message.from_user.id
+        self.traffic_monitor.stop_monitoring(user_id)
         self.bot.reply_to(message, "🛑 Мониторинг пробок остановлен", reply_markup=self._main_menu_markup())
 
     def handle_traffic_status(self, message):
         """Handle /traffic_status command"""
-        status = self.traffic_monitor.get_current_traffic_status()
+        user_id = message.from_user.id
+        status = self.traffic_monitor.get_current_traffic_status(user_id)
 
         if status['is_monitoring']:
             last_check = status['last_check']
@@ -1943,7 +1939,7 @@ class CourierBot:
             text += f"🔍 Последняя проверка: {last_check_str}\n"
             text += f"✅ Статус: Активен"
         else:
-            text = "🚦 <b>Мониторинг не активен</b>\n\nИспользуйте /monitor для запуска"
+            text = "🚦 <b>Мониторинг не активен</b>\n\nИспользуйте кнопку 🚦 Мониторинг для запуска"
 
         self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=self._main_menu_markup())
 
@@ -2307,10 +2303,19 @@ class CourierBot:
         """Обработка подтверждения звонка"""
         from src.database.connection import get_db_session
         from src.models.order import CallStatusDB
+        from sqlalchemy import and_
+        
+        user_id = call.from_user.id
         
         try:
             with get_db_session() as session:
-                call_status = session.query(CallStatusDB).filter(CallStatusDB.id == call_status_id).first()
+                # Проверяем, что звонок принадлежит этому пользователю
+                call_status = session.query(CallStatusDB).filter(
+                    and_(
+                        CallStatusDB.id == call_status_id,
+                        CallStatusDB.user_id == user_id
+                    )
+                ).first()
                 if not call_status:
                     self.bot.answer_callback_query(call.id, "❌ Запись о звонке не найдена", show_alert=True)
                     return
@@ -2368,10 +2373,19 @@ class CourierBot:
         from src.database.connection import get_db_session
         from src.models.order import CallStatusDB
         from datetime import datetime, timedelta
+        from sqlalchemy import and_
+        
+        user_id = call.from_user.id
         
         try:
             with get_db_session() as session:
-                call_status = session.query(CallStatusDB).filter(CallStatusDB.id == call_status_id).first()
+                # Проверяем, что звонок принадлежит этому пользователю
+                call_status = session.query(CallStatusDB).filter(
+                    and_(
+                        CallStatusDB.id == call_status_id,
+                        CallStatusDB.user_id == user_id
+                    )
+                ).first()
                 if not call_status:
                     self.bot.answer_callback_query(call.id, "❌ Запись о звонке не найдена", show_alert=True)
                     return

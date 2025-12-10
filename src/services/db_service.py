@@ -347,6 +347,8 @@ class DatabaseService:
     
     def _delete_all_data_by_date(self, user_id: int, target_date: date, session: Session) -> Dict[str, int]:
         """Внутренний метод удаления всех данных"""
+        from src.models.order import CallStatusDB
+        
         orders_count = session.query(OrderDB).filter(
             and_(
                 OrderDB.user_id == user_id,
@@ -368,11 +370,20 @@ class DatabaseService:
             )
         ).delete()
         
+        # Удаляем также записи о звонках для этого пользователя и даты
+        calls_count = session.query(CallStatusDB).filter(
+            and_(
+                CallStatusDB.user_id == user_id,
+                CallStatusDB.call_date == target_date
+            )
+        ).delete()
+        
         session.commit()
         
         return {
             'orders': orders_count,
             'locations': locations_count,
-            'routes': routes_count
+            'routes': routes_count,
+            'calls': calls_count
         }
 
