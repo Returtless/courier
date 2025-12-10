@@ -1,4 +1,5 @@
 import telebot
+import logging
 from typing import Dict, List
 from datetime import datetime, time, timedelta, date
 from src.models.order import Order
@@ -8,8 +9,11 @@ from src.services.maps_service import MapsService
 from src.services.route_optimizer import RouteOptimizer
 from src.services.traffic_monitor import TrafficMonitor
 from src.services.db_service import DatabaseService
+from src.services.call_notifier import CallNotifier, get_local_now
 from src.database.connection import Base, engine
 # from src.services.llm_service import LLMService  # Пока отключено
+
+logger = logging.getLogger(__name__)
 
 
 class CourierBot:
@@ -18,32 +22,43 @@ class CourierBot:
         self.llm_service = llm_service
         self.traffic_monitor = TrafficMonitor(MapsService())
         self.db_service = DatabaseService()
+        self.call_notifier = CallNotifier(bot, self)
         self.setup_traffic_callbacks()
         self.user_states = {}  # user_id -> state data (для временных состояний)
-        # Инициализация БД (создание таблиц)
-        # Модели уже должны быть импортированы выше
-        try:
-            Base.metadata.create_all(bind=engine)
-            print("✅ Таблицы БД проверены/созданы")
-        except Exception as e:
-            print(f"⚠️ Ошибка при создании таблиц: {e}")
-            import traceback
-            traceback.print_exc()
+        # Инициализация БД (создание таблиц) - теперь только в main.py
 
     @staticmethod
     def _main_menu_markup():
         from telebot import types
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.row("➕ Добавить заказы", "📍 Точка старта")
-        markup.row("▶️ Оптимизировать", "🗺️ Маршрут")
-        markup.row("📞 Звонки", "ℹ️ Детали заказа")
-        markup.row("✅ Доставленные", "🗑️ Сбросить день")
-        markup.row("🚦 Мониторинг", "🛑 Стоп мониторинг")
-        markup.row("ℹ️ Статус пробок")
+        markup.row("📦 Заказы", "🗺️ Маршрут")
+        markup.row("🗑️ Сбросить день")
         return markup
 
     @staticmethod
     def _orders_menu_markup():
+        from telebot import types
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("➕ Добавить заказы")
+        markup.row("ℹ️ Детали заказа")
+        markup.row("✅ Доставленные")
+        markup.row("⬅️ Главное меню")
+        return markup
+
+    @staticmethod
+    def _route_menu_markup():
+        from telebot import types
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("📋 Показать маршрут")
+        markup.row("📍 Точка старта")
+        markup.row("▶️ Оптимизировать")
+        markup.row("📞 Звонки")
+        markup.row("🚦 Мониторинг", "🛑 Стоп мониторинг")
+        markup.row("⬅️ Главное меню")
+        return markup
+
+    @staticmethod
+    def _add_orders_menu_markup():
         from telebot import types
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
         markup.row("✅ Готово")
@@ -135,7 +150,7 @@ class CourierBot:
                     try:
                         self.send_traffic_alert(user_id, changes, total_time)
                     except Exception as e:
-                        print(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
+                        logger.warning(f"Ошибка отправки уведомления пользователю {user_id}: {e}", exc_info=True)
 
         self.traffic_monitor.add_callback(traffic_change_callback)
 
@@ -177,7 +192,7 @@ class CourierBot:
             "Можно вставить сразу несколько строк одним сообщением — все корректные добавятся.\n"
             "Когда закончите, нажмите кнопку <b>✅ Готово</b>"
         )
-        self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=self._orders_menu_markup())
+        self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=self._add_orders_menu_markup())
 
     def handle_set_start(self, message):
         """Handle /set_start command"""
@@ -235,43 +250,39 @@ class CourierBot:
             user_id = message.from_user.id
             today = date.today()
             
-            print(f"[DEBUG] Начало оптимизации для user_id={user_id}")
+            logger.debug(f"Начало оптимизации для user_id={user_id}")
             
             # Загружаем заказы из БД
             try:
                 orders_data = self.db_service.get_today_orders(user_id)
-                print(f"[DEBUG] Загружено заказов: {len(orders_data) if orders_data else 0}")
+                logger.debug(f"Загружено заказов: {len(orders_data) if orders_data else 0}")
             except Exception as e:
-                print(f"[ERROR] Ошибка загрузки заказов: {e}")
-                import traceback
-                traceback.print_exc()
-                self.bot.reply_to(message, f"❌ Ошибка загрузки заказов: {str(e)}", reply_markup=self._main_menu_markup())
+                logger.error(f"Ошибка загрузки заказов: {e}", exc_info=True)
+                self.bot.reply_to(message, f"❌ Ошибка загрузки заказов: {str(e)}", reply_markup=self._route_menu_markup())
                 return
             
             if not orders_data:
-                self.bot.reply_to(message, "❌ Нет добавленных заказов. Добавьте их через кнопку ➕ Добавить заказы", reply_markup=self._main_menu_markup())
+                self.bot.reply_to(message, "❌ Нет добавленных заказов. Добавьте их через кнопку ➕ Добавить заказы", reply_markup=self._orders_menu_markup())
                 return
 
             # Фильтруем доставленные заказы
             active_orders_data = [od for od in orders_data if od.get('status', 'pending') != 'delivered']
             
             if not active_orders_data:
-                self.bot.reply_to(message, "❌ Нет активных заказов для оптимизации. Все заказы доставлены.", reply_markup=self._main_menu_markup())
+                self.bot.reply_to(message, "❌ Нет активных заказов для оптимизации. Все заказы доставлены.", reply_markup=self._orders_menu_markup())
                 return
 
             # Загружаем точку старта из БД
             try:
                 start_location_data = self.db_service.get_start_location(user_id, today)
-                print(f"[DEBUG] Данные точки старта: {start_location_data}")
+                logger.debug(f"Данные точки старта: {start_location_data}")
             except Exception as e:
-                print(f"[ERROR] Ошибка загрузки точки старта: {e}")
-                import traceback
-                traceback.print_exc()
-                self.bot.reply_to(message, f"❌ Ошибка загрузки точки старта: {str(e)}", reply_markup=self._main_menu_markup())
+                logger.error(f"Ошибка загрузки точки старта: {e}", exc_info=True)
+                self.bot.reply_to(message, f"❌ Ошибка загрузки точки старта: {str(e)}", reply_markup=self._route_menu_markup())
                 return
             
             if not start_location_data:
-                self.bot.reply_to(message, "❌ Не установлена точка старта. Используйте кнопку 📍 Точка старта", reply_markup=self._main_menu_markup())
+                self.bot.reply_to(message, "❌ Не установлена точка старта. Используйте кнопку 📍 Точка старта", reply_markup=self._route_menu_markup())
                 return
             
             start_address = start_location_data.get('address')
@@ -281,7 +292,7 @@ class CourierBot:
             location_type = start_location_data.get('location_type')
             
             if not start_time_str:
-                self.bot.reply_to(message, "❌ Не установлено время старта. Используйте кнопку 📍 Точка старта", reply_markup=self._main_menu_markup())
+                self.bot.reply_to(message, "❌ Не установлено время старта. Используйте кнопку 📍 Точка старта", reply_markup=self._route_menu_markup())
                 return
 
             # Convert data back to Order objects (только активные заказы)
@@ -306,20 +317,18 @@ class CourierBot:
                                 order_dict['delivery_time_end'] = None
                     orders.append(Order(**order_dict))
                 except Exception as e:
-                    print(f"[ERROR] Ошибка создания Order из данных: {e}, данные: {order_data}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.error(f"Ошибка создания Order из данных: {e}, данные: {order_data}", exc_info=True)
                     continue
             
             if not orders:
-                self.bot.reply_to(message, "❌ Не удалось обработать заказы. Проверьте данные.", reply_markup=self._main_menu_markup())
+                self.bot.reply_to(message, "❌ Не удалось обработать заказы. Проверьте данные.", reply_markup=self._route_menu_markup())
                 return
             
             try:
                 start_datetime = datetime.fromisoformat(start_time_str) if isinstance(start_time_str, str) else start_time_str
             except Exception as e:
-                print(f"[ERROR] Ошибка парсинга времени старта: {e}, start_time_str: {start_time_str}")
-                self.bot.reply_to(message, f"❌ Ошибка обработки времени старта: {str(e)}", reply_markup=self._main_menu_markup())
+                logger.error(f"Ошибка парсинга времени старта: {e}, start_time_str: {start_time_str}", exc_info=True)
+                self.bot.reply_to(message, f"❌ Ошибка обработки времени старта: {str(e)}", reply_markup=self._route_menu_markup())
                 return
             
             # Определяем координаты старта - используем сохраненные координаты из БД
@@ -336,7 +345,7 @@ class CourierBot:
                 start_location = None
                 start_location_coords = None
             
-            print(f"[DEBUG] Начало оптимизации: {len(orders)} заказов, точка старта: {start_location or start_address}")
+            logger.debug(f"Начало оптимизации: {len(orders)} заказов, точка старта: {start_location or start_address}")
 
             # Отправляем начальное сообщение и включаем typing indicator
             status_msg = self.bot.reply_to(message, "🔄 <b>Начинаю оптимизацию маршрута...</b>\n\n⏳ Загружаю данные...", parse_mode='HTML')
@@ -494,15 +503,27 @@ class CourierBot:
                 }
                 route_points_data.append(route_point_data)
 
-                # Формируем информацию для графика звонков
-                call_info = order.order_number or order.customer_name or 'Клиент'
-                if order.customer_name:
-                    call_info = f"{order.customer_name} (№{order.order_number})" if order.order_number else order.customer_name
-                time_info = f"к {point.estimated_arrival.strftime('%H:%M')}"
-                if order.phone:
-                    call_schedule.append(f"📞 {call_time.strftime('%H:%M')} - {call_info} ({order.phone}) - {time_info}")
-                else:
-                    call_schedule.append(f"📞 {call_time.strftime('%H:%M')} - {call_info} (телефон не указан) - {time_info}")
+                # Сохраняем структурированные данные для графика звонков
+                call_data = {
+                    "order_number": order.order_number or str(order.id),
+                    "call_time": call_time.isoformat(),
+                    "arrival_time": point.estimated_arrival.isoformat(),
+                    "phone": order.phone or None,
+                    "customer_name": order.customer_name or None
+                }
+                call_schedule.append(call_data)
+                
+                # Создаем запись о звонке для уведомлений (если есть телефон)
+                if order.phone and order.order_number:
+                    logger.debug(f"Создание записи о звонке: заказ {order.order_number}, время звонка {call_time.strftime('%Y-%m-%d %H:%M:%S')}, прибытие {point.estimated_arrival.strftime('%Y-%m-%d %H:%M:%S')}")
+                    self.call_notifier.create_call_status(
+                        user_id,
+                        order.order_number,
+                        call_time,
+                        order.phone,
+                        order.customer_name,
+                        today
+                    )
 
             # Сохраняем порядок заказов в маршруте
             route_order = [point.order.order_number or str(point.order.id) for point in optimized_route.points]
@@ -521,7 +542,7 @@ class CourierBot:
                     try:
                         self.db_service.update_order(user_id, order.order_number, updates, today)
                     except Exception as e:
-                        print(f"[WARNING] Не удалось обновить координаты заказа {order.order_number}: {e}")
+                        logger.warning(f"Не удалось обновить координаты заказа {order.order_number}: {e}")
             
             # Сохраняем структурированные данные маршрута в БД
             self.db_service.save_route_data(
@@ -565,19 +586,16 @@ class CourierBot:
                     message.chat.id,
                     status_msg.message_id,
                     parse_mode='HTML',
-                    reply_markup=self._main_menu_markup(),
+                    reply_markup=self._route_menu_markup(),
                     disable_web_page_preview=True
                 )
             except Exception:
                 # Если не удалось отредактировать (например, сообщение слишком длинное), отправляем новое
                 self.bot.delete_message(message.chat.id, status_msg.message_id)
-                self.bot.reply_to(message, summary_text, parse_mode='HTML', reply_markup=self._main_menu_markup(), disable_web_page_preview=True)
+                self.bot.reply_to(message, summary_text, parse_mode='HTML', reply_markup=self._route_menu_markup(), disable_web_page_preview=True)
 
         except Exception as e:
-            # Логируем ошибку
-            print(f"[ERROR] Ошибка оптимизации маршрута: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Ошибка оптимизации маршрута: {e}", exc_info=True)
             
             # Обновляем статусное сообщение с ошибкой (если оно было создано)
             try:
@@ -587,20 +605,20 @@ class CourierBot:
                         message.chat.id,
                         status_msg.message_id,
                         parse_mode='HTML',
-                        reply_markup=self._main_menu_markup()
+                        reply_markup=self._route_menu_markup()
                     )
                 else:
                     # Если статусное сообщение не было создано, отправляем новое
-                    self.bot.reply_to(message, f"❌ Ошибка оптимизации: {str(e)}", reply_markup=self._main_menu_markup())
+                    self.bot.reply_to(message, f"❌ Ошибка оптимизации: {str(e)}", reply_markup=self._route_menu_markup())
             except Exception as edit_error:
-                print(f"[ERROR] Ошибка при редактировании сообщения: {edit_error}")
+                logger.warning(f"Ошибка при редактировании сообщения: {edit_error}")
                 # Если не удалось отредактировать, отправляем новое сообщение
                 try:
                     if 'status_msg' in locals():
                         self.bot.delete_message(message.chat.id, status_msg.message_id)
-                except:
-                    pass
-                self.bot.reply_to(message, f"❌ Ошибка оптимизации: {str(e)}", reply_markup=self._main_menu_markup())
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить сообщение: {e}")
+                self.bot.reply_to(message, f"❌ Ошибка оптимизации: {str(e)}", reply_markup=self._route_menu_markup())
 
     def _format_route_summary(self, user_id: int, route_points_data: List[Dict], orders_dict: Dict[str, Dict], 
                               start_location_data: Dict, maps_service) -> List[str]:
@@ -629,7 +647,7 @@ class CourierBot:
             try:
                 order = Order(**order_data)
             except Exception as e:
-                print(f"[ERROR] Ошибка создания Order из данных: {e}")
+                logger.error(f"Ошибка создания Order из данных: {e}", exc_info=True)
                 continue
             
             # Парсим время
@@ -637,7 +655,7 @@ class CourierBot:
                 estimated_arrival = datetime.fromisoformat(point_data['estimated_arrival'])
                 call_time = datetime.fromisoformat(point_data['call_time'])
             except Exception as e:
-                print(f"[ERROR] Ошибка парсинга времени: {e}")
+                logger.error(f"Ошибка парсинга времени: {e}", exc_info=True)
                 continue
             
             # Определяем заголовок заказа
@@ -691,8 +709,26 @@ class CourierBot:
             if delivery_details:
                 order_info.append(" | ".join(delivery_details))
             
+            # Проверяем статус звонка
+            call_status_text = f"📞 Звонок: {call_time.strftime('%H:%M')}"
+            from src.database.connection import get_db_session
+            from src.models.order import CallStatusDB
+            try:
+                with get_db_session() as session:
+                    call_status = session.query(CallStatusDB).filter(
+                        CallStatusDB.order_number == order.order_number,
+                        CallStatusDB.call_date == estimated_arrival.date()
+                    ).first()
+                    if call_status:
+                        if call_status.status == "failed":
+                            call_status_text = "🔴 НЕДОЗВОН"
+                        elif call_status.status == "confirmed":
+                            call_status_text = f"✅ Звонок: {call_time.strftime('%H:%M')}"
+            except Exception as e:
+                logger.debug(f"Ошибка получения статуса звонка: {e}")
+            
             # Время звонка и маршрут (компактно)
-            route_info = [f"📞 Звонок: {call_time.strftime('%H:%M')}"]
+            route_info = [call_status_text]
             route_info.append(f"📏 {point_data.get('distance_from_previous', 0):.1f} км")
             route_info.append(f"⏱️ {point_data.get('time_from_previous', 0):.0f} мин")
             order_info.append(" | ".join(route_info))
@@ -739,7 +775,7 @@ class CourierBot:
         # Загружаем из БД
         route_data = self.db_service.get_route_data(user_id, today)
         if not route_data:
-            self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Используйте /optimize_route", reply_markup=self._main_menu_markup())
+            self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Используйте /optimize_route", reply_markup=self._route_menu_markup())
             return
         
         route_points_data = route_data.get('route_points_data', [])
@@ -749,16 +785,23 @@ class CourierBot:
         if not route_points_data:
             old_route_summary = route_data.get('route_summary', [])
             if old_route_summary and isinstance(old_route_summary[0], str):
-                # Старый формат - просто отображаем как есть
-                chunk_size = 3
-                for i in range(0, len(old_route_summary), chunk_size):
-                    chunk = old_route_summary[i:i + chunk_size]
-                    text = f"<b>Маршрут (заказы {i+1}-{min(i+chunk_size, len(old_route_summary))}):</b>\n\n" + "\n\n".join(chunk)
-                    self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=self._main_menu_markup(), disable_web_page_preview=True)
+                # Старый формат - объединяем все в одно сообщение
+                text = "<b>🗺️ Маршрут доставки</b>\n\n" + "\n\n".join(old_route_summary)
+                # Если сообщение слишком длинное, разбиваем на части
+                if len(text) > 4096:
+                    # Разбиваем на части по 4000 символов
+                    for i in range(0, len(text), 4000):
+                        chunk = text[i:i + 4000]
+                        if i == 0:
+                            self.bot.reply_to(message, chunk, parse_mode='HTML', reply_markup=self._route_menu_markup(), disable_web_page_preview=True)
+                        else:
+                            self.bot.send_message(message.chat.id, chunk, parse_mode='HTML', disable_web_page_preview=True)
+                else:
+                    self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=self._route_menu_markup(), disable_web_page_preview=True)
                 return
         
         if not route_points_data or not route_order:
-            self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Используйте /optimize_route", reply_markup=self._main_menu_markup())
+            self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Используйте /optimize_route", reply_markup=self._route_menu_markup())
             return
         
         # Загружаем заказы из БД
@@ -773,35 +816,142 @@ class CourierBot:
         route_summary = self._format_route_summary(user_id, route_points_data, orders_dict, start_location_data, maps_service)
         
         if not route_summary:
-            self.bot.reply_to(message, "❌ Не удалось сформировать маршрут", reply_markup=self._main_menu_markup())
+            self.bot.reply_to(message, "❌ Не удалось сформировать маршрут", reply_markup=self._route_menu_markup())
             return
 
-        # Send in chunks
-        chunk_size = 3
-        for i in range(0, len(route_summary), chunk_size):
-            chunk = route_summary[i:i + chunk_size]
-            text = f"<b>Маршрут (заказы {i+1}-{min(i+chunk_size, len(route_summary))}):</b>\n\n" + "\n\n".join(chunk)
-            self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=self._main_menu_markup(), disable_web_page_preview=True)
+        # Объединяем весь маршрут в одно сообщение
+        text = "<b>🗺️ Маршрут доставки</b>\n\n" + "\n\n".join(route_summary)
+        
+        # Если сообщение слишком длинное (лимит Telegram - 4096 символов), разбиваем на части
+        if len(text) > 4096:
+            # Разбиваем на части по 4000 символов, стараясь не разрывать заказы
+            parts = []
+            current_part = "<b>🗺️ Маршрут доставки</b>\n\n"
+            
+            for order_text in route_summary:
+                # Проверяем, поместится ли следующий заказ
+                test_text = current_part + order_text + "\n\n"
+                if len(test_text) > 4000:
+                    # Сохраняем текущую часть и начинаем новую
+                    parts.append(current_part.rstrip())
+                    current_part = order_text + "\n\n"
+                else:
+                    current_part = test_text
+            
+            # Добавляем последнюю часть
+            if current_part.strip():
+                parts.append(current_part.rstrip())
+            
+            # Отправляем части
+            for i, part in enumerate(parts):
+                if i == 0:
+                    self.bot.reply_to(message, part, parse_mode='HTML', reply_markup=self._route_menu_markup(), disable_web_page_preview=True)
+                else:
+                    self.bot.send_message(message.chat.id, part, parse_mode='HTML', disable_web_page_preview=True)
+        else:
+            # Отправляем все одним сообщением
+            self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=self._route_menu_markup(), disable_web_page_preview=True)
+
+    def _format_call_schedule(self, call_schedule_data: List[Dict]) -> List[str]:
+        """Форматирует график звонков из структурированных данных"""
+        formatted = []
+        for call_data in call_schedule_data:
+            try:
+                # Проверяем формат (старый или новый)
+                if isinstance(call_data, str):
+                    # Старый формат - просто возвращаем как есть
+                    formatted.append(call_data)
+                    continue
+                
+                # Новый формат - структурированные данные
+                call_time = datetime.fromisoformat(call_data.get('call_time'))
+                arrival_time = datetime.fromisoformat(call_data.get('arrival_time'))
+                
+                order_number = call_data.get('order_number')
+                customer_name = call_data.get('customer_name')
+                phone = call_data.get('phone')
+                
+                # Формируем информацию о клиенте
+                call_info = order_number or customer_name or 'Клиент'
+                if customer_name:
+                    call_info = f"{customer_name} (№{order_number})" if order_number else customer_name
+                
+                time_info = f"к {arrival_time.strftime('%H:%M')}"
+                
+                if phone:
+                    formatted.append(f"📞 {call_time.strftime('%H:%M')} - {call_info} ({phone}) - {time_info}")
+                else:
+                    formatted.append(f"📞 {call_time.strftime('%H:%M')} - {call_info} (телефон не указан) - {time_info}")
+            except Exception as e:
+                logger.error(f"Ошибка форматирования звонка: {e}", exc_info=True)
+                continue
+        
+        return formatted
 
     def handle_calls(self, message):
-        """Handle /calls command"""
+        """Handle /calls command - формирует график звонков динамически из актуальных данных"""
         user_id = message.from_user.id
         today = date.today()
         
-        # Загружаем из БД
+        # Загружаем маршрут из БД
         route_data = self.db_service.get_route_data(user_id, today)
-        if route_data:
-            call_schedule = route_data.get('call_schedule', [])
-        else:
-            # Fallback на state для обратной совместимости
-            call_schedule = self.get_user_state(user_id).get("call_schedule", [])
-
+        if not route_data:
+            self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Оптимизируйте маршрут сначала", reply_markup=self._route_menu_markup())
+            return
+        
+        route_points_data = route_data.get('route_points_data', [])
+        route_order = route_data.get('route_order', [])
+        
+        if not route_points_data or not route_order:
+            self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Оптимизируйте маршрут сначала", reply_markup=self._route_menu_markup())
+            return
+        
+        # Загружаем актуальные данные заказов из БД
+        orders_data = self.db_service.get_today_orders(user_id)
+        orders_dict = {od.get('order_number'): od for od in orders_data if od.get('order_number')}
+        
+        # Формируем call_schedule динамически из route_points_data и актуальных данных заказов
+        call_schedule = []
+        for idx, order_num in enumerate(route_order):
+            if idx >= len(route_points_data):
+                continue
+            
+            order_data = orders_dict.get(order_num)
+            if not order_data:
+                continue
+            
+            point_data = route_points_data[idx]
+            
+            try:
+                call_time_dt = datetime.fromisoformat(point_data.get('call_time'))
+                arrival_time_dt = datetime.fromisoformat(point_data.get('estimated_arrival'))
+            except Exception as e:
+                logger.warning(f"Ошибка парсинга времени звонка/доставки: {e}")
+                continue
+            
+            # Используем актуальные данные из БД
+            call_data = {
+                "order_number": order_num,
+                "call_time": call_time_dt.isoformat(),
+                "arrival_time": arrival_time_dt.isoformat(),
+                "phone": order_data.get('phone') or None,
+                "customer_name": order_data.get('customer_name') or None
+            }
+            call_schedule.append(call_data)
+        
         if not call_schedule:
-            self.bot.reply_to(message, "❌ График звонков не сформирован. Оптимизируйте маршрут сначала", reply_markup=self._main_menu_markup())
+            self.bot.reply_to(message, "❌ Не удалось сформировать график звонков", reply_markup=self._route_menu_markup())
             return
 
-        text = "<b>📞 График звонков клиентам:</b>\n\n" + "\n".join(call_schedule)
-        self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=self._main_menu_markup())
+        # Форматируем график звонков
+        formatted_schedule = self._format_call_schedule(call_schedule)
+        
+        if not formatted_schedule:
+            self.bot.reply_to(message, "❌ Не удалось сформировать график звонков", reply_markup=self._route_menu_markup())
+            return
+
+        text = "<b>📞 График звонков клиентам:</b>\n\n" + "\n".join(formatted_schedule)
+        self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=self._route_menu_markup())
 
     def handle_text_message(self, message):
         """Handle text messages based on user state"""
@@ -812,8 +962,29 @@ class CourierBot:
         # Глобальные кнопки без состояния
         if not current_state:
             text = message.text.strip()
+            # Главное меню
+            if text == "📦 Заказы":
+                return self.bot.reply_to(message, "📦 <b>Заказы</b>", parse_mode='HTML', reply_markup=self._orders_menu_markup())
+            if text == "🗺️ Маршрут":
+                return self.bot.reply_to(message, "🗺️ <b>Маршрут</b>", parse_mode='HTML', reply_markup=self._route_menu_markup())
+            # Меню заказов
             if text == "➕ Добавить заказы":
                 return self.handle_add_orders(message)
+            if text == "ℹ️ Детали заказа":
+                try:
+                    return self.handle_order_details_start(message)
+                except Exception as e:
+                    logger.error(f"Ошибка в handle_order_details_start: {e}", exc_info=True)
+                    self.bot.reply_to(message, f"❌ Ошибка: {str(e)}", reply_markup=self._orders_menu_markup())
+                    return
+            if text == "✅ Доставленные":
+                try:
+                    return self.handle_delivered_orders(message)
+                except Exception as e:
+                    logger.error(f"Ошибка в handle_delivered_orders: {e}", exc_info=True)
+                    self.bot.reply_to(message, f"❌ Ошибка: {str(e)}", reply_markup=self._orders_menu_markup())
+                    return
+            # Меню маршрута
             if text == "📍 Точка старта":
                 return self.handle_set_start(message)
             if text == "📍 Геопозиция":
@@ -824,43 +995,24 @@ class CourierBot:
                 return self.handle_set_start_time_change(message)
             if text == "▶️ Оптимизировать":
                 return self.handle_optimize_route(message)
-            if text == "🗺️ Маршрут":
+            if text == "📋 Показать маршрут":
                 return self.handle_view_route(message)
             if text == "📞 Звонки":
                 try:
                     return self.handle_calls(message)
                 except Exception as e:
-                    print(f"Ошибка в handle_calls: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    self.bot.reply_to(message, f"❌ Ошибка: {str(e)}", reply_markup=self._main_menu_markup())
+                    logger.error(f"Ошибка в handle_calls: {e}", exc_info=True)
+                    self.bot.reply_to(message, f"❌ Ошибка: {str(e)}", reply_markup=self._route_menu_markup())
                     return
-            if text == "ℹ️ Детали заказа":
-                try:
-                    return self.handle_order_details_start(message)
-                except Exception as e:
-                    print(f"Ошибка в handle_order_details_start: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    self.bot.reply_to(message, f"❌ Ошибка: {str(e)}", reply_markup=self._main_menu_markup())
-                    return
-            if text == "✅ Доставленные":
-                try:
-                    return self.handle_delivered_orders(message)
-                except Exception as e:
-                    print(f"Ошибка в handle_delivered_orders: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    self.bot.reply_to(message, f"❌ Ошибка: {str(e)}", reply_markup=self._main_menu_markup())
-                    return
-            if text == "🗑️ Сбросить день":
-                return self.handle_reset_day(message)
             if text == "🚦 Мониторинг":
                 return self.handle_monitor(message)
             if text == "🛑 Стоп мониторинг":
                 return self.handle_stop_monitor(message)
             if text == "ℹ️ Статус пробок":
                 return self.handle_traffic_status(message)
+            # Общие действия
+            if text == "🗑️ Сбросить день":
+                return self.handle_reset_day(message)
             if text == "✍️ Ввести другой адрес":
                 user_id = message.from_user.id
                 self.update_user_state(user_id, 'state', 'waiting_for_start_address')
@@ -956,6 +1108,32 @@ class CourierBot:
             self.process_order_apartment(message, state_data)
         elif current_state == 'waiting_for_order_delivery_time':
             self.process_order_delivery_time(message, state_data)
+        elif current_state == 'waiting_for_call_comment':
+            self.process_call_comment(message, state_data)
+        elif current_state == 'searching_order_by_number':
+            self.process_search_order_by_number(message, state_data)
+        else:
+            # Если пользователь не в состоянии ожидания, проверяем, не ввел ли он номер заказа
+            text = message.text.strip()
+            # Проверяем, является ли текст числом (номером заказа)
+            # Игнорируем команды и кнопки меню
+            if (text.isdigit() and len(text) >= 4 and 
+                not text.startswith('/') and 
+                text not in ["⬅️ Главное меню", "✅ Готово", "/done", "/skip", "⏭️ Пропустить комментарий"]):
+                # Проверяем, существует ли заказ с таким номером
+                user_id = message.from_user.id
+                try:
+                    orders_data = self.db_service.get_today_orders(user_id)
+                    order_found = False
+                    for od in orders_data:
+                        if od.get('order_number') == text:
+                            order_found = True
+                            # Открываем детали заказа
+                            self.show_order_details(user_id, text, message.chat.id)
+                            break
+                    # Если заказ не найден, просто игнорируем (чтобы не мешать другим командам)
+                except Exception as e:
+                    logger.debug(f"Ошибка при поиске заказа по номеру (не критично): {e}")
 
     def process_order(self, message, state_data):
         """Process order input"""
@@ -986,12 +1164,14 @@ class CourierBot:
                     if isinstance(order_dict.get('delivery_time_start'), str):
                         try:
                             order_dict['delivery_time_start'] = datetime.fromisoformat(order_dict['delivery_time_start']).time()
-                        except:
+                        except Exception as e:
+                            logger.debug(f"Ошибка парсинга delivery_time_start: {e}")
                             order_dict['delivery_time_start'] = None
                     if isinstance(order_dict.get('delivery_time_end'), str):
                         try:
                             order_dict['delivery_time_end'] = datetime.fromisoformat(order_dict['delivery_time_end']).time()
-                        except:
+                        except Exception as e:
+                            logger.debug(f"Ошибка парсинга delivery_time_end: {e}")
                             order_dict['delivery_time_end'] = None
                     
                     # Убеждаемся, что все поля имеют правильные типы
@@ -1003,8 +1183,7 @@ class CourierBot:
                 except Exception as e:
                     error_msg = f"Заказ {i+1}: {str(e)}"
                     errors.append(error_msg)
-                    print(f"Ошибка сохранения заказа {i+1}: {e}")
-                    print(f"Данные заказа: {order_data}")
+                    logger.error(f"Ошибка сохранения заказа {i+1}: {e}, данные: {order_data}", exc_info=True)
                     import traceback
                     traceback.print_exc()
             
@@ -1015,12 +1194,11 @@ class CourierBot:
             response_text = f"✅ Сохранено {saved_count} заказов за сегодня ({today.strftime('%d.%m.%Y')})"
             if errors:
                 response_text += f"\n\n⚠️ Ошибки при сохранении:\n" + "\n".join(errors[:5])
-            response_text += "\n\nТеперь укажите точку старта"
             
             self.bot.reply_to(
                 message,
                 response_text,
-                reply_markup=self._main_menu_markup()
+                reply_markup=self._orders_menu_markup()
             )
             return
 
@@ -1233,9 +1411,7 @@ class CourierBot:
                 self.show_order_details(user_id, order_number, call.message.chat.id)
                 self.bot.answer_callback_query(call.id)
             except Exception as e:
-                print(f"Ошибка в show_order_details: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"Ошибка в show_order_details: {e}", exc_info=True)
                 self.bot.answer_callback_query(call.id, f"❌ Ошибка: {str(e)}", show_alert=True)
                 self.bot.send_message(call.message.chat.id, f"❌ Ошибка при загрузке заказа: {str(e)}", reply_markup=self._main_menu_markup())
         elif callback_data == "view_delivered_orders":
@@ -1273,6 +1449,28 @@ class CourierBot:
             )
             user_id = call.from_user.id
             self.update_user_state(user_id, 'state', 'waiting_for_start_address')
+        elif callback_data.startswith("call_confirm_"):
+            # Подтверждение звонка
+            call_status_id = int(callback_data.replace("call_confirm_", ""))
+            self.handle_call_confirm(call, call_status_id)
+        elif callback_data.startswith("call_reject_"):
+            # Отклонение звонка
+            call_status_id = int(callback_data.replace("call_reject_", ""))
+            self.handle_call_reject(call, call_status_id)
+        elif callback_data == "search_order_by_number":
+            # Поиск заказа по номеру
+            self.bot.answer_callback_query(call.id, "🔍 Введите номер заказа")
+            from telebot import types
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+            markup.row("⬅️ Главное меню")
+            self.bot.send_message(
+                call.message.chat.id,
+                "🔍 <b>Поиск заказа</b>\n\nВведите номер заказа для просмотра деталей:",
+                parse_mode='HTML',
+                reply_markup=markup
+            )
+            user_id = call.from_user.id
+            self.update_user_state(user_id, 'state', 'searching_order_by_number')
 
     def show_order_details(self, user_id: int, order_number: str, chat_id: int):
         """Показать детали заказа с кнопкой Доставлен"""
@@ -1282,9 +1480,7 @@ class CourierBot:
         try:
             orders_data = self.db_service.get_today_orders(user_id)
         except Exception as e:
-            print(f"Ошибка загрузки заказов из БД: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Ошибка загрузки заказов из БД: {e}", exc_info=True)
             self.bot.send_message(chat_id, f"❌ Ошибка загрузки данных: {str(e)}", reply_markup=self._main_menu_markup())
             return
         
@@ -1328,7 +1524,7 @@ class CourierBot:
                     else:
                         order_dict['delivery_time_end'] = None
         except Exception as e:
-            print(f"Ошибка преобразования времени: {e}")
+            logger.warning(f"Ошибка преобразования времени: {e}")
             order_dict['delivery_time_start'] = None
             order_dict['delivery_time_end'] = None
         
@@ -1336,8 +1532,7 @@ class CourierBot:
         try:
             order = Order(**order_dict)
         except Exception as e:
-            print(f"Ошибка создания Order: {e}")
-            print(f"Данные: {order_dict}")
+            logger.error(f"Ошибка создания Order: {e}, данные: {order_dict}", exc_info=True)
             import traceback
             traceback.print_exc()
             self.bot.send_message(chat_id, f"❌ Ошибка обработки данных заказа: {str(e)}", reply_markup=self._main_menu_markup())
@@ -1404,9 +1599,7 @@ class CourierBot:
             self.bot.send_message(chat_id, "\n".join(details), parse_mode='HTML', reply_markup=reply_markup)
             self.bot.send_message(chat_id, "Нажмите кнопку ниже, чтобы пометить заказ как доставленный:", reply_markup=inline_markup)
         except Exception as e:
-            print(f"Ошибка отправки сообщения с деталями заказа: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Ошибка отправки сообщения с деталями заказа: {e}", exc_info=True)
             self.bot.send_message(chat_id, f"❌ Ошибка отображения деталей заказа: {str(e)}", reply_markup=self._main_menu_markup())
 
     def mark_order_delivered(self, user_id: int, order_number: str, chat_id: int):
@@ -1562,9 +1755,7 @@ class CourierBot:
             self.bot.send_message(message.chat.id, "Подтвердите или измените адрес:", reply_markup=inline_markup)
             
         except Exception as e:
-            print(f"Ошибка геокодирования адреса точки старта: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Ошибка геокодирования адреса точки старта: {e}", exc_info=True)
             
             from telebot import types
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -1631,9 +1822,7 @@ class CourierBot:
             self.bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=markup)
             
         except Exception as e:
-            print(f"Ошибка сохранения адреса точки старта: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Ошибка сохранения адреса точки старта: {e}", exc_info=True)
             self.bot.answer_callback_query(call.id, f"❌ Ошибка: {str(e)}")
             self.bot.send_message(call.message.chat.id, f"❌ Ошибка сохранения: {str(e)}", reply_markup=self._main_menu_markup())
 
@@ -1764,7 +1953,7 @@ class CourierBot:
         self.show_delivered_orders(user_id, message.chat.id)
 
     def handle_order_details_start(self, message):
-        """Начало просмотра деталей заказа - показ списка заказов"""
+        """Начало просмотра деталей заказа - компактный список в одном сообщении"""
         user_id = message.from_user.id
         today = date.today()
         
@@ -1775,7 +1964,7 @@ class CourierBot:
             self.bot.reply_to(
                 message,
                 "❌ Нет добавленных заказов",
-                reply_markup=self._main_menu_markup()
+                reply_markup=self._orders_menu_markup()
             )
             return
         
@@ -1786,39 +1975,130 @@ class CourierBot:
             self.bot.reply_to(
                 message,
                 "✅ Все заказы доставлены!",
-                reply_markup=self._main_menu_markup()
+                reply_markup=self._orders_menu_markup()
             )
             return
         
-        # Формируем список заказов
-        text = "ℹ️ <b>Список заказов</b>\n\n"
-        text += "Выберите заказ для просмотра деталей:\n\n"
-        
-        # Создаем inline клавиатуру с номерами заказов
+        # Формируем только кнопки с информацией
         from telebot import types
-        inline_markup = types.InlineKeyboardMarkup()
         
-        for i, order_data in enumerate(active_orders):
+        # Сортируем по номеру заказа для удобства
+        active_orders_sorted = sorted(active_orders, key=lambda x: x.get('order_number', ''))
+        
+        inline_markup = types.InlineKeyboardMarkup(row_width=1)
+        
+        for order_data in active_orders_sorted:
             order_number = order_data.get('order_number', 'Без номера')
             address = order_data.get('address', 'Адрес не указан')
-            time_window = order_data.get('delivery_time_window', 'Время не указано')
+            time_window = order_data.get('delivery_time_window', '')
+            customer_name = order_data.get('customer_name', '')
+            phone = order_data.get('phone', '')
+            comment = order_data.get('comment', '')
+            entrance = order_data.get('entrance_number', '')
+            apartment = order_data.get('apartment_number', '')
             
-            # Ограничиваем длину адреса для читаемости
-            address_short = address[:40] + "..." if len(address) > 40 else address
+            # Формируем максимально информативный текст кнопки с индикаторами заполненности
+            # Формат: "№3259394 🕐13:00-16:00 👤Иван 📞+7... 📍ул..."
             
-            text += f"{i+1}. <b>№{order_number}</b>\n"
-            text += f"   📍 {address_short}\n"
-            text += f"   🕐 {time_window}\n\n"
+            button_parts = [f"№{order_number}"]
             
-            # Добавляем inline кнопку для каждого заказа
+            # Время доставки
+            if time_window:
+                time_short = time_window.replace(" - ", "-")
+                button_parts.append(f"🕐{time_short}")
+            else:
+                button_parts.append("🕐❌")
+            
+            # Имя клиента
+            if customer_name:
+                name_short = customer_name[:8] if len(customer_name) > 8 else customer_name
+                button_parts.append(f"👤{name_short}")
+            else:
+                button_parts.append("👤❌")
+            
+            # Телефон
+            if phone:
+                phone_short = phone[:10] if len(phone) > 10 else phone
+                button_parts.append(f"📞{phone_short}")
+            else:
+                button_parts.append("📞❌")
+            
+            # Адрес (короткий)
+            short_address = address
+            address_parts = address.split(',')
+            if len(address_parts) >= 2:
+                short_address = ','.join(address_parts[-2:]).strip()
+            elif len(address_parts) == 1:
+                short_address = address_parts[0].strip()
+            
+            # Подъезд и квартира
+            location_parts = []
+            if entrance:
+                location_parts.append(f"🏢{entrance}")
+            if apartment:
+                location_parts.append(f"🚪{apartment}")
+            
+            # Комментарий (только если короткий)
+            if comment and len(comment) <= 8:
+                button_parts.append(f"💬{comment}")
+            
+            # Собираем все части
+            button_text = " ".join(button_parts)
+            
+            # Добавляем адрес и подъезд/квартиру в конец, если есть место
+            if location_parts:
+                location_str = " ".join(location_parts)
+                if len(button_text) + len(location_str) + 1 <= 64:
+                    button_text += f" {location_str}"
+            
+            # Если адрес короткий, добавляем его
+            if len(short_address) <= 15 and len(button_text) + len(short_address) + 2 <= 64:
+                button_text += f" 📍{short_address[:15]}"
+            
+            # Обрезаем до максимума в 64 символа (лимит Telegram)
+            if len(button_text) > 64:
+                # Пробуем сократить адрес
+                current_len = len(" ".join(button_parts))
+                if location_parts:
+                    location_str = " ".join(location_parts)
+                    if current_len + len(location_str) + 1 <= 64:
+                        button_text = " ".join(button_parts) + " " + location_str
+                    else:
+                        button_text = " ".join(button_parts)
+                else:
+                    button_text = " ".join(button_parts)
+                
+                # Если все еще длинно, убираем адрес и оставляем только основные поля
+                if len(button_text) > 64:
+                    # Оставляем только номер, время, имя, телефон
+                    essential_parts = [f"№{order_number}"]
+                    if time_window:
+                        time_short = time_window.replace(" - ", "-")
+                        essential_parts.append(f"🕐{time_short}")
+                    if customer_name:
+                        name_short = customer_name[:6] if len(customer_name) > 6 else customer_name
+                        essential_parts.append(f"👤{name_short}")
+                    if phone:
+                        phone_short = phone[:8] if len(phone) > 8 else phone
+                        essential_parts.append(f"📞{phone_short}")
+                    button_text = " ".join(essential_parts)
+            
             inline_markup.add(
                 types.InlineKeyboardButton(
-                    f"№{order_number}",
+                    button_text,
                     callback_data=f"order_details_{order_number}"
                 )
             )
         
-        # Добавляем кнопку для просмотра доставленных заказов
+        # Добавляем кнопку для поиска по номеру
+        inline_markup.add(
+            types.InlineKeyboardButton(
+                "🔍 Найти по номеру",
+                callback_data="search_order_by_number"
+            )
+        )
+        
+        # Добавляем кнопку для просмотра доставленных заказов, если они есть
         delivered_count = len([od for od in orders_data if od.get('status', 'pending') == 'delivered'])
         if delivered_count > 0:
             inline_markup.add(
@@ -1828,16 +2108,15 @@ class CourierBot:
                 )
             )
         
-        # Reply клавиатура для возврата
-        reply_markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        reply_markup.row("⬅️ Главное меню")
+        # Отправляем только заголовок и кнопки
+        header_text = f"📋 <b>Заказы</b> ({len(active_orders)} шт.)\n\n💡 <i>Выберите заказ или введите номер в чат</i>"
         
-        self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=reply_markup)
-        # Отправляем отдельное сообщение с inline кнопками
-        self.bot.send_message(
-            user_id,
-            "Нажмите на номер заказа для просмотра деталей:",
-            reply_markup=inline_markup
+        self.bot.reply_to(
+            message,
+            header_text,
+            parse_mode='HTML',
+            reply_markup=inline_markup,
+            disable_web_page_preview=True
         )
 
     def handle_update_order_start(self, message):
@@ -1941,6 +2220,241 @@ class CourierBot:
         # Обновляем ФИО
         self._update_order_field(user_id, order_number, 'customer_name', text, message)
 
+    def process_call_comment(self, message, state_data):
+        """Обработка ввода комментария к звонку"""
+        from src.database.connection import get_db_session
+        from src.models.order import CallStatusDB
+        
+        user_id = message.from_user.id
+        text = message.text.strip()
+        
+        if text == "⬅️ Главное меню" or text == "⏭️ Пропустить комментарий" or text == "/skip":
+            self.update_user_state(user_id, 'state', None)
+            self.update_user_state(user_id, 'pending_call_status_id', None)
+            self.bot.reply_to(message, "✅ Комментарий пропущен", reply_markup=self._main_menu_markup())
+            return
+        
+        call_status_id = state_data.get('pending_call_status_id')
+        if not call_status_id:
+            self.bot.reply_to(message, "❌ Ошибка: не найден ID звонка", reply_markup=self._main_menu_markup())
+            return
+        
+        try:
+            with get_db_session() as session:
+                call_status = session.query(CallStatusDB).filter(CallStatusDB.id == call_status_id).first()
+                if call_status:
+                    call_status.confirmation_comment = text
+                    session.commit()
+                    
+                    self.bot.reply_to(
+                        message,
+                        f"✅ <b>Комментарий сохранен</b>\n\n💬 {text}",
+                        parse_mode='HTML',
+                        reply_markup=self._main_menu_markup()
+                    )
+                else:
+                    self.bot.reply_to(message, "❌ Запись о звонке не найдена", reply_markup=self._main_menu_markup())
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении комментария: {e}", exc_info=True)
+            self.bot.reply_to(message, f"❌ Ошибка: {str(e)}", reply_markup=self._main_menu_markup())
+        
+        self.update_user_state(user_id, 'state', None)
+        self.update_user_state(user_id, 'pending_call_status_id', None)
+    
+    def process_search_order_by_number(self, message, state_data):
+        """Обработка поиска заказа по номеру"""
+        user_id = message.from_user.id
+        text = message.text.strip()
+        
+        if text == "⬅️ Главное меню":
+            self.update_user_state(user_id, 'state', None)
+            self.bot.reply_to(message, "🏠 Возврат в главное меню", reply_markup=self._main_menu_markup())
+            return
+        
+        # Проверяем, является ли текст номером заказа
+        if not text.isdigit():
+            self.bot.reply_to(
+                message,
+                "❌ Номер заказа должен содержать только цифры. Попробуйте еще раз:",
+                reply_markup=self._orders_menu_markup()
+            )
+            return
+        
+        # Ищем заказ
+        try:
+            orders_data = self.db_service.get_today_orders(user_id)
+            order_found = False
+            for od in orders_data:
+                if od.get('order_number') == text:
+                    order_found = True
+                    # Открываем детали заказа
+                    self.show_order_details(user_id, text, message.chat.id)
+                    self.update_user_state(user_id, 'state', None)
+                    break
+            
+            if not order_found:
+                self.bot.reply_to(
+                    message,
+                    f"❌ Заказ №{text} не найден. Попробуйте еще раз или вернитесь в главное меню:",
+                    reply_markup=self._orders_menu_markup()
+                )
+        except Exception as e:
+            logger.error(f"Ошибка при поиске заказа: {e}", exc_info=True)
+            self.bot.reply_to(message, f"❌ Ошибка: {str(e)}", reply_markup=self._orders_menu_markup())
+            self.update_user_state(user_id, 'state', None)
+    
+    def handle_call_confirm(self, call, call_status_id: int):
+        """Обработка подтверждения звонка"""
+        from src.database.connection import get_db_session
+        from src.models.order import CallStatusDB
+        
+        try:
+            with get_db_session() as session:
+                call_status = session.query(CallStatusDB).filter(CallStatusDB.id == call_status_id).first()
+                if not call_status:
+                    self.bot.answer_callback_query(call.id, "❌ Запись о звонке не найдена", show_alert=True)
+                    return
+                
+                # Обновляем статус на confirmed
+                call_status.status = "confirmed"
+                session.commit()
+                
+                # Обновляем сообщение, убирая кнопки
+                customer_info = call_status.customer_name or "Клиент"
+                order_info = f"Заказ №{call_status.order_number}" if call_status.order_number else "Заказ"
+                
+                updated_text = (
+                    f"📞 <b>Время звонка!</b>\n\n"
+                    f"👤 {customer_info}\n"
+                    f"📦 {order_info}\n"
+                    f"📱 {call_status.phone}\n"
+                    f"🕐 Время: {call_status.call_time.strftime('%H:%M')}\n\n"
+                    f"✅ <b>Подтверждено</b>"
+                )
+                
+                try:
+                    self.bot.edit_message_text(
+                        updated_text,
+                        call.message.chat.id,
+                        call.message.message_id,
+                        parse_mode='HTML'
+                    )
+                except Exception as edit_error:
+                    logger.warning(f"Ошибка обновления сообщения: {edit_error}")
+                    # Если не удалось обновить, просто отвечаем на callback
+                
+                # Запрашиваем комментарий
+                self.bot.answer_callback_query(call.id, "✅ Звонок подтвержден")
+                self.update_user_state(call.from_user.id, 'state', 'waiting_for_call_comment')
+                self.update_user_state(call.from_user.id, 'pending_call_status_id', call_status_id)
+                
+                from telebot import types
+                markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+                markup.row("⏭️ Пропустить комментарий")
+                markup.row("⬅️ Главное меню")
+                
+                self.bot.send_message(
+                    call.message.chat.id,
+                    "💬 <b>Введите комментарий к звонку</b> (или нажмите кнопку чтобы пропустить):",
+                    parse_mode='HTML',
+                    reply_markup=markup
+                )
+        except Exception as e:
+            logger.error(f"Ошибка при подтверждении звонка: {e}", exc_info=True)
+            self.bot.answer_callback_query(call.id, f"❌ Ошибка: {str(e)}", show_alert=True)
+    
+    def handle_call_reject(self, call, call_status_id: int):
+        """Обработка отклонения звонка"""
+        from src.database.connection import get_db_session
+        from src.models.order import CallStatusDB
+        from datetime import datetime, timedelta
+        
+        try:
+            with get_db_session() as session:
+                call_status = session.query(CallStatusDB).filter(CallStatusDB.id == call_status_id).first()
+                if not call_status:
+                    self.bot.answer_callback_query(call.id, "❌ Запись о звонке не найдена", show_alert=True)
+                    return
+                
+                # Увеличиваем количество попыток
+                call_status.attempts += 1
+                
+                customer_info = call_status.customer_name or "Клиент"
+                order_info = f"Заказ №{call_status.order_number}" if call_status.order_number else "Заказ"
+                
+                if call_status.attempts >= 3:
+                    # После 3 попыток помечаем как failed
+                    call_status.status = "failed"
+                    call_status.next_attempt_time = None
+                    session.commit()
+                    
+                    # Обновляем сообщение, убирая кнопки
+                    updated_text = (
+                        f"📞 <b>Время звонка!</b>\n\n"
+                        f"👤 {customer_info}\n"
+                        f"📦 {order_info}\n"
+                        f"📱 {call_status.phone}\n"
+                        f"🕐 Время: {call_status.call_time.strftime('%H:%M')}\n\n"
+                        f"❌ <b>Недозвон</b>\nПревышено количество попыток (3)"
+                    )
+                    
+                    try:
+                        self.bot.edit_message_text(
+                            updated_text,
+                            call.message.chat.id,
+                            call.message.message_id,
+                            parse_mode='HTML'
+                        )
+                    except Exception as edit_error:
+                        logger.warning(f"Ошибка обновления сообщения: {edit_error}")
+                    
+                    self.bot.answer_callback_query(call.id, "❌ Превышено количество попыток (3)")
+                    self.bot.send_message(
+                        call.message.chat.id,
+                        f"❌ <b>Недозвон</b>\n\nЗаказ №{call_status.order_number}\nПревышено количество попыток звонка (3)",
+                        parse_mode='HTML',
+                        reply_markup=self._route_menu_markup()
+                    )
+                else:
+                    # Планируем повторную попытку через 2 минуты
+                    now = get_local_now()
+                    if now.tzinfo is not None:
+                        now = now.replace(tzinfo=None)
+                    call_status.status = "rejected"
+                    call_status.next_attempt_time = now + timedelta(minutes=2)
+                    session.commit()
+                    
+                    # Обновляем сообщение, убирая кнопки
+                    updated_text = (
+                        f"📞 <b>Время звонка!</b>\n\n"
+                        f"👤 {customer_info}\n"
+                        f"📦 {order_info}\n"
+                        f"📱 {call_status.phone}\n"
+                        f"🕐 Время: {call_status.call_time.strftime('%H:%M')}\n\n"
+                        f"❌ <b>Отклонено</b>\nПовтор через 2 минуты (попытка {call_status.attempts}/3)"
+                    )
+                    
+                    try:
+                        self.bot.edit_message_text(
+                            updated_text,
+                            call.message.chat.id,
+                            call.message.message_id,
+                            parse_mode='HTML'
+                        )
+                    except Exception as edit_error:
+                        logger.warning(f"Ошибка обновления сообщения: {edit_error}")
+                    
+                    self.bot.answer_callback_query(call.id, f"❌ Отклонено. Повтор через 2 минуты (попытка {call_status.attempts}/3)")
+                    self.bot.send_message(
+                        call.message.chat.id,
+                        f"⏰ <b>Повторный звонок запланирован</b>\n\nЗаказ №{call_status.order_number}\nПовтор через 2 минуты (попытка {call_status.attempts}/3)",
+                        parse_mode='HTML',
+                        reply_markup=self._route_menu_markup()
+                    )
+        except Exception as e:
+            logger.error(f"Ошибка при отклонении звонка: {e}", exc_info=True)
+            self.bot.answer_callback_query(call.id, f"❌ Ошибка: {str(e)}", show_alert=True)
+    
     def process_order_comment(self, message, state_data):
         """Обработка ввода комментария"""
         user_id = message.from_user.id
@@ -2092,9 +2606,53 @@ class CourierBot:
         try:
             self.db_service.update_order(user_id, order_number, updates, today)
             
+            # Если обновлен телефон, обновляем call_status и call_schedule
+            if field_name == 'phone':
+                from src.database.connection import get_db_session
+                from src.models.order import CallStatusDB
+                with get_db_session() as session:
+                    call_status = session.query(CallStatusDB).filter(
+                        CallStatusDB.user_id == user_id,
+                        CallStatusDB.order_number == order_number,
+                        CallStatusDB.call_date == today
+                    ).first()
+                    if call_status:
+                        call_status.phone = field_value
+                        # Если статус был "sent" (уведомление уже отправлено), сбрасываем на pending для повторной отправки
+                        if call_status.status == "sent":
+                            call_status.status = "pending"
+                        session.commit()
+                        logger.debug(f"Обновлен телефон в call_status для заказа {order_number}: {field_value}")
+                    else:
+                        # Если записи нет, создаем ее (если есть маршрут)
+                        route_data_check = self.db_service.get_route_data(user_id, today)
+                        if route_data_check and route_data_check.get('route_points_data'):
+                            # Находим время звонка из route_points_data
+                            route_points_data_check = route_data_check.get('route_points_data', [])
+                            route_order_check = route_data_check.get('route_order', [])
+                            try:
+                                order_index = route_order_check.index(order_number)
+                                if order_index < len(route_points_data_check):
+                                    point_data = route_points_data_check[order_index]
+                                    call_time_str = point_data.get('call_time')
+                                    if call_time_str:
+                                        call_time = datetime.fromisoformat(call_time_str)
+                                        # Создаем запись о звонке
+                                        self.call_notifier.create_call_status(
+                                            user_id,
+                                            order_number,
+                                            call_time,
+                                            field_value,
+                                            order_data.get('customer_name'),
+                                            today
+                                        )
+                                        logger.debug(f"Создана запись call_status для заказа {order_number} при обновлении телефона")
+                            except (ValueError, KeyError, Exception) as e:
+                                logger.warning(f"Не удалось создать call_status при обновлении телефона: {e}")
+            
             # Обновляем маршрут если он существует
             route_data = self.db_service.get_route_data(user_id, today)
-            if route_data and route_data.get('route_summary'):
+            if route_data and (route_data.get('route_summary') or route_data.get('route_points_data')):
                 # Загружаем обновленный заказ
                 updated_orders_data = self.db_service.get_today_orders(user_id)
                 updated_order_data = None
@@ -2104,37 +2662,40 @@ class CourierBot:
                         break
                 
                 if updated_order_data:
-                    # Преобразуем время
-                    if updated_order_data.get('delivery_time_start'):
-                        if isinstance(updated_order_data['delivery_time_start'], str):
-                            parts = updated_order_data['delivery_time_start'].split(':')
-                            if len(parts) >= 2:
-                                updated_order_data['delivery_time_start'] = time(int(parts[0]), int(parts[1]))
-                    if updated_order_data.get('delivery_time_end'):
-                        if isinstance(updated_order_data['delivery_time_end'], str):
-                            parts = updated_order_data['delivery_time_end'].split(':')
-                            if len(parts) >= 2:
-                                updated_order_data['delivery_time_end'] = time(int(parts[0]), int(parts[1]))
-                    
-                    try:
-                        updated_order = Order(**updated_order_data)
+                    # Если обновлены поля, влияющие на маршрут - пересчитываем маршрут
+                    if field_name in ['address', 'entrance_number', 'apartment_number', 'delivery_time_window']:
+                        # Преобразуем время
+                        if updated_order_data.get('delivery_time_start'):
+                            if isinstance(updated_order_data['delivery_time_start'], str):
+                                parts = updated_order_data['delivery_time_start'].split(':')
+                                if len(parts) >= 2:
+                                    updated_order_data['delivery_time_start'] = time(int(parts[0]), int(parts[1]))
+                        if updated_order_data.get('delivery_time_end'):
+                            if isinstance(updated_order_data['delivery_time_end'], str):
+                                parts = updated_order_data['delivery_time_end'].split(':')
+                                if len(parts) >= 2:
+                                    updated_order_data['delivery_time_end'] = time(int(parts[0]), int(parts[1]))
                         
-                        # Загружаем точку старта из БД
-                        start_location_data = self.db_service.get_start_location(user_id, today)
-                        state_data = {
-                            'route_summary': route_data.get('route_summary', []),
-                            'call_schedule': route_data.get('call_schedule', []),
-                            'route_order': route_data.get('route_order', []),
-                            'orders': updated_orders_data,  # Все заказы для контекста
-                            'start_location': {'lat': start_location_data.get('latitude'), 'lon': start_location_data.get('longitude')} if start_location_data and start_location_data.get('location_type') == 'geo' else None,
-                            'start_address': start_location_data.get('address') if start_location_data and start_location_data.get('location_type') == 'address' else None,
-                            'start_time': start_location_data.get('start_time') if start_location_data else None
-                        }
-                        self._update_route_point(user_id, order_number, updated_order, MapsService(), state_data)
-                    except Exception as e:
-                        print(f"Ошибка обновления маршрута: {e}")
-                        import traceback
-                        traceback.print_exc()
+                        try:
+                            updated_order = Order(**updated_order_data)
+                            
+                            # Загружаем точку старта из БД
+                            start_location_data = self.db_service.get_start_location(user_id, today)
+                            state_data = {
+                                'route_summary': route_data.get('route_summary', []),
+                                'call_schedule': route_data.get('call_schedule', []),
+                                'route_order': route_data.get('route_order', []),
+                                'orders': updated_orders_data,  # Все заказы для контекста
+                                'start_location': {'lat': start_location_data.get('latitude'), 'lon': start_location_data.get('longitude')} if start_location_data and start_location_data.get('location_type') == 'geo' else None,
+                                'start_address': start_location_data.get('address') if start_location_data and start_location_data.get('location_type') == 'address' else None,
+                                'start_time': start_location_data.get('start_time') if start_location_data else None
+                            }
+                            self._update_route_point(user_id, order_number, updated_order, MapsService(), state_data)
+                        except Exception as e:
+                            logger.error(f"Ошибка обновления маршрута: {e}", exc_info=True)
+                    
+                    # Телефон, имя, комментарий не влияют на маршрут и call_schedule
+                    # call_schedule теперь формируется динамически при запросе из актуальных данных БД
             
             # Показываем кнопки для выбора следующего поля
             from telebot import types
@@ -2160,9 +2721,7 @@ class CourierBot:
             )
             self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=markup)
         except Exception as e:
-            print(f"Ошибка обновления заказа в БД: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Ошибка обновления заказа в БД: {e}", exc_info=True)
             self.bot.reply_to(message, f"❌ Ошибка обновления заказа: {str(e)}", reply_markup=self._main_menu_markup())
 
     def handle_update_order(self, message):
@@ -2380,7 +2939,7 @@ class CourierBot:
                         prev_latlon = (prev_order.latitude, prev_order.longitude)
                         prev_gid = prev_order.gis_id
                 except Exception as e:
-                    print(f"[ERROR] Ошибка создания Order: {e}")
+                    logger.error(f"Ошибка создания Order: {e}", exc_info=True)
                     continue
         
         # Пересчитываем расстояния и время только от предыдущей точки до обновленной
@@ -2411,7 +2970,7 @@ class CourierBot:
                             total_time_to_prev += seg_time + 10  # +10 минут на доставку
                             current_prev_latlon = (prev_order.latitude, prev_order.longitude)
                     except Exception as e:
-                        print(f"[ERROR] Ошибка создания Order: {e}")
+                        logger.error(f"Ошибка создания Order: {e}", exc_info=True)
                         continue
             
             # Рассчитываем время прибытия на обновленную точку
@@ -2540,15 +3099,41 @@ class CourierBot:
                         "call_time": call_time.isoformat()
                     }
                 
-                # Обновляем call_schedule
-                call_info = updated_order_in_list.order_number or updated_order_in_list.customer_name or 'Клиент'
-                if updated_order_in_list.customer_name:
-                    call_info = f"{updated_order_in_list.customer_name} (№{updated_order_in_list.order_number})" if updated_order_in_list.order_number else updated_order_in_list.customer_name
-                time_info = f"к {arrival_time.strftime('%H:%M')}"
-                if updated_order_in_list.phone:
-                    call_schedule[point_index] = f"📞 {call_time.strftime('%H:%M')} - {call_info} ({updated_order_in_list.phone}) - {time_info}"
-                else:
-                    call_schedule[point_index] = f"📞 {call_time.strftime('%H:%M')} - {call_info} (телефон не указан) - {time_info}"
+                # Пересоздаем call_schedule с актуальными данными из БД
+                # Загружаем все заказы заново для актуальных данных
+                all_orders_data = self.db_service.get_today_orders(user_id)
+                all_orders_dict = {od.get('order_number'): od for od in all_orders_data if od.get('order_number')}
+                
+                # Пересоздаем call_schedule с актуальными данными
+                call_schedule = []
+                for idx, order_num in enumerate(route_order):
+                    order_data = all_orders_dict.get(order_num)
+                    if not order_data:
+                        continue
+                    
+                    try:
+                        order_obj = Order(**order_data)
+                    except:
+                        continue
+                    
+                    # Получаем время звонка из route_points_data
+                    if idx < len(route_points_data):
+                        point_data = route_points_data[idx]
+                        try:
+                            call_time_dt = datetime.fromisoformat(point_data.get('call_time'))
+                            arrival_time_dt = datetime.fromisoformat(point_data.get('estimated_arrival'))
+                        except:
+                            continue
+                        
+                        # Сохраняем структурированные данные
+                        call_data = {
+                            "order_number": order_obj.order_number or str(order_obj.id),
+                            "call_time": call_time_dt.isoformat(),
+                            "arrival_time": arrival_time_dt.isoformat(),
+                            "phone": order_obj.phone or None,
+                            "customer_name": order_obj.customer_name or None
+                        }
+                        call_schedule.append(call_data)
                 
                 # Сохраняем обновленные данные в БД
                 self.db_service.save_route_data(
@@ -2649,4 +3234,4 @@ class CourierBot:
         try:
             self.bot.send_message(user_id, alert_text, parse_mode='HTML')
         except Exception as e:
-            print(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+            logger.warning(f"Не удалось отправить уведомление пользователю {user_id}: {e}", exc_info=True)

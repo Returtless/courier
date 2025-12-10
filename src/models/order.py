@@ -1,6 +1,6 @@
 from datetime import datetime, time, date
 from typing import Optional, List
-from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Time, Date, JSON
+from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Time, Date, JSON, Index
 from pydantic import BaseModel
 from src.database.connection import Base
 
@@ -56,13 +56,36 @@ class RouteDataDB(Base):
     user_id = Column(Integer, nullable=False, index=True)
     route_date = Column(Date, nullable=False, index=True)
     route_summary = Column(JSON, nullable=True)  # Структурированные данные маршрута (список словарей) или список строк (старый формат)
-    call_schedule = Column(JSON, nullable=True)  # Список звонков
+    call_schedule = Column(JSON, nullable=True)  # Структурированные данные звонков (список словарей) или список строк (старый формат)
     route_order = Column(JSON, nullable=True)  # Порядок заказов в маршруте
     total_distance = Column(Float, nullable=True)
     total_time = Column(Float, nullable=True)
     estimated_completion = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CallStatusDB(Base):
+    __tablename__ = "call_status"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    order_number = Column(String, nullable=False, index=True)
+    call_date = Column(Date, nullable=False, index=True)
+    call_time = Column(DateTime, nullable=False)  # Время когда нужно звонить
+    phone = Column(String, nullable=False)
+    customer_name = Column(String, nullable=True)
+    status = Column(String, default="pending")  # pending, confirmed, rejected, failed (после 3 отклонений)
+    attempts = Column(Integer, default=0)  # Количество попыток
+    next_attempt_time = Column(DateTime, nullable=True)  # Время следующей попытки (через 2 минуты после отклонения)
+    confirmation_comment = Column(Text, nullable=True)  # Комментарий при подтверждении
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('idx_user_date', 'user_id', 'call_date'),
+        Index('idx_status_time', 'status', 'call_time'),
+    )
 
 
 class Order(BaseModel):

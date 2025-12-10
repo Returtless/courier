@@ -5,6 +5,8 @@ services:
     restart: unless-stopped
     env_file:
       - env
+    environment:
+      - TZ=Europe/Moscow
     volumes:
       - ./data:/app/data  # Для SQLite (если используется)
     depends_on:

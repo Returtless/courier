@@ -1,3 +1,4 @@
+import logging
 from typing import List, Tuple
 from datetime import datetime, time, timedelta
 import numpy as np
@@ -5,6 +6,8 @@ from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 from src.models.order import Order, RoutePoint, OptimizedRoute
 from src.services.maps_service import MapsService
+
+logger = logging.getLogger(__name__)
 
 
 class RouteOptimizer:
@@ -24,10 +27,11 @@ class RouteOptimizer:
         if not orders:
             return OptimizedRoute(points=[], total_distance=0, total_time=0, estimated_completion=start_time)
 
-        # Geocode addresses if needed
+        # Geocode addresses if needed (используем координаты из БД, если они есть)
         geocoded_orders = []
         for order in orders:
             if order.latitude is None or order.longitude is None:
+                # Только если координат нет - делаем геокодирование (с кэшированием)
                 lat, lon, gid = self.maps_service.geocode_address_sync(order.address)
                 order.latitude = lat
                 order.longitude = lon
@@ -73,11 +77,11 @@ class RouteOptimizer:
                 # If estimated arrival is too early, adjust to start of window
                 if estimated_arrival < window_start:
                     estimated_arrival = window_start
-                    print(f"⚠️ Заказ №{order.order_number}: прибытие скорректировано до начала окна")
+                    logger.warning(f"⚠️ Заказ №{order.order_number}: прибытие скорректировано до начала окна")
 
                 # If estimated arrival is too late, this is a problem
                 elif estimated_arrival > window_end:
-                    print(f"🚨 Заказ №{order.order_number}: прибытие ({estimated_arrival.strftime('%H:%M')}) выходит за окно доставки!")
+                    logger.warning(f"🚨 Заказ №{order.order_number}: прибытие ({estimated_arrival.strftime('%H:%M')}) выходит за окно доставки!")
 
             # Update current time for next delivery
             current_time = estimated_arrival
@@ -199,7 +203,7 @@ class RouteOptimizer:
             solution = routing.SolveWithParameters(search_parameters)
 
             if solution:
-                print("✅ OR-Tools нашел оптимальное решение")
+                logger.info("✅ OR-Tools нашел оптимальное решение")
                 route = []
                 index = routing.Start(0)
                 while not routing.IsEnd(index):
@@ -208,11 +212,11 @@ class RouteOptimizer:
                 route.append(manager.IndexToNode(index))
                 return route
             else:
-                print("⚠️ OR-Tools не нашел решение, используем fallback")
+                logger.warning("⚠️ OR-Tools не нашел решение, используем fallback")
                 # Fallback: return orders in original order
                 return [0] + list(range(1, len(orders) + 1)) + [0]
 
         except Exception as e:
-            print(f"❌ Ошибка OR-Tools: {e}")
+            logger.error(f"❌ Ошибка OR-Tools: {e}", exc_info=True)
             # Fallback: return orders in original order
             return [0] + list(range(1, len(orders) + 1)) + [0]

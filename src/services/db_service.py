@@ -1,9 +1,12 @@
+import logging
 from datetime import datetime, date, time
 from typing import List, Optional, Dict
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from src.models.order import OrderDB, StartLocationDB, RouteDataDB, Order
 from src.database.connection import get_db_session
+
+logger = logging.getLogger(__name__)
 
 
 class DatabaseService:
@@ -103,8 +106,7 @@ class DatabaseService:
             return order_db
         except Exception as e:
             session.rollback()
-            print(f"Ошибка сохранения заказа в БД: {e}")
-            print(f"Данные заказа: user_id={user_id}, order_date={order_date}, address={order.address}")
+            logger.error(f"Ошибка сохранения заказа в БД: {e}, данные: user_id={user_id}, order_date={order_date}, address={order.address}", exc_info=True)
             import traceback
             traceback.print_exc()
             raise
@@ -300,27 +302,38 @@ class DatabaseService:
         
         # Проверяем формат данных (старый или новый)
         route_summary = route_data.route_summary
-        if route_summary and isinstance(route_summary, list) and len(route_summary) > 0:
-            # Если первый элемент - словарь, это новый формат
-            if isinstance(route_summary[0], dict):
-                return {
-                    'route_points_data': route_summary,  # Новый формат - структурированные данные
-                    'call_schedule': route_data.call_schedule,
-                    'route_order': route_data.route_order,
-                    'total_distance': route_data.total_distance,
-                    'total_time': route_data.total_time,
-                    'estimated_completion': route_data.estimated_completion.isoformat() if route_data.estimated_completion else None,
-                }
+        call_schedule = route_data.call_schedule
         
-        # Старый формат - для обратной совместимости
-        return {
-            'route_summary': route_data.route_summary,  # Старый формат - готовый текст
-            'call_schedule': route_data.call_schedule,
+        # Проверяем формат route_summary
+        route_points_data = None
+        if route_summary and isinstance(route_summary, list) and len(route_summary) > 0:
+            if isinstance(route_summary[0], dict):
+                route_points_data = route_summary  # Новый формат
+        
+        # Проверяем формат call_schedule
+        call_schedule_data = call_schedule
+        if call_schedule and isinstance(call_schedule, list) and len(call_schedule) > 0:
+            if isinstance(call_schedule[0], str):
+                # Старый формат call_schedule - оставляем как есть для обратной совместимости
+                pass
+            elif isinstance(call_schedule[0], dict):
+                # Новый формат - структурированные данные
+                call_schedule_data = call_schedule
+        
+        result = {
+            'call_schedule': call_schedule_data,
             'route_order': route_data.route_order,
             'total_distance': route_data.total_distance,
             'total_time': route_data.total_time,
             'estimated_completion': route_data.estimated_completion.isoformat() if route_data.estimated_completion else None,
         }
+        
+        if route_points_data:
+            result['route_points_data'] = route_points_data
+        else:
+            result['route_summary'] = route_summary  # Старый формат
+        
+        return result
     
     def delete_all_data_by_date(self, user_id: int, target_date: date = None, session: Session = None) -> Dict[str, int]:
         """Удалить все данные пользователя за дату (заказы, точка старта, маршрут)"""

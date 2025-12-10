@@ -3,7 +3,8 @@ import logging
 from src.config import settings
 from src.database.connection import engine, Base
 # Импортируем модели, чтобы они зарегистрировались в Base.metadata
-from src.models.order import OrderDB, StartLocationDB, RouteDataDB  # noqa: F401
+from src.models.order import OrderDB, StartLocationDB, RouteDataDB, CallStatusDB  # noqa: F401
+from src.models.geocache import GeocodeCacheDB  # noqa: F401
 # from src.services.llm_service import LLMService  # Пока отключено
 from src.bot.handlers import CourierBot
 
@@ -14,11 +15,13 @@ def main():
 
     # Create database tables (модели должны быть импортированы выше)
     Base.metadata.create_all(bind=engine)
-    print("✅ База данных инициализирована")
+    logger = logging.getLogger(__name__)
+    logger.info("✅ База данных инициализирована")
 
     # Initialize bot
+    logger = logging.getLogger(__name__)
     if not settings.telegram_bot_token or settings.telegram_bot_token == "your_bot_token_here":
-        print("❌ Установите TELEGRAM_BOT_TOKEN в файле env")
+        logger.error("❌ Установите TELEGRAM_BOT_TOKEN в файле env")
         return
 
     bot = telebot.TeleBot(settings.telegram_bot_token)
@@ -32,10 +35,18 @@ def main():
 
     # Register handlers
     courier_bot.register_handlers()
+    
+    # Start call notifier
+    courier_bot.call_notifier.start()
 
     # Start polling
-    print("🤖 Courier Bot started!")
-    bot.polling(none_stop=True)
+    logger = logging.getLogger(__name__)
+    logger.info("🤖 Courier Bot started!")
+    try:
+        bot.polling(none_stop=True)
+    except KeyboardInterrupt:
+        logger.info("\n🛑 Остановка бота...")
+        courier_bot.call_notifier.stop()
 
 
 if __name__ == "__main__":

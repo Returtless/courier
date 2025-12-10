@@ -16,6 +16,9 @@ geopy==2.4.1
 # Route optimization
 ortools==9.14.6206
 
+# Timezone support
+pytz==2023.3
+
 # LLM (optional - can be installed later)
 # transformers
 # torch

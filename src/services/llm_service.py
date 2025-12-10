@@ -1,9 +1,12 @@
+import logging
 from typing import List, Dict, Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 from datetime import datetime, timedelta
 from src.config import settings
 from src.models.order import Order
+
+logger = logging.getLogger(__name__)
 
 
 class LLMService:
@@ -35,9 +38,9 @@ class LLMService:
                 device=0 if self.device == "cuda" else -1,
                 max_new_tokens=settings.llm_max_tokens
             )
-            print("LLM model loaded successfully")
+            logger.info("LLM model loaded successfully")
         except Exception as e:
-            print(f"Failed to load LLM model: {e}")
+            logger.warning(f"Failed to load LLM model: {e}")
             # Fallback to simple text processing
             self.generator = None
 
@@ -79,7 +82,7 @@ class LLMService:
                 import json
                 return json.loads(json_str)
         except Exception as e:
-            print(f"LLM analysis error: {e}")
+            logger.warning(f"LLM analysis error: {e}")
 
         # Fallback
         return {
@@ -119,7 +122,7 @@ class LLMService:
             response = self.generator(prompt, max_new_tokens=300, temperature=0.3)
             return response[0]['generated_text'].strip()
         except Exception as e:
-            print(f"Call script generation error: {e}")
+            logger.warning(f"Call script generation error: {e}")
             return self._simple_call_script(order, estimated_delivery)
 
     def _simple_call_script(self, order: Order, estimated_delivery: datetime) -> str:

@@ -1,9 +1,12 @@
 import threading
 import time
+import logging
 from typing import Dict, List, Optional, Callable
 from datetime import datetime, timedelta
 from src.services.maps_service import MapsService
 from src.models.order import Order, OptimizedRoute
+
+logger = logging.getLogger(__name__)
 
 
 class TrafficMonitor:
@@ -45,14 +48,14 @@ class TrafficMonitor:
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.monitor_thread.start()
 
-        print("🚦 Начат мониторинг пробок каждые 5 минут")
+        logger.info("🚦 Начат мониторинг пробок каждые 5 минут")
 
     def stop_monitoring(self):
         """Остановить мониторинг"""
         self.is_monitoring = False
         if self.monitor_thread and self.monitor_thread.is_alive():
             self.monitor_thread.join(timeout=1)
-        print("🛑 Мониторинг пробок остановлен")
+        logger.info("🛑 Мониторинг пробок остановлен")
 
     def add_callback(self, callback: Callable):
         """Добавить callback для уведомлений о изменениях"""
@@ -65,7 +68,7 @@ class TrafficMonitor:
                 self._check_traffic_changes()
                 time.sleep(self.check_interval)
             except Exception as e:
-                print(f"❌ Ошибка мониторинга пробок: {e}")
+                logger.error(f"❌ Ошибка мониторинга пробок: {e}", exc_info=True)
                 time.sleep(60)  # Wait 1 minute before retrying
 
     def _check_traffic_changes(self):
@@ -73,7 +76,7 @@ class TrafficMonitor:
         if not self.current_route or not self.route_orders:
             return
 
-        print("🔍 Проверяю изменения в пробках...")
+        logger.debug("🔍 Проверяю изменения в пробках...")
 
         current_time = datetime.now()
         total_current_time = 0
@@ -119,23 +122,23 @@ class TrafficMonitor:
         if significant_changes:
             self._notify_traffic_changes(significant_changes, total_current_time)
         else:
-            print("✅ Пробки в норме, маршрут оптимален")
+            logger.debug("✅ Пробки в норме, маршрут оптимален")
 
     def _notify_traffic_changes(self, changes: List[Dict], total_current_time: float):
         """Уведомить о изменениях в пробках"""
-        print("🚨 ОБНАРУЖЕНЫ ИЗМЕНЕНИЯ В ПРОБКАХ!")
+        logger.warning("🚨 ОБНАРУЖЕНЫ ИЗМЕНЕНИЯ В ПРОБКАХ!")
 
         for change in changes:
             order = change['order']
-            print(f"   📍 Заказ {change['step']}: {order.customer_name}")
-            print(f"   🚦 Задержка: {change['delay']:.1f} мин")
-            print(f"   📊 Текущее время: {change['current_time']:.1f} мин")
+            logger.warning(f"   📍 Заказ {change['step']}: {order.customer_name}")
+            logger.warning(f"   🚦 Задержка: {change['delay']:.1f} мин")
+            logger.warning(f"   📊 Текущее время: {change['current_time']:.1f} мин")
         # Вызвать callbacks
         for callback in self.callbacks:
             try:
                 callback(changes, total_current_time)
             except Exception as e:
-                print(f"❌ Ошибка callback: {e}")
+                logger.error(f"❌ Ошибка callback: {e}", exc_info=True)
 
     def get_current_traffic_status(self) -> Dict:
         """Получить текущий статус пробок"""
@@ -150,4 +153,4 @@ class TrafficMonitor:
         """Принудительно проверить пробки"""
         if self.is_monitoring:
             threading.Thread(target=self._check_traffic_changes, daemon=True).start()
-            print("🔄 Запущена принудительная проверка пробок")
+            logger.info("🔄 Запущена принудительная проверка пробок")

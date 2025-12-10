@@ -1,9 +1,13 @@
 import requests
 import json
+import logging
 from typing import List, Tuple, Optional
 from datetime import datetime, timedelta
 from src.config import settings
 from src.models.order import Order
+from src.database.connection import get_db_session
+
+logger = logging.getLogger(__name__)
 
 try:
     import aiohttp
@@ -24,6 +28,12 @@ class MapsService:
         self.yandex_api_key = settings.yandex_maps_api_key
         self.two_gis_api_key = settings.two_gis_api_key
         self.session: Optional[aiohttp.ClientSession] = None
+        
+        # Кэш для геокодирования (адрес -> (lat, lon, gis_id))
+        self._geocode_cache: dict = {}
+        
+        # Кэш для маршрутов ((start_lat, start_lon, end_lat, end_lon) -> (distance, time))
+        self._route_cache: dict = {}
 
     @staticmethod
     def build_route_links(
@@ -87,7 +97,7 @@ class MapsService:
         Возвращает: lat, lon, gis_id
         """
         if not AIOHTTP_AVAILABLE:
-            print("aiohttp not available, using sync geocoding")
+            logger.warning("aiohttp not available, using sync geocoding")
             return self.geocode_address_sync(address)
 
         try:
@@ -129,7 +139,7 @@ class MapsService:
                                 lon, lat = map(float, pos.split())
                                 return lat, lon, None
         except Exception as e:
-            print(f"Async geocoding error: {e}")
+            logger.warning(f"Async geocoding error: {e}")
             # Fallback to sync geocoding
             return self.geocode_address_sync(address)
 
@@ -137,6 +147,31 @@ class MapsService:
 
     def geocode_address_sync(self, address: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
         """Синхронное геокодирование с fallback на 2GIS → Yandex → geopy. Возврат: lat, lon, gis_id"""
+        # Нормализуем адрес для кэша
+        address_key = address.lower().strip()
+        
+        # Проверяем in-memory кэш
+        if address_key in self._geocode_cache:
+            cached_result = self._geocode_cache[address_key]
+            logger.debug(f"Геокодирование из памяти: {address}")
+            return cached_result
+        
+        # Проверяем БД кэш
+        try:
+            from src.models.geocache import GeocodeCacheDB
+            with get_db_session() as session:
+                cached = session.query(GeocodeCacheDB).filter(
+                    GeocodeCacheDB.address == address_key
+                ).first()
+                if cached:
+                    result = (cached.latitude, cached.longitude, cached.gis_id)
+                    # Сохраняем в in-memory кэш
+                    self._geocode_cache[address_key] = result
+                    logger.debug(f"Геокодирование из БД: {address}")
+                    return result
+        except Exception as e:
+            logger.warning(f"Ошибка проверки БД кэша: {e}")
+        
         # 1) 2GIS
         if self.two_gis_api_key:
             try:
@@ -155,9 +190,13 @@ class MapsService:
                         lat = float(point.get("lat"))
                         lon = float(point.get("lon"))
                         gid = items[0].get("id")
-                        return lat, lon, gid
+                        result = (lat, lon, gid)
+                        # Сохраняем в кэши
+                        self._geocode_cache[address_key] = result
+                        self._save_to_db_cache(address_key, lat, lon, gid)
+                        return result
             except Exception as e:
-                print(f"2GIS geocoding error: {e}")
+                logger.warning(f"2GIS geocoding error: {e}")
 
         # 2) Yandex
         if self.yandex_api_key:
@@ -177,9 +216,13 @@ class MapsService:
                         pos = members[0].get("GeoObject", {}).get("Point", {}).get("pos", "")
                         if pos:
                             lon, lat = map(float, pos.split())
-                            return lat, lon, None
+                            result = (lat, lon, None)
+                            # Сохраняем в кэши
+                            self._geocode_cache[address_key] = result
+                            self._save_to_db_cache(address_key, lat, lon, None)
+                            return result
             except Exception as e:
-                print(f"Yandex geocoding error: {e}")
+                logger.warning(f"Yandex geocoding error: {e}")
 
         # Fallback to geopy
         if GEOPY_AVAILABLE:
@@ -187,14 +230,60 @@ class MapsService:
                 geolocator = Nominatim(user_agent="courier_bot")
                 location = geolocator.geocode(address)
                 if location:
-                    return location.latitude, location.longitude
+                    result = (location.latitude, location.longitude, None)
+                    # Сохраняем в кэши
+                    self._geocode_cache[address_key] = result
+                    self._save_to_db_cache(address_key, location.latitude, location.longitude, None)
+                    return result
             except Exception as e:
-                print(f"Geopy geocoding error: {e}")
+                logger.warning(f"Geopy geocoding error: {e}")
 
         return None, None, None
+    
+    def _save_to_db_cache(self, address: str, lat: float, lon: float, gis_id: Optional[str]):
+        """Сохранить результат геокодирования в БД кэш"""
+        try:
+            from src.models.geocache import GeocodeCacheDB
+            with get_db_session() as session:
+                # Проверяем, есть ли уже запись
+                existing = session.query(GeocodeCacheDB).filter(
+                    GeocodeCacheDB.address == address
+                ).first()
+                
+                if existing:
+                    # Обновляем существующую запись
+                    existing.latitude = lat
+                    existing.longitude = lon
+                    existing.gis_id = gis_id
+                    existing.updated_at = datetime.utcnow()
+                else:
+                    # Создаем новую запись
+                    cache_entry = GeocodeCacheDB(
+                        address=address,
+                        latitude=lat,
+                        longitude=lon,
+                        gis_id=gis_id
+                    )
+                    session.add(cache_entry)
+                session.commit()
+        except Exception as e:
+            # Не критично, если не удалось сохранить в БД кэш
+            logger.warning(f"Не удалось сохранить в БД кэш: {e}")
 
     def get_route_sync(self, start_lat: float, start_lon: float, end_lat: float, end_lon: float) -> Tuple[float, float]:
         """Синхронный расчет маршрута через 2GIS (если есть ключ) с fallback."""
+        # Проверяем кэш (округление координат до 5 знаков для ключа кэша)
+        route_key = (
+            round(start_lat, 5),
+            round(start_lon, 5),
+            round(end_lat, 5),
+            round(end_lon, 5)
+        )
+        if route_key in self._route_cache:
+            cached_result = self._route_cache[route_key]
+            logger.debug(f"Маршрут из кэша: ({start_lat:.5f}, {start_lon:.5f}) -> ({end_lat:.5f}, {end_lon:.5f})")
+            return cached_result
+        
         # 1) 2GIS Routing API с учетом дорожной сети (traffic_mode=jam при наличии тарифа)
         if self.two_gis_api_key:
             try:
@@ -226,17 +315,20 @@ class MapsService:
                         distance = route_obj.get("total_distance", 0) / 1000  # метры → км
                         time_seconds = route_obj.get("total_duration", 0)  # секунды
                         time_minutes = time_seconds / 60
-                        return distance, time_minutes
+                        result_tuple = (distance, time_minutes)
+                        # Сохраняем в кэш
+                        self._route_cache[route_key] = result_tuple
+                        return result_tuple
                 elif response.status_code == 429:
-                    print("2GIS route rate-limited (429), fallback to other providers")
+                    logger.warning("2GIS route rate-limited (429), fallback to other providers")
                 else:
                     try:
                         resp_text = response.text[:400]
                     except Exception:
                         resp_text = ""
-                    print(f"2GIS route HTTP {response.status_code} (traffic_mode=jam): {resp_text}")
+                    logger.debug(f"2GIS route HTTP {response.status_code} (traffic_mode=jam): {resp_text}")
             except Exception as e:
-                print(f"2GIS route error: {e}")
+                logger.warning(f"2GIS route error: {e}")
 
         # 2) Yandex (если есть ключ)
         if self.yandex_api_key:
@@ -256,16 +348,22 @@ class MapsService:
                         distance = route.get("distance", 0) / 1000  # meters to km
                         time_seconds = route.get("duration", 0)  # Без учета пробок
                         time_minutes = time_seconds / 60
-                        return distance, time_minutes
+                        result_tuple = (distance, time_minutes)
+                        # Сохраняем в кэш
+                        self._route_cache[route_key] = result_tuple
+                        return result_tuple
 
             except Exception as e:
-                print(f"Yandex route error: {e}")
+                logger.warning(f"Yandex route error: {e}")
 
         # Fallback to distance calculation
         distance = self._calculate_distance(start_lat, start_lon, end_lat, end_lon)
         # Estimate time: 30 km/h average speed
         time_minutes = (distance / 30) * 60
-        return distance, time_minutes
+        result_tuple = (distance, time_minutes)
+        # Сохраняем в кэш (даже fallback результаты)
+        self._route_cache[route_key] = result_tuple
+        return result_tuple
 
     async def get_route_with_traffic(
         self,
@@ -279,7 +377,7 @@ class MapsService:
         Возвращает: (distance_km, time_minutes)
         """
         if not AIOHTTP_AVAILABLE:
-            print("aiohttp not available, using sync routing")
+            logger.warning("aiohttp not available, using sync routing")
             return self.get_route_sync(start_lat, start_lon, end_lat, end_lon)
 
         # 1) 2GIS при наличии ключа
@@ -313,16 +411,16 @@ class MapsService:
                             time_minutes = time_seconds / 60
                             return distance, time_minutes
                     elif response.status == 429:
-                        print("Async 2GIS route rate-limited (429), fallback to other providers")
+                        logger.warning("Async 2GIS route rate-limited (429), fallback to other providers")
                     else:
                         text = ""
                         try:
                             text = (await response.text())[:400]
                         except Exception:
                             pass
-                        print(f"Async 2GIS route HTTP {response.status} (traffic_mode=jam): {text}")
+                        logger.debug(f"Async 2GIS route HTTP {response.status} (traffic_mode=jam): {text}")
             except Exception as e:
-                print(f"Async 2GIS route error: {e}")
+                logger.warning(f"Async 2GIS route error: {e}")
 
         # 2) Yandex при наличии ключа
         if self.yandex_api_key:
@@ -344,7 +442,7 @@ class MapsService:
                             time_minutes = time_seconds / 60
                             return distance, time_minutes
             except Exception as e:
-                print(f"Async route calculation error: {e}")
+                logger.warning(f"Async route calculation error: {e}")
                 return self.get_route_sync(start_lat, start_lon, end_lat, end_lon)
 
         # 3) Fallback
@@ -385,6 +483,6 @@ class MapsService:
                     # This is a simplified traffic check
                     return {"level": 5, "description": "Traffic data available"}
         except Exception as e:
-            print(f"Traffic info error: {e}")
+            logger.warning(f"Traffic info error: {e}")
 
         return {"level": 0, "description": "No traffic data"}
