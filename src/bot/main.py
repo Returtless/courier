@@ -2,6 +2,8 @@ import telebot
 import logging
 from src.config import settings
 from src.database.connection import engine, Base
+# Импортируем модели, чтобы они зарегистрировались в Base.metadata
+from src.models.order import OrderDB, StartLocationDB, RouteDataDB  # noqa: F401
 # from src.services.llm_service import LLMService  # Пока отключено
 from src.bot.handlers import CourierBot
 
@@ -10,8 +12,9 @@ def main():
     # Configure logging
     logging.basicConfig(level=logging.INFO)
 
-    # Create database tables
+    # Create database tables (модели должны быть импортированы выше)
     Base.metadata.create_all(bind=engine)
+    print("✅ База данных инициализирована")
 
     # Initialize bot
     if not settings.telegram_bot_token or settings.telegram_bot_token == "your_bot_token_here":

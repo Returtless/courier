@@ -1,0 +1,36 @@
+services:
+  bot:
+    build: .
+    container_name: courier_bot
+    restart: unless-stopped
+    env_file:
+      - env
+    volumes:
+      - ./data:/app/data  # Для SQLite (если используется)
+    depends_on:
+      - postgres
+    networks:
+      - courier_network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: courier_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-courier}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-courier_password}
+      POSTGRES_DB: ${POSTGRES_DB:-courier_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - courier_network
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:
+
+networks:
+  courier_network:
+    driver: bridge
+

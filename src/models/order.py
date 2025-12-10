@@ -1,26 +1,30 @@
-from datetime import datetime, time
+from datetime import datetime, time, date
 from typing import Optional, List
-from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Time
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Time, Date, JSON
 from pydantic import BaseModel
-
-Base = declarative_base()
+from src.database.connection import Base
 
 
 class OrderDB(Base):
     __tablename__ = "orders"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)  # Telegram user ID
+    order_date = Column(Date, nullable=False, index=True)  # Дата заказа
     customer_name = Column(String, nullable=True)
-    phone = Column(String, nullable=False)
+    phone = Column(String, nullable=True)
     address = Column(String, nullable=False)
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     comment = Column(Text, nullable=True)
     delivery_time_start = Column(Time, nullable=True)
     delivery_time_end = Column(Time, nullable=True)
+    delivery_time_window = Column(String, nullable=True)  # Строка формата "ЧЧ:ММ - ЧЧ:ММ"
     status = Column(String, default="pending")  # pending, assigned, delivered
-    courier_id = Column(Integer, nullable=True)
+    order_number = Column(String, nullable=True, index=True)  # Номер заказа из внешней системы
+    entrance_number = Column(String, nullable=True)  # Номер подъезда
+    apartment_number = Column(String, nullable=True)  # Номер квартиры
+    gis_id = Column(String, nullable=True)  # ID объекта 2ГИС
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -28,6 +32,37 @@ class OrderDB(Base):
     estimated_delivery_time = Column(DateTime, nullable=True)
     call_time = Column(DateTime, nullable=True)
     route_order = Column(Integer, nullable=True)
+
+
+class StartLocationDB(Base):
+    __tablename__ = "start_locations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    location_date = Column(Date, nullable=False, index=True)
+    location_type = Column(String, nullable=False)  # "geo" or "address"
+    address = Column(String, nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    start_time = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class RouteDataDB(Base):
+    __tablename__ = "route_data"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    route_date = Column(Date, nullable=False, index=True)
+    route_summary = Column(JSON, nullable=True)  # Структурированные данные маршрута (список словарей) или список строк (старый формат)
+    call_schedule = Column(JSON, nullable=True)  # Список звонков
+    route_order = Column(JSON, nullable=True)  # Порядок заказов в маршруте
+    total_distance = Column(Float, nullable=True)
+    total_time = Column(Float, nullable=True)
+    estimated_completion = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class Order(BaseModel):
