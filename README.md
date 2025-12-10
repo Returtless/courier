@@ -85,6 +85,69 @@ python main.py
 
 ### Docker установка
 
+#### Вариант 1: Использование готового образа из GitHub Container Registry
+
+1. **Создайте файл `docker-compose.prod.yml`:**
+```yaml
+services:
+  bot:
+    image: ghcr.io/YOUR_USERNAME/courier:latest
+    container_name: courier_bot
+    restart: unless-stopped
+    env_file:
+      - env
+    environment:
+      - TZ=Europe/Moscow
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - postgres
+    networks:
+      - courier_network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: courier_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-courier}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-courier_password}
+      POSTGRES_DB: ${POSTGRES_DB:-courier_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - courier_network
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:
+
+networks:
+  courier_network:
+    driver: bridge
+```
+
+2. **Войдите в GitHub Container Registry:**
+```bash
+echo $GITHUB_TOKEN | docker login ghcr.io -u YOUR_USERNAME --password-stdin
+# Или используйте Personal Access Token с правами read:packages
+```
+
+3. **Настройте переменные окружения:**
+```bash
+cp env.example env
+# Отредактируйте env файл, установите DATABASE_URL для PostgreSQL:
+# DATABASE_URL=postgresql://courier:courier_password@postgres:5432/courier_db
+```
+
+4. **Запустите через Docker Compose:**
+```bash
+docker-compose -f docker-compose.prod.yml up -d
+```
+
+#### Вариант 2: Локальная сборка образа
+
 1. **Настройте переменные окружения:**
 ```bash
 cp env.example env
@@ -369,6 +432,87 @@ python test_imports.py
 - Для запуска тестов необходимо настроить API ключи в файле `env`
 - Тесты используют `print()` для вывода результатов (это нормально для тестовых скриптов)
 - Основной код использует `logging` модуль для логирования
+
+## 🚀 CI/CD
+
+Проект использует GitHub Actions для автоматической сборки и публикации Docker-образа в GitHub Container Registry.
+
+### Автоматическая сборка
+
+Workflow автоматически запускается при:
+- Push в ветки `main` или `master`
+- Создании тегов версий (например, `v1.0.0`)
+- Ручном запуске через `workflow_dispatch`
+
+### Использование образа
+
+После успешной сборки образ будет доступен по адресу:
+```
+ghcr.io/YOUR_USERNAME/courier:latest
+ghcr.io/YOUR_USERNAME/courier:v1.0.0  # для версионированных тегов
+```
+
+**Важно:** Замените `YOUR_USERNAME` на ваш GitHub username или название организации.
+
+### Настройка доступа к образу
+
+1. Перейдите в настройки репозитория → Packages
+2. Выберите созданный пакет `courier`
+3. Настройте видимость (public/private)
+4. Для использования на сервере создайте Personal Access Token с правами `read:packages`
+
+### Использование образа на сервере
+
+Создайте файл `docker-compose.prod.yml`:
+```yaml
+services:
+  bot:
+    image: ghcr.io/YOUR_USERNAME/courier:latest
+    container_name: courier_bot
+    restart: unless-stopped
+    env_file:
+      - env
+    environment:
+      - TZ=Europe/Moscow
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - postgres
+    networks:
+      - courier_network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: courier_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-courier}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-courier_password}
+      POSTGRES_DB: ${POSTGRES_DB:-courier_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - courier_network
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:
+
+networks:
+  courier_network:
+    driver: bridge
+```
+
+Войдите в GitHub Container Registry:
+```bash
+echo $GITHUB_TOKEN | docker login ghcr.io -u YOUR_USERNAME --password-stdin
+```
+
+Запустите:
+```bash
+docker-compose -f docker-compose.prod.yml up -d
+```
 
 ## 🗺️ Roadmap
 
