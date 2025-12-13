@@ -3,7 +3,7 @@ import logging
 from src.config import settings
 from src.database.connection import engine, Base
 # Импортируем модели, чтобы они зарегистрировались в Base.metadata
-from src.models.order import OrderDB, StartLocationDB, RouteDataDB, CallStatusDB  # noqa: F401
+from src.models.order import OrderDB, StartLocationDB, RouteDataDB, CallStatusDB, UserSettingsDB  # noqa: F401
 from src.models.geocache import GeocodeCacheDB  # noqa: F401
 # from src.services.llm_service import LLMService  # Пока отключено
 from src.bot.handlers import CourierBot

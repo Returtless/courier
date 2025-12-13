@@ -6,6 +6,7 @@ from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 from src.models.order import Order, RoutePoint, OptimizedRoute
 from src.services.maps_service import MapsService
+from src.services.user_settings_service import UserSettingsService
 
 logger = logging.getLogger(__name__)
 
@@ -13,13 +14,15 @@ logger = logging.getLogger(__name__)
 class RouteOptimizer:
     def __init__(self, maps_service: MapsService):
         self.maps_service = maps_service
+        self.settings_service = UserSettingsService()
 
     def optimize_route_sync(
         self,
         orders: List[Order],
         start_location: Tuple[float, float],  # (lat, lon)
         start_time: datetime,
-        vehicle_capacity: int = 50
+        vehicle_capacity: int = 50,
+        user_id: int = None  # Добавляем user_id для получения настроек
     ) -> OptimizedRoute:
         """
         Оптимизировать маршрут для списка заказов
@@ -43,9 +46,15 @@ class RouteOptimizer:
         distance_matrix, time_matrix = self._build_matrices(locations)
 
         # Create route optimization problem
-        route_indices = self._solve_vrp(distance_matrix, time_matrix, geocoded_orders, start_time)
+        route_indices = self._solve_vrp(distance_matrix, time_matrix, geocoded_orders, start_time, user_id)
 
         # Build optimized route
+        # Получаем настройки пользователя для времени обслуживания
+        service_time_minutes = 10  # Значение по умолчанию
+        if user_id:
+            user_settings = self.settings_service.get_settings(user_id)
+            service_time_minutes = user_settings.service_time_minutes
+        
         points = []
         current_time = start_time
         total_distance = 0
@@ -62,10 +71,8 @@ class RouteOptimizer:
             travel_distance = distance_matrix[route_indices[i-1]][order_idx]
             travel_time = time_matrix[route_indices[i-1]][order_idx]
 
-            # Add delivery time
-            from src.config import settings
-            delivery_time = settings.delivery_time_per_stop
-            estimated_arrival = current_time + timedelta(minutes=travel_time + delivery_time)
+            # Add delivery time (используем настройку пользователя)
+            estimated_arrival = current_time + timedelta(minutes=travel_time + service_time_minutes)
 
             # Check if arrival time fits within delivery time window
             if order.delivery_time_start and order.delivery_time_end:
@@ -95,7 +102,7 @@ class RouteOptimizer:
             points.append(point)
 
             total_distance += travel_distance
-            total_time += travel_time + delivery_time
+            total_time += travel_time + service_time_minutes
 
         return OptimizedRoute(
             points=points,
@@ -130,7 +137,8 @@ class RouteOptimizer:
         distance_matrix: np.ndarray,
         time_matrix: np.ndarray,
         orders: List[Order],
-        start_time: datetime
+        start_time: datetime,
+        user_id: int = None
     ) -> List[int]:
         """Solve Vehicle Routing Problem using OR-Tools with advanced optimization"""
         try:
@@ -145,13 +153,18 @@ class RouteOptimizer:
             transit_callback_index = routing.RegisterTransitCallback(distance_callback)
             routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
 
-            # Add delivery time constraints (10 minutes per delivery)
+            # Add delivery time constraints (используем настройку пользователя)
+            service_time_minutes = 10  # Значение по умолчанию
+            if user_id:
+                user_settings = self.settings_service.get_settings(user_id)
+                service_time_minutes = user_settings.service_time_minutes
+            
             def delivery_time_callback(from_index, to_index):
                 from_node = manager.IndexToNode(from_index)
                 to_node = manager.IndexToNode(to_index)
                 # Travel time + delivery time (except for depot)
                 travel_time = int(time_matrix[from_node][to_node] * 60)  # seconds
-                delivery_time = 10 * 60 if to_node > 0 else 0  # 10 minutes for deliveries
+                delivery_time = service_time_minutes * 60 if to_node > 0 else 0  # minutes -> seconds
                 return travel_time + delivery_time
 
             delivery_callback_index = routing.RegisterTransitCallback(delivery_time_callback)

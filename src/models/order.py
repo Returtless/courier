@@ -88,6 +88,45 @@ class CallStatusDB(Base):
     )
 
 
+class UserSettingsDB(Base):
+    """Персональные настройки пользователя"""
+    __tablename__ = "user_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, unique=True, index=True)  # Telegram user ID
+    
+    # Настройки времени для звонков
+    call_advance_minutes = Column(Integer, default=10)  # За сколько минут до приезда звонить (по умолчанию 10)
+    call_retry_interval_minutes = Column(Integer, default=2)  # Интервал между повторными попытками звонка
+    call_max_attempts = Column(Integer, default=3)  # Максимальное количество попыток дозвона
+    
+    # Настройки времени доставки
+    service_time_minutes = Column(Integer, default=10)  # Время нахождения на точке (по умолчанию 10 минут)
+    parking_time_minutes = Column(Integer, default=7)  # Время на парковку и подход к подъезду
+    
+    # Настройки мониторинга пробок
+    traffic_check_interval_minutes = Column(Integer, default=5)  # Интервал проверки пробок
+    traffic_threshold_percent = Column(Integer, default=50)  # Процент увеличения времени для уведомления (по умолчанию 50%)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UserSettings(BaseModel):
+    """Pydantic модель для настроек пользователя"""
+    user_id: int
+    call_advance_minutes: int = 10
+    call_retry_interval_minutes: int = 2
+    call_max_attempts: int = 3
+    service_time_minutes: int = 10
+    parking_time_minutes: int = 7
+    traffic_check_interval_minutes: int = 5
+    traffic_threshold_percent: int = 50
+    
+    class Config:
+        from_attributes = True
+
+
 class Order(BaseModel):
     id: Optional[int] = None
     customer_name: Optional[str] = None

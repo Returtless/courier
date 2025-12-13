@@ -4,6 +4,7 @@ import time as time_module
 from datetime import datetime, timedelta, date
 from typing import Optional
 from src.services.db_service import DatabaseService
+from src.services.user_settings_service import UserSettingsService
 from src.database.connection import get_db_session
 from src.models.order import CallStatusDB
 from sqlalchemy import and_
@@ -38,6 +39,7 @@ class CallNotifier:
         self.bot = bot
         self.courier_bot = courier_bot
         self.db_service = DatabaseService()
+        self.settings_service = UserSettingsService()
         self.running = False
         self.thread = None
         self.check_interval = 30  # Проверка каждые 30 секунд
@@ -126,17 +128,25 @@ class CallNotifier:
                 and_(
                     CallStatusDB.status == "rejected",
                     CallStatusDB.next_attempt_time <= now,
-                    CallStatusDB.call_date == today,
-                    CallStatusDB.attempts < 3
+                    CallStatusDB.call_date == today
                 )
             ).all()
             
             for call in retry_calls:
-                # Обновляем статус на pending для повторной попытки
-                call.status = "pending"
-                call.next_attempt_time = None
-                session.commit()
-                self._send_call_notification(call)
+                # Получаем настройки пользователя для проверки максимального количества попыток
+                user_settings = self.settings_service.get_settings(call.user_id)
+                
+                if call.attempts < user_settings.call_max_attempts:
+                    # Обновляем статус на pending для повторной попытки
+                    call.status = "pending"
+                    call.next_attempt_time = None
+                    session.commit()
+                    self._send_call_notification(call)
+                else:
+                    # Превышено максимальное количество попыток
+                    call.status = "failed"
+                    session.commit()
+                    logger.warning(f"❌ Превышено максимальное количество попыток дозвона для заказа {call.order_number}")
     
     def _send_call_notification(self, call: CallStatusDB):
         """Отправить уведомление о необходимости звонка"""

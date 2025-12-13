@@ -10,6 +10,7 @@ from src.services.route_optimizer import RouteOptimizer
 from src.services.traffic_monitor import TrafficMonitor
 from src.services.db_service import DatabaseService
 from src.services.call_notifier import CallNotifier, get_local_now
+from src.services.user_settings_service import UserSettingsService
 from src.database.connection import Base, engine
 # from src.services.llm_service import LLMService  # Пока отключено
 
@@ -23,6 +24,7 @@ class CourierBot:
         self.traffic_monitor = TrafficMonitor(MapsService())
         self.db_service = DatabaseService()
         self.call_notifier = CallNotifier(bot, self)
+        self.settings_service = UserSettingsService()
         self.setup_traffic_callbacks()
         self.user_states = {}  # user_id -> state data (для временных состояний)
         # Инициализация БД (создание таблиц) - теперь только в main.py
@@ -32,7 +34,7 @@ class CourierBot:
         from telebot import types
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.row("📦 Заказы", "🗺️ Маршрут")
-        markup.row("🗑️ Сбросить день")
+        markup.row("⚙️ Настройки", "🗑️ Сбросить день")
         return markup
 
     @staticmethod
@@ -460,7 +462,7 @@ class CourierBot:
             
             route_optimizer = RouteOptimizer(maps_service)
             optimized_route = route_optimizer.optimize_route_sync(
-                orders, start_location_coords, start_datetime
+                orders, start_location_coords, start_datetime, user_id=user_id
             )
             
             self.bot.edit_message_text(
@@ -475,18 +477,21 @@ class CourierBot:
             # Сохраняем структурированные данные маршрута вместо готового текста
             route_points_data = []
             call_schedule = []
+            
+            # Получаем настройки пользователя для времени звонка
+            user_settings = self.settings_service.get_settings(user_id)
 
             for i, point in enumerate(optimized_route.points, 1):
                 order = point.order
 
-                # Calculate call time (40 min before delivery, but not before start of delivery window)
-                call_time = point.estimated_arrival - timedelta(minutes=40)
+                # Calculate call time (используем настройку пользователя вместо жестко заданных 40 минут)
+                call_time = point.estimated_arrival - timedelta(minutes=user_settings.call_advance_minutes)
 
                 # If order has time window, ensure call is not too early
                 if order.delivery_time_start:
                     today = point.estimated_arrival.date()
                     window_start = datetime.combine(today, order.delivery_time_start)
-                    earliest_call = window_start - timedelta(minutes=40)
+                    earliest_call = window_start - timedelta(minutes=user_settings.call_advance_minutes)
 
                     if call_time < earliest_call:
                         call_time = earliest_call
@@ -1024,6 +1029,8 @@ class CourierBot:
             if text == "ℹ️ Статус пробок":
                 return self.handle_traffic_status(message)
             # Общие действия
+            if text == "⚙️ Настройки":
+                return self.handle_settings_menu(message)
             if text == "🗑️ Сбросить день":
                 return self.handle_reset_day(message)
             if text == "✍️ Ввести другой адрес":
@@ -1123,6 +1130,8 @@ class CourierBot:
             self.process_order_delivery_time(message, state_data)
         elif current_state == 'waiting_for_call_comment':
             self.process_call_comment(message, state_data)
+        elif current_state == 'waiting_for_setting_value':
+            self.handle_setting_value(message, state_data)
         elif current_state == 'searching_order_by_number':
             self.process_search_order_by_number(message, state_data)
         else:
@@ -1484,6 +1493,26 @@ class CourierBot:
             )
             user_id = call.from_user.id
             self.update_user_state(user_id, 'state', 'searching_order_by_number')
+        elif callback_data.startswith("settings_"):
+            # Обработка настроек
+            if callback_data == "settings_back":
+                self.bot.answer_callback_query(call.id)
+                self.bot.edit_message_text(
+                    "🏠 Главное меню",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+                self.bot.send_message(
+                    call.message.chat.id,
+                    "Выберите действие:",
+                    reply_markup=self._main_menu_markup()
+                )
+            elif callback_data == "settings_reset":
+                self.handle_settings_reset(call)
+            else:
+                # Обработка запроса на изменение настройки
+                setting_name = callback_data.replace("settings_", "")
+                self.handle_setting_update(call, setting_name)
 
     def show_order_details(self, user_id: int, order_number: str, chat_id: int):
         """Показать детали заказа с кнопкой Доставлен"""
@@ -3009,10 +3038,11 @@ class CourierBot:
             if updated_order_in_list.customer_name:
                 order_title += f" ({updated_order_in_list.customer_name})"
             
-            # Calculate call time (40 min before delivery, but not before start of delivery window)
-            call_time = arrival_time - timedelta(minutes=40)
+            # Calculate call time (используем настройку пользователя вместо жестко заданных 40 минут)
+            user_settings = self.settings_service.get_settings(user_id)
+            call_time = arrival_time - timedelta(minutes=user_settings.call_advance_minutes)
             if window_start:
-                earliest_call = window_start - timedelta(minutes=40)
+                earliest_call = window_start - timedelta(minutes=user_settings.call_advance_minutes)
                 if call_time < earliest_call:
                     call_time = earliest_call
             
@@ -3249,3 +3279,217 @@ class CourierBot:
             self.bot.send_message(user_id, alert_text, parse_mode='HTML')
         except Exception as e:
             logger.warning(f"Не удалось отправить уведомление пользователю {user_id}: {e}", exc_info=True)
+    
+    def handle_settings_menu(self, message):
+        """Обработчик меню настроек"""
+        user_id = message.from_user.id
+        settings = self.settings_service.get_settings(user_id)
+        
+        # Формируем текст с текущими настройками
+        text = (
+            "⚙️ <b>Настройки</b>\n\n"
+            f"📞 <b>Звонки:</b>\n"
+            f"• Звонить за {settings.call_advance_minutes} мин до приезда\n"
+            f"• Повтор через {settings.call_retry_interval_minutes} мин\n"
+            f"• Максимум попыток: {settings.call_max_attempts}\n\n"
+            f"⏱️ <b>Время:</b>\n"
+            f"• На точке: {settings.service_time_minutes} мин\n"
+            f"• Парковка: {settings.parking_time_minutes} мин\n\n"
+            f"🚦 <b>Пробки:</b>\n"
+            f"• Проверка каждые {settings.traffic_check_interval_minutes} мин\n"
+            f"• Уведомлять при увеличении на {settings.traffic_threshold_percent}%\n\n"
+            "Выберите параметр для изменения:"
+        )
+        
+        from telebot import types
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("⏱️ Время звонка до приезда", callback_data="settings_call_advance"),
+            types.InlineKeyboardButton("🔄 Интервал повторных звонков", callback_data="settings_call_retry"),
+            types.InlineKeyboardButton("📞 Макс. попыток дозвона", callback_data="settings_call_attempts"),
+            types.InlineKeyboardButton("⏰ Время на точке", callback_data="settings_service_time"),
+            types.InlineKeyboardButton("🚗 Время на парковку", callback_data="settings_parking_time"),
+            types.InlineKeyboardButton("🚦 Интервал проверки пробок", callback_data="settings_traffic_interval"),
+            types.InlineKeyboardButton("⚠️ Порог уведомлений о пробках", callback_data="settings_traffic_threshold"),
+            types.InlineKeyboardButton("🔄 Сбросить к умолчанию", callback_data="settings_reset"),
+            types.InlineKeyboardButton("⬅️ Назад", callback_data="settings_back")
+        )
+        
+        self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=markup)
+    
+    def handle_setting_update(self, call, setting_name: str):
+        """Обработка запроса на изменение настройки"""
+        user_id = call.from_user.id
+        
+        # Описания и текущие значения
+        settings = self.settings_service.get_settings(user_id)
+        setting_info = {
+            'call_advance': {
+                'name': 'call_advance_minutes',
+                'title': '⏱️ Время звонка до приезда',
+                'description': 'За сколько минут до приезда звонить клиенту',
+                'current': settings.call_advance_minutes,
+                'min': 1,
+                'max': 60,
+                'unit': 'минут'
+            },
+            'call_retry': {
+                'name': 'call_retry_interval_minutes',
+                'title': '🔄 Интервал повторных звонков',
+                'description': 'Через сколько минут повторить звонок после отклонения',
+                'current': settings.call_retry_interval_minutes,
+                'min': 1,
+                'max': 15,
+                'unit': 'минут'
+            },
+            'call_attempts': {
+                'name': 'call_max_attempts',
+                'title': '📞 Максимум попыток дозвона',
+                'description': 'Сколько раз пытаться дозвониться',
+                'current': settings.call_max_attempts,
+                'min': 1,
+                'max': 10,
+                'unit': 'раз'
+            },
+            'service_time': {
+                'name': 'service_time_minutes',
+                'title': '⏰ Время на точке',
+                'description': 'Сколько времени тратится на доставку одного заказа',
+                'current': settings.service_time_minutes,
+                'min': 1,
+                'max': 60,
+                'unit': 'минут'
+            },
+            'parking_time': {
+                'name': 'parking_time_minutes',
+                'title': '🚗 Время на парковку',
+                'description': 'Время на парковку и подход к подъезду',
+                'current': settings.parking_time_minutes,
+                'min': 0,
+                'max': 30,
+                'unit': 'минут'
+            },
+            'traffic_interval': {
+                'name': 'traffic_check_interval_minutes',
+                'title': '🚦 Интервал проверки пробок',
+                'description': 'Как часто проверять изменения в пробках',
+                'current': settings.traffic_check_interval_minutes,
+                'min': 1,
+                'max': 60,
+                'unit': 'минут'
+            },
+            'traffic_threshold': {
+                'name': 'traffic_threshold_percent',
+                'title': '⚠️ Порог уведомлений о пробках',
+                'description': 'При каком увеличении времени уведомлять',
+                'current': settings.traffic_threshold_percent,
+                'min': 10,
+                'max': 200,
+                'unit': '%'
+            }
+        }
+        
+        info = setting_info.get(setting_name)
+        if not info:
+            self.bot.answer_callback_query(call.id, "❌ Неизвестная настройка")
+            return
+        
+        # Сохраняем информацию о текущей настройке в состоянии
+        self.update_user_state(user_id, 'state', 'waiting_for_setting_value')
+        self.update_user_state(user_id, 'pending_setting_name', info['name'])
+        self.update_user_state(user_id, 'pending_setting_min', info['min'])
+        self.update_user_state(user_id, 'pending_setting_max', info['max'])
+        
+        from telebot import types
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("❌ Отмена")
+        
+        self.bot.answer_callback_query(call.id)
+        self.bot.send_message(
+            user_id,
+            f"{info['title']}\n\n"
+            f"📝 {info['description']}\n"
+            f"📊 Текущее значение: <b>{info['current']} {info['unit']}</b>\n"
+            f"📏 Диапазон: {info['min']}-{info['max']} {info['unit']}\n\n"
+            f"Введите новое значение:",
+            parse_mode='HTML',
+            reply_markup=markup
+        )
+    
+    def handle_setting_value(self, message, state_data):
+        """Обработка нового значения настройки"""
+        user_id = message.from_user.id
+        setting_name = state_data.get('pending_setting_name')
+        min_val = state_data.get('pending_setting_min', 0)
+        max_val = state_data.get('pending_setting_max', 100)
+        
+        try:
+            value = int(message.text.strip())
+            
+            if value < min_val or value > max_val:
+                self.bot.reply_to(
+                    message,
+                    f"❌ Значение должно быть от {min_val} до {max_val}. Попробуйте еще раз:"
+                )
+                return
+            
+            # Обновляем настройку
+            success = self.settings_service.update_setting(user_id, setting_name, value)
+            
+            if success:
+                self.update_user_state(user_id, 'state', None)
+                self.update_user_state(user_id, 'pending_setting_name', None)
+                
+                setting_description = self.settings_service.get_setting_description(setting_name)
+                
+                self.bot.reply_to(
+                    message,
+                    f"✅ Настройка обновлена!\n\n{setting_description}: <b>{value}</b>",
+                    parse_mode='HTML',
+                    reply_markup=self._main_menu_markup()
+                )
+            else:
+                self.bot.reply_to(
+                    message,
+                    "❌ Ошибка при обновлении настройки",
+                    reply_markup=self._main_menu_markup()
+                )
+        except ValueError:
+            self.bot.reply_to(
+                message,
+                "❌ Пожалуйста, введите целое число:"
+            )
+    
+    def handle_settings_reset(self, call):
+        """Сброс настроек к значениям по умолчанию"""
+        user_id = call.from_user.id
+        
+        success = self.settings_service.reset_settings(user_id)
+        
+        if success:
+            settings = self.settings_service.get_settings(user_id)
+            text = (
+                "✅ <b>Настройки сброшены к значениям по умолчанию</b>\n\n"
+                f"📞 Звонить за {settings.call_advance_minutes} мин\n"
+                f"🔄 Повтор через {settings.call_retry_interval_minutes} мин\n"
+                f"📞 Максимум попыток: {settings.call_max_attempts}\n"
+                f"⏰ На точке: {settings.service_time_minutes} мин\n"
+                f"🚗 Парковка: {settings.parking_time_minutes} мин\n"
+                f"🚦 Проверка пробок: {settings.traffic_check_interval_minutes} мин\n"
+                f"⚠️ Порог пробок: {settings.traffic_threshold_percent}%"
+            )
+            self.bot.answer_callback_query(call.id, "✅ Настройки сброшены")
+            self.bot.edit_message_text(
+                text,
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='HTML'
+            )
+            self.bot.send_message(
+                call.message.chat.id,
+                "🏠 Главное меню",
+                reply_markup=self._main_menu_markup()
+            )
+        else:
+            self.bot.answer_callback_query(call.id, "❌ Ошибка сброса настроек", show_alert=True)
+
