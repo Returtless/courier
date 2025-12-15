@@ -3,19 +3,32 @@ import logging
 from src.config import settings
 from src.database.connection import engine, Base
 # Импортируем модели, чтобы они зарегистрировались в Base.metadata
-from src.models.order import OrderDB, StartLocationDB, RouteDataDB, CallStatusDB  # noqa: F401
+from src.models.order import OrderDB, StartLocationDB, RouteDataDB, CallStatusDB, UserSettingsDB, UserCredentialsDB  # noqa: F401
 from src.models.geocache import GeocodeCacheDB  # noqa: F401
 # from src.services.llm_service import LLMService  # Пока отключено
 from src.bot.handlers import CourierBot
+# ImportCommands теперь часть handlers (import_handlers.py)
 
 
 def main():
     # Configure logging
     logging.basicConfig(level=logging.INFO)
-
-    # Create database tables (модели должны быть импортированы выше)
-    Base.metadata.create_all(bind=engine)
     logger = logging.getLogger(__name__)
+
+    # Run database migrations first (like Flyway)
+    logger.info("🔄 Применение миграций базы данных...")
+    try:
+        from migrate import run_migrations
+        if not run_migrations():
+            logger.error("❌ Ошибка применения миграций. Проверьте логи выше.")
+            return
+    except Exception as e:
+        logger.error(f"❌ Не удалось применить миграции: {e}")
+        logger.warning("⚠️ Продолжаем без миграций (используется create_all)")
+    
+    # Create database tables (модели должны быть импортированы выше)
+    # create_all не изменяет существующие таблицы, поэтому безопасно
+    Base.metadata.create_all(bind=engine)
     logger.info("✅ База данных инициализирована")
 
     # Initialize bot
@@ -30,10 +43,10 @@ def main():
     # llm_service = LLMService()  # Пока отключено
     llm_service = None
 
-    # Initialize bot handler
+    # Initialize bot handler (все сервисы инициализируются внутри)
     courier_bot = CourierBot(bot, llm_service)
 
-    # Register handlers
+    # Register all handlers (включая import handlers)
     courier_bot.register_handlers()
     
     # Start call notifier

@@ -1,26 +1,61 @@
+# Git
+.git
+.gitignore
+.github
+
+# Python
 __pycache__
-*.pyc
-*.pyo
-*.pyd
-.Python
+*.py[cod]
+*$py.class
 *.so
-*.egg
-*.egg-info
-dist
-build
-.env
-env
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
 *.db
 *.sqlite
 *.sqlite3
-.git
-.gitignore
-.vscode
-.idea
-*.md
-Dockerfile
-docker-compose.yml
-.dockerignore
-test_*.py
+data/
+logs/
 *.log
 
+# Test files
+test_*.py
+*_test.py
+simple_test.py
+demo.py
+
+# Documentation
+README.md
+*.md
+!requirements.txt
+
+# Docker
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# Environment
+env
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+*.tmp
+*.bak
+*.cache

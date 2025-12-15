@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     llm_device: str = "cpu"
     llm_max_tokens: int = 512
 
+    # Security
+    encryption_key: Optional[str] = None  # For encrypting sensitive data (will be auto-generated if not set)
+
     # Route optimization
     delivery_time_per_stop: int = 10  # minutes
     parking_walking_time: int = 7  # minutes
@@ -29,6 +32,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = "env"
         case_sensitive = False
+        extra = "allow"  # Allow extra fields from .env
 
 
 settings = Settings()

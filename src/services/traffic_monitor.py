@@ -4,6 +4,7 @@ import logging
 from typing import Dict, List, Optional, Callable
 from datetime import datetime, timedelta
 from src.services.maps_service import MapsService
+from src.services.user_settings_service import UserSettingsService
 from src.models.order import Order, OptimizedRoute
 
 logger = logging.getLogger(__name__)
@@ -15,10 +16,9 @@ class TrafficMonitor:
     Поддерживает несколько пользователей одновременно
     """
 
-    def __init__(self, maps_service: MapsService, check_interval_minutes: int = 5):
+    def __init__(self, maps_service: MapsService):
         self.maps_service = maps_service
-        self.check_interval = check_interval_minutes * 60  # convert to seconds
-        self.traffic_threshold = 1.5  # 50% increase in time
+        self.settings_service = UserSettingsService()
         self.callbacks: List[Callable] = []
         
         # Хранилище данных мониторинга для каждого пользователя
@@ -40,6 +40,9 @@ class TrafficMonitor:
             if user_id in self.user_monitors:
                 self._stop_monitoring_for_user(user_id)
             
+            # Получаем настройки пользователя
+            user_settings = self.settings_service.get_settings(user_id)
+            
             # Создать новую запись мониторинга
             monitor_data = {
                 'route': route,
@@ -47,7 +50,9 @@ class TrafficMonitor:
                 'start_location': start_location,
                 'start_time': start_time,
                 'last_check_time': datetime.now(),
-                'is_monitoring': True
+                'is_monitoring': True,
+                'check_interval': user_settings.traffic_check_interval_minutes * 60,  # в секунды
+                'traffic_threshold': 1.0 + (user_settings.traffic_threshold_percent / 100.0)  # 50% -> 1.5
             }
             
             # Запустить поток мониторинга для этого пользователя
@@ -60,7 +65,7 @@ class TrafficMonitor:
             monitor_data['thread'] = monitor_thread
             
             self.user_monitors[user_id] = monitor_data
-            logger.info(f"🚦 Начат мониторинг пробок для user_id={user_id} каждые 5 минут")
+            logger.info(f"🚦 Начат мониторинг пробок для user_id={user_id} каждые {user_settings.traffic_check_interval_minutes} минут")
 
     def stop_monitoring(self, user_id: int = None):
         """Остановить мониторинг для конкретного пользователя или всех"""
@@ -100,10 +105,11 @@ class TrafficMonitor:
                 route = monitor_data['route']
                 orders = monitor_data['orders']
                 start_location = monitor_data['start_location']
+                check_interval = monitor_data.get('check_interval', 5 * 60)
             
             try:
                 self._check_traffic_changes(user_id, route, orders, start_location)
-                time.sleep(self.check_interval)
+                time.sleep(check_interval)
             except Exception as e:
                 logger.error(f"❌ Ошибка мониторинга пробок для user_id={user_id}: {e}", exc_info=True)
                 time.sleep(60)  # Wait 1 minute before retrying
@@ -112,6 +118,13 @@ class TrafficMonitor:
         """Проверить изменения в пробках для конкретного пользователя"""
         if not route or not orders:
             return
+
+        # Получаем настройки пользователя
+        with self.monitor_lock:
+            if user_id not in self.user_monitors:
+                return
+            monitor_data = self.user_monitors[user_id]
+            traffic_threshold = monitor_data.get('traffic_threshold', 1.5)
 
         logger.debug(f"🔍 Проверяю изменения в пробках для user_id={user_id}...")
 
@@ -140,7 +153,7 @@ class TrafficMonitor:
                 planned_time = point.time_from_previous
                 current_ratio = travel_time / planned_time if planned_time > 0 else 1
 
-                if current_ratio > self.traffic_threshold:
+                if current_ratio > traffic_threshold:
                     delay_minutes = travel_time - planned_time
                     significant_changes.append({
                         'order': order,
@@ -186,25 +199,25 @@ class TrafficMonitor:
             if user_id is not None:
                 if user_id in self.user_monitors:
                     monitor_data = self.user_monitors[user_id]
+                    check_interval_minutes = monitor_data.get('check_interval', 300) / 60
                     return {
                         'is_monitoring': monitor_data.get('is_monitoring', False),
                         'last_check': monitor_data.get('last_check_time').isoformat() if monitor_data.get('last_check_time') else None,
                         'route_points': len(monitor_data.get('route', {}).points) if monitor_data.get('route') else 0,
-                        'check_interval_minutes': self.check_interval / 60
+                        'check_interval_minutes': check_interval_minutes
                     }
                 else:
                     return {
                         'is_monitoring': False,
                         'last_check': None,
                         'route_points': 0,
-                        'check_interval_minutes': self.check_interval / 60
+                        'check_interval_minutes': 5  # Default
                     }
             else:
                 # Статус для всех пользователей
                 return {
                     'total_monitors': len(self.user_monitors),
-                    'active_monitors': sum(1 for m in self.user_monitors.values() if m.get('is_monitoring', False)),
-                    'check_interval_minutes': self.check_interval / 60
+                    'active_monitors': sum(1 for m in self.user_monitors.values() if m.get('is_monitoring', False))
                 }
 
     def force_recheck(self, user_id: int):

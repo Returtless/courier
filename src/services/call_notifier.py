@@ -4,6 +4,7 @@ import time as time_module
 from datetime import datetime, timedelta, date
 from typing import Optional
 from src.services.db_service import DatabaseService
+from src.services.user_settings_service import UserSettingsService
 from src.database.connection import get_db_session
 from src.models.order import CallStatusDB
 from sqlalchemy import and_
@@ -38,6 +39,7 @@ class CallNotifier:
         self.bot = bot
         self.courier_bot = courier_bot
         self.db_service = DatabaseService()
+        self.settings_service = UserSettingsService()
         self.running = False
         self.thread = None
         self.check_interval = 30  # Проверка каждые 30 секунд
@@ -79,7 +81,7 @@ class CallNotifier:
         today = date.today()
         
         with get_db_session() as session:
-            # Ищем звонки со статусом pending, время которых наступило
+            # Ищем звонки со статусом ТОЛЬКО pending, время которых наступило
             # Проверяем звонки, которые должны быть сделаны в течение последних 10 минут (на случай если бот был перезапущен)
             time_threshold = now - timedelta(minutes=10)
             
@@ -96,13 +98,14 @@ class CallNotifier:
                 time_diff = (call.call_time - now).total_seconds() / 60
                 logger.debug(f"Заказ {call.order_number}: время звонка {call.call_time.strftime('%Y-%m-%d %H:%M:%S')}, разница {time_diff:.1f} мин")
             
-            # Ищем звонки со статусом pending или sent (sent - это отправленные, но еще не подтвержденные/отклоненные)
+            # Ищем звонки со статусом ТОЛЬКО pending (убираем "sent" чтобы не было дубликатов!)
             pending_calls = session.query(CallStatusDB).filter(
                 and_(
-                    CallStatusDB.status.in_(["pending", "sent"]),  # Также проверяем "sent" на случай если уведомление уже отправлено
+                    CallStatusDB.status == "pending",  # Только pending, без sent!
                     CallStatusDB.call_time <= now,
                     CallStatusDB.call_time >= time_threshold,  # Не старше 10 минут
-                    CallStatusDB.call_date == today
+                    CallStatusDB.call_date == today,
+                    CallStatusDB.attempts == 0  # Только первая попытка (retry идет через _check_retry_calls)
                 )
             ).all()
             
@@ -110,7 +113,7 @@ class CallNotifier:
             
             for call in pending_calls:
                 logger.info(f"✅ Найден звонок для отправки: заказ {call.order_number}, время {call.call_time.strftime('%H:%M:%S')}, сейчас {now.strftime('%H:%M:%S')}")
-                self._send_call_notification(call)
+                self._send_call_notification(call.id, session)
     
     def _check_retry_calls(self):
         """Проверить звонки для повторной попытки"""
@@ -126,31 +129,65 @@ class CallNotifier:
                 and_(
                     CallStatusDB.status == "rejected",
                     CallStatusDB.next_attempt_time <= now,
-                    CallStatusDB.call_date == today,
-                    CallStatusDB.attempts < 3
+                    CallStatusDB.call_date == today
                 )
             ).all()
             
             for call in retry_calls:
-                # Обновляем статус на pending для повторной попытки
-                call.status = "pending"
-                call.next_attempt_time = None
-                session.commit()
-                self._send_call_notification(call)
+                # Получаем настройки пользователя для проверки максимального количества попыток
+                user_settings = self.settings_service.get_settings(call.user_id)
+                
+                if call.attempts < user_settings.call_max_attempts:
+                    # Отправляем повторную попытку (счетчик увеличится внутри _send_call_notification)
+                    logger.info(f"🔄 Повторная попытка звонка #{call.attempts + 1} для заказа {call.order_number}")
+                    self._send_call_notification(call.id, session, is_retry=True)
+                else:
+                    # Превышено максимальное количество попыток
+                    call.status = "failed"
+                    session.commit()
+                    logger.warning(f"❌ Превышено максимальное количество попыток дозвона для заказа {call.order_number}")
     
-    def _send_call_notification(self, call: CallStatusDB):
-        """Отправить уведомление о необходимости звонка"""
+    def _send_call_notification(self, call_id: int, session, is_retry: bool = False):
+        """Отправить уведомление о необходимости звонка
+        
+        Args:
+            call_id: ID записи о звонке
+            session: SQLAlchemy сессия (передается извне, чтобы избежать race conditions)
+            is_retry: True если это повторная попытка после reject
+        """
         try:
+            # Получаем актуальную запись из переданной сессии
+            call = session.query(CallStatusDB).filter(CallStatusDB.id == call_id).first()
+            if not call:
+                logger.error(f"❌ Запись о звонке с ID {call_id} не найдена")
+                return
+            
+            # Проверяем что звонок еще актуален
+            if call.status not in ["pending", "rejected"]:
+                logger.warning(f"⚠️ Попытка отправить уведомление для звонка со статусом {call.status}, пропускаем")
+                return
+            
             customer_info = call.customer_name or "Клиент"
             order_info = f"Заказ №{call.order_number}" if call.order_number else "Заказ"
             
-            text = (
-                f"📞 <b>Время звонка!</b>\n\n"
-                f"👤 {customer_info}\n"
-                f"📦 {order_info}\n"
-                f"📱 {call.phone}\n"
-                f"🕐 Время: {call.call_time.strftime('%H:%M')}"
-            )
+            # Формируем текст с указанием попытки (если это retry)
+            if is_retry:
+                text = (
+                    f"📞 <b>Повторное уведомление!</b>\n\n"
+                    f"👤 {customer_info}\n"
+                    f"📦 {order_info}\n"
+                    f"📱 {call.phone}\n"
+                    f"🕐 Время: {call.call_time.strftime('%H:%M')}\n"
+                    f"🔄 Попытка: {call.attempts + 1}"
+                )
+            else:
+                text = (
+                    f"📞 <b>Время звонка!</b>\n\n"
+                    f"👤 {customer_info}\n"
+                    f"📦 {order_info}\n"
+                    f"📱 {call.phone}\n"
+                    f"🕐 Время: {call.call_time.strftime('%H:%M')}"
+                )
             
             # Создаем inline клавиатуру с кнопками
             from telebot import types
@@ -176,16 +213,15 @@ class CallNotifier:
                     reply_markup=markup
                 )
                 
-                logger.info(f"✅ Отправлено уведомление о звонке для заказа {call.order_number} пользователю {call.user_id}")
+                # ВАЖНО: Обновляем статус и счетчик ПОСЛЕ успешной отправки
+                call.attempts += 1
+                call.status = "sent"  # Помечаем как отправленное
+                if is_retry:
+                    call.next_attempt_time = None  # Сбрасываем время следующей попытки
+                session.commit()
                 
-                # Обновляем статус в БД, чтобы не отправлять повторно
-                # Используем временный статус "sent" (можно использовать любое значение, которое не pending/rejected/confirmed/failed)
-                with get_db_session() as session:
-                    call_status = session.query(CallStatusDB).filter(CallStatusDB.id == call.id).first()
-                    if call_status and call_status.status == "pending":
-                        # Временно помечаем как отправленное (после подтверждения/отклонения статус изменится)
-                        call_status.status = "sent"
-                        session.commit()
+                logger.info(f"✅ Отправлено уведомление о звонке для заказа {call.order_number} пользователю {call.user_id} (попытка #{call.attempts})")
+                
             except Exception as send_error:
                 logger.error(f"❌ Ошибка отправки уведомления: {send_error}", exc_info=True)
             
