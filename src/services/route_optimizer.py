@@ -182,6 +182,9 @@ class RouteOptimizer:
             for i, order in enumerate(orders):
                 node_index = manager.NodeToIndex(i + 1)
                 
+                # DEBUG: Логируем manual_arrival_time для всех заказов
+                logger.info(f"📝 Заказ №{order.order_number}: manual_arrival_time = {order.manual_arrival_time}")
+                
                 # Приоритет 1: Ручное время прибытия (жесткое ограничение)
                 if order.manual_arrival_time:
                     # Если установлено ручное время прибытия - это фиксированная точка
@@ -194,7 +197,7 @@ class RouteOptimizer:
                     arrival_seconds_max = int(time_diff + tolerance_seconds)
                     
                     time_dimension.CumulVar(node_index).SetRange(arrival_seconds_min, arrival_seconds_max)
-                    logger.info(f"🔒 Заказ №{order.order_number}: фиксированное время прибытия {order.manual_arrival_time.strftime('%H:%M')} (диапазон ±5 мин)")
+                    logger.info(f"🔒 Заказ №{order.order_number}: фиксированное время прибытия {order.manual_arrival_time.strftime('%H:%M')} (диапазон ±5 мин, от {arrival_seconds_min}s до {arrival_seconds_max}s от старта)")
                 
                 # Приоритет 2: Временное окно доставки
                 elif order.delivery_time_start and order.delivery_time_end:

@@ -213,6 +213,15 @@ class CourierBot:
         markup.row("🚦 Мониторинг", "🛑 Стоп мониторинг")
         markup.row("⬅️ Главное меню")
         return markup
+    
+    @staticmethod
+    def _add_orders_menu_markup():
+        """Разметка меню добавления заказов"""
+        from telebot import types
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("✅ Готово")
+        markup.row("⬅️ Главное меню")
+        return markup
 
 
 # Экспортируем главный класс

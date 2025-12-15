@@ -1,13 +1,11 @@
 import telebot
 import logging
 from src.config import settings
-from src.database.connection import engine, Base
-# Импортируем модели, чтобы они зарегистрировались в Base.metadata
+# Импортируем модели для использования в ORM запросах
 from src.models.order import OrderDB, StartLocationDB, RouteDataDB, CallStatusDB, UserSettingsDB, UserCredentialsDB  # noqa: F401
 from src.models.geocache import GeocodeCacheDB  # noqa: F401
 # from src.services.llm_service import LLMService  # Пока отключено
 from src.bot.handlers import CourierBot
-# ImportCommands теперь часть handlers (import_handlers.py)
 
 
 def main():
@@ -15,21 +13,13 @@ def main():
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
-    # Run database migrations first (like Flyway)
+    # Применяем миграции (создают таблицы и изменяют схему)
     logger.info("🔄 Применение миграций базы данных...")
-    try:
-        from migrate import run_migrations
-        if not run_migrations():
-            logger.error("❌ Ошибка применения миграций. Проверьте логи выше.")
-            return
-    except Exception as e:
-        logger.error(f"❌ Не удалось применить миграции: {e}")
-        logger.warning("⚠️ Продолжаем без миграций (используется create_all)")
-    
-    # Create database tables (модели должны быть импортированы выше)
-    # create_all не изменяет существующие таблицы, поэтому безопасно
-    Base.metadata.create_all(bind=engine)
-    logger.info("✅ База данных инициализирована")
+    from migrate import run_migrations
+    if not run_migrations():
+        logger.error("❌ Ошибка применения миграций. Проверьте логи выше.")
+        return
+    logger.info("✅ База данных готова")
 
     # Initialize bot
     logger = logging.getLogger(__name__)

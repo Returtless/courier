@@ -28,13 +28,10 @@ class OrderDB(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Route optimization fields
+    # Route optimization fields (расчетные)
     estimated_delivery_time = Column(DateTime, nullable=True)  # Расчетное время прибытия
     call_time = Column(DateTime, nullable=True)  # Расчетное время звонка
     route_order = Column(Integer, nullable=True)
-    
-    # Manual time override fields (приоритет над расчетными)
-    manual_arrival_time = Column(DateTime, nullable=True)  # Ручное время прибытия (ограничение для оптимизации)
 
 
 class StartLocationDB(Base):
@@ -76,8 +73,11 @@ class CallStatusDB(Base):
     order_number = Column(String, nullable=False, index=True)
     call_date = Column(Date, nullable=False, index=True)
     call_time = Column(DateTime, nullable=False)  # Время когда нужно звонить
-    arrival_time = Column(DateTime, nullable=True)  # Время прибытия (для ручных установок)
-    is_manual = Column(Boolean, default=False)  # Ручная установка времени
+    arrival_time = Column(DateTime, nullable=True)  # Расчетное/ручное время прибытия (для уведомлений)
+    # Новая схема ручных флагов
+    is_manual_call = Column(Boolean, default=False)      # Время звонка установлено вручную
+    is_manual_arrival = Column(Boolean, default=False)   # Время прибытия установлено вручную
+    manual_arrival_time = Column(DateTime, nullable=True)  # Ручное время прибытия (жесткое ограничение для оптимизации)
     phone = Column(String, nullable=False)
     customer_name = Column(String, nullable=True)
     status = Column(String, default="pending")  # pending, confirmed, rejected, failed (после 3 отклонений)

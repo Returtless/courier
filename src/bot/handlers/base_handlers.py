@@ -95,6 +95,9 @@ class BaseHandlers:
     
     def handle_orders_menu(self, message):
         """Открыть меню заказов"""
+        # Очищаем состояние при переходе в меню
+        self.parent.clear_user_state(message.from_user.id)
+        
         self.bot.reply_to(
             message,
             "📦 <b>Меню заказов</b>\n\nВыберите действие:",
@@ -104,6 +107,9 @@ class BaseHandlers:
     
     def handle_route_menu(self, message):
         """Открыть меню маршрута"""
+        # Очищаем состояние при переходе в меню
+        self.parent.clear_user_state(message.from_user.id)
+        
         self.bot.reply_to(
             message,
             "🗺️ <b>Меню маршрута</b>\n\nВыберите действие:",
@@ -113,10 +119,16 @@ class BaseHandlers:
     
     def handle_settings_menu(self, message):
         """Открыть меню настроек"""
+        # Очищаем состояние при переходе в меню
+        self.parent.clear_user_state(message.from_user.id)
+        
         self.parent.settings.show_settings_menu(message)
     
     def handle_back_to_main(self, message):
         """Вернуться в главное меню"""
+        # Очищаем состояние при переходе в главное меню
+        self.parent.clear_user_state(message.from_user.id)
+        
         self.bot.reply_to(
             message,
             "🏠 <b>Главное меню</b>\n\nВыберите раздел:",
@@ -140,6 +152,9 @@ class BaseHandlers:
                 self.parent.imports.handle_callback(call)
             elif callback_data.startswith("traffic_"):
                 self.parent.traffic.handle_callback(call)
+            elif callback_data.startswith("reset_") or callback_data.startswith("confirm_start_"):
+                # Обработка callback'ов маршрутов (сброс дня, подтверждение точки старта)
+                self.parent.routes.handle_callback(call)
             elif callback_data == "view_delivered_orders":
                 self.parent.orders.handle_view_delivered(call)
             else:

@@ -29,12 +29,43 @@ class DatabaseService:
     
     def _get_orders(self, user_id: int, order_date: date, session: Session) -> List[Dict]:
         """Внутренний метод получения заказов"""
-        orders = session.query(OrderDB).filter(
+        # ВАЖНО: Для каждого order_number берем ПОСЛЕДНЮЮ запись (по updated_at)
+        # чтобы избежать проблем с дубликатами
+        from sqlalchemy import func
+        
+        # Подзапрос для получения максимального id (последней записи) для каждого order_number
+        subquery = session.query(
+            OrderDB.order_number,
+            func.max(OrderDB.id).label('max_id')
+        ).filter(
             and_(
                 OrderDB.user_id == user_id,
                 OrderDB.order_date == order_date
             )
+        ).group_by(OrderDB.order_number).subquery()
+        
+        # Получаем только последние записи для каждого order_number
+        orders = session.query(OrderDB).join(
+            subquery,
+            and_(
+                OrderDB.order_number == subquery.c.order_number,
+                OrderDB.id == subquery.c.max_id
+            )
         ).all()
+        
+        # Загружаем call_status для текущей даты, чтобы подтянуть ручные времена
+        from src.models.order import CallStatusDB
+        call_status_list = session.query(CallStatusDB).filter(
+            and_(
+                CallStatusDB.user_id == user_id,
+                CallStatusDB.call_date == order_date
+            )
+        ).all()
+        call_status_map = {
+            cs.order_number: cs for cs in call_status_list
+        }
+        
+        logger.info(f"📦 Загружено {len(orders)} уникальных заказов для user_id={user_id}, date={order_date}")
         
         result = []
         for order_db in orders:
@@ -64,8 +95,16 @@ class DatabaseService:
                 'entrance_number': order_db.entrance_number,
                 'apartment_number': order_db.apartment_number,
                 'gis_id': order_db.gis_id,
-                'manual_arrival_time': order_db.manual_arrival_time,  # Ручное время прибытия (ограничение для оптимизации)
+                # manual_arrival_time теперь хранится в call_status
+                'manual_arrival_time': None,
             }
+            
+            # Подтягиваем ручные времена из call_status
+            cs = call_status_map.get(order_db.order_number)
+            if cs and cs.is_manual_arrival and cs.manual_arrival_time:
+                order_dict['manual_arrival_time'] = cs.manual_arrival_time
+                logger.info(f"   ✅ Заказ #{order_db.order_number} (id={order_db.id}): manual_arrival_time = {cs.manual_arrival_time}")
+            
             result.append(order_dict)
         
         return result
@@ -100,6 +139,7 @@ class DatabaseService:
                 entrance_number=order.entrance_number,
                 apartment_number=order.apartment_number,
                 gis_id=order.gis_id,
+                manual_arrival_time=order.manual_arrival_time,  # Ручное время прибытия
             )
             session.add(order_db)
             session.commit()
@@ -204,6 +244,34 @@ class DatabaseService:
         session.commit()
         session.refresh(start_location)
         return start_location
+    
+    def update_start_time(self, user_id: int, start_time: datetime, location_date: date = None, session: Session = None) -> bool:
+        """Обновить время старта"""
+        if location_date is None:
+            location_date = date.today()
+        
+        if session is None:
+            with get_db_session() as session:
+                return self._update_start_time(user_id, start_time, location_date, session)
+        return self._update_start_time(user_id, start_time, location_date, session)
+    
+    def _update_start_time(self, user_id: int, start_time: datetime, location_date: date, session: Session) -> bool:
+        """Внутренний метод обновления времени старта"""
+        start_location = session.query(StartLocationDB).filter(
+            and_(
+                StartLocationDB.user_id == user_id,
+                StartLocationDB.location_date == location_date
+            )
+        ).first()
+        
+        if not start_location:
+            logger.warning(f"Точка старта не найдена для пользователя {user_id} на дату {location_date}")
+            return False
+        
+        start_location.start_time = start_time
+        session.commit()
+        logger.info(f"Время старта обновлено для пользователя {user_id}: {start_time.strftime('%H:%M')}")
+        return True
     
     def get_start_location(self, user_id: int, location_date: date = None, session: Session = None) -> Optional[Dict]:
         """Получить точку старта пользователя за дату"""

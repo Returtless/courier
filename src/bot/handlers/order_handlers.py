@@ -32,7 +32,7 @@ class OrderHandlers:
         # Кнопки меню заказов
         self.bot.register_message_handler(
             self.handle_add_orders,
-            func=lambda m: m.text == "➕ Добавить заказы"
+            func=lambda m: m.text and "Добавить заказы" in m.text
         )
         self.bot.register_message_handler(
             self.handle_order_details_start,
@@ -92,6 +92,16 @@ class OrderHandlers:
             order_number = callback_data.replace("order_details_", "")
             self.show_order_details(call.from_user.id, order_number, call.message.chat.id)
             self.bot.answer_callback_query(call.id)
+        elif callback_data == "search_order_by_number":
+            # Начать поиск заказа по номеру
+            user_id = call.from_user.id
+            self.parent.update_user_state(user_id, 'state', 'searching_order_by_number')
+            self.bot.answer_callback_query(call.id)
+            self.bot.send_message(
+                call.message.chat.id,
+                "🔍 Введите номер заказа:",
+                reply_markup=self.parent._orders_menu_markup()
+            )
         elif callback_data == "view_delivered_orders":
             self.show_delivered_orders(call.from_user.id, call.message.chat.id)
             self.bot.answer_callback_query(call.id)
@@ -820,7 +830,6 @@ class OrderHandlers:
         from src.models.order import CallStatusDB
         
         manual_call_time_display = None
-        manual_arrival_time_display = None
         
         # Загружаем call_status для заказа
         with get_db_session() as session:
@@ -830,36 +839,20 @@ class OrderHandlers:
                 CallStatusDB.call_date == today
             ).first()
             
-            if call_status and call_status.is_manual:
-                # Если это ручная установка времени
-                if call_status.call_time:
-                    manual_call_time_display = call_status.call_time.strftime('%H:%M')
-                if call_status.arrival_time:
-                    # Проверяем приоритет: orders.manual_arrival_time имеет приоритет
-                    if not order_data.get('manual_arrival_time'):
-                        manual_arrival_time_display = call_status.arrival_time.strftime('%H:%M')
+            if call_status and getattr(call_status, "is_manual_call", False) and call_status.call_time:
+                manual_call_time_display = call_status.call_time.strftime('%H:%M')
         
-        # Отображаем время прибытия (приоритет у orders.manual_arrival_time)
-        if order_data.get('manual_arrival_time'):
-            try:
-                manual_arrival = order_data['manual_arrival_time']
-                if isinstance(manual_arrival, str):
-                    manual_arrival = datetime.fromisoformat(manual_arrival)
-                details.append(f"⏰ <b>Время прибытия (ручное):</b> {manual_arrival.strftime('%H:%M')}")
-                logger.debug(f"Отображено время прибытия из orders: {manual_arrival.strftime('%H:%M')}")
-            except Exception as e:
-                logger.error(f"Ошибка парсинга manual_arrival_time: {e}")
-                details.append(f"⏰ <b>Время прибытия (ручное):</b> Ошибка отображения")
-        elif manual_arrival_time_display:
-            details.append(f"⏰ <b>Время прибытия (ручное):</b> {manual_arrival_time_display}")
-            logger.debug(f"Отображено время прибытия из call_status: {manual_arrival_time_display}")
+        # Отображаем РУЧНОЕ время прибытия из call_status
+        if call_status and getattr(call_status, "is_manual_arrival", False) and call_status.manual_arrival_time:
+            details.append(f"⏰ <b>Время прибытия (ручное):</b> {call_status.manual_arrival_time.strftime('%H:%M')}")
+            logger.debug(f"Отображено ручное время прибытия из call_status: {call_status.manual_arrival_time.strftime('%H:%M')}")
         else:
             details.append(f"⏰ <b>Время прибытия (ручное):</b> Не указано")
         
-        # Отображаем время звонка (из call_status)
+        # Отображаем РУЧНОЕ время звонка (из call_status.is_manual)
         if manual_call_time_display:
             details.append(f"📞⏰ <b>Время звонка (ручное):</b> {manual_call_time_display}")
-            logger.debug(f"Отображено время звонка из call_status: {manual_call_time_display}")
+            logger.debug(f"Отображено ручное время звонка из call_status: {manual_call_time_display}")
         else:
             details.append(f"📞⏰ <b>Время звонка (ручное):</b> Не указано")
         
@@ -1319,7 +1312,7 @@ class OrderHandlers:
         
         # Рассчитываем время прибытия из времени звонка
         from datetime import timedelta
-        calculated_arrival_time = manual_call_time + timedelta(minutes=user_settings.call_advance_time_minutes)
+        calculated_arrival_time = manual_call_time + timedelta(minutes=user_settings.call_advance_minutes)
         
         # Обновляем или создаем call_status
         from src.database.connection import get_db_session
@@ -1340,6 +1333,18 @@ class OrderHandlers:
         if not order_data.get('phone'):
             logger.warning(f"У заказа {order_number} нет телефона, но устанавливается время звонка")
         
+        # Проверяем, установлено ли уже ручное время прибытия
+        # Если да, используем его вместо рассчитанного
+        manual_arrival = order_data.get('manual_arrival_time')
+        if manual_arrival:
+            if isinstance(manual_arrival, str):
+                from datetime import datetime as dt
+                manual_arrival = dt.fromisoformat(manual_arrival)
+            arrival_time_to_use = manual_arrival
+            logger.info(f"⚠️ Время прибытия для заказа {order_number} уже установлено вручную ({manual_arrival.strftime('%H:%M')}), используем его")
+        else:
+            arrival_time_to_use = calculated_arrival_time
+        
         with get_db_session() as session:
             call_status = session.query(CallStatusDB).filter(
                 CallStatusDB.user_id == user_id,
@@ -1350,40 +1355,52 @@ class OrderHandlers:
             if call_status:
                 # Обновляем существующую запись
                 call_status.call_time = manual_call_time
-                call_status.arrival_time = calculated_arrival_time
-                call_status.is_manual = True
-                # Если статус был confirmed/failed - сбрасываем на pending
+                call_status.arrival_time = arrival_time_to_use
+                call_status.is_manual_call = True
+                # is_manual_arrival сохраняем как есть
                 if call_status.status in ['confirmed', 'failed', 'sent']:
                     call_status.status = 'pending'
                     call_status.attempts = 0
                 session.commit()
-                logger.info(f"Обновлено ручное время звонка для заказа {order_number}: звонок {manual_call_time.strftime('%H:%M')}, прибытие {calculated_arrival_time.strftime('%H:%M')}")
+                logger.info(f"Обновлено ручное время звонка для заказа {order_number}: звонок {manual_call_time.strftime('%H:%M')}, прибытие {arrival_time_to_use.strftime('%H:%M')}")
             else:
                 # Создаем новую запись
-                phone = order_data.get('phone', 'Не указан')  # Разрешаем создание даже без телефона
+                # Получаем phone и customer_name из заказа, используем дефолты если отсутствуют
+                phone = order_data.get('phone') or 'Не указан'
+                customer_name = order_data.get('customer_name') or 'Не указано'
+                
                 new_call_status = CallStatusDB(
                     user_id=user_id,
                     order_number=order_number,
                     call_date=today,
                     call_time=manual_call_time,
-                    arrival_time=calculated_arrival_time,
-                    is_manual=True,
+                    arrival_time=arrival_time_to_use,
+                    manual_arrival_time=manual_arrival if manual_arrival else None,
+                    is_manual_call=True,
+                    is_manual_arrival=bool(manual_arrival),
                     phone=phone,
-                    customer_name=order_data.get('customer_name'),
+                    customer_name=customer_name,
                     status='pending',
                     attempts=0
                 )
                 session.add(new_call_status)
                 session.commit()
-                logger.info(f"Создана запись о ручном звонке для заказа {order_number}: звонок {manual_call_time.strftime('%H:%M')}, прибытие {calculated_arrival_time.strftime('%H:%M')}")
+                logger.info(f"Создана запись о ручном звонке для заказа {order_number}: звонок {manual_call_time.strftime('%H:%M')}, прибытие {arrival_time_to_use.strftime('%H:%M')}")
         
         # Показываем подтверждение
-        markup = self.parent._edit_order_markup()
+        markup = self.parent._main_menu_markup()
+        
+        # Определяем метку для времени прибытия
+        if manual_arrival:
+            arrival_label = "Время прибытия (ручное)"
+        else:
+            arrival_label = "Расчетное время прибытия"
+        
         text = (
             f"✅ <b>Время звонка обновлено!</b>\n\n"
             f"Заказ №{order_number}\n"
             f"<b>Время звонка:</b> {manual_call_time.strftime('%H:%M')}\n"
-            f"<b>Расчетное время прибытия:</b> {calculated_arrival_time.strftime('%H:%M')}\n\n"
+            f"<b>{arrival_label}:</b> {arrival_time_to_use.strftime('%H:%M')}\n\n"
             f"Выберите следующее поле для обновления:"
         )
         self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=markup)
@@ -1397,13 +1414,9 @@ class OrderHandlers:
         
         # Рассчитываем время звонка из времени прибытия
         from datetime import timedelta
-        calculated_call_time = manual_arrival_time - timedelta(minutes=user_settings.call_advance_time_minutes)
+        calculated_call_time = manual_arrival_time - timedelta(minutes=user_settings.call_advance_minutes)
         
-        # 1. Обновляем orders.manual_arrival_time
-        self.parent.db_service.update_order(user_id, order_number, {'manual_arrival_time': manual_arrival_time}, today)
-        logger.info(f"Обновлено manual_arrival_time для заказа {order_number}: {manual_arrival_time.strftime('%H:%M')}")
-        
-        # 2. Обновляем или создаем call_status
+        # ВАЖНО: Сначала загружаем данные заказа ДО обновления, чтобы проверить текущее состояние
         from src.database.connection import get_db_session
         from src.models.order import CallStatusDB
         
@@ -1422,6 +1435,9 @@ class OrderHandlers:
         if not order_data.get('phone'):
             logger.warning(f"У заказа {order_number} нет телефона, но устанавливается время прибытия")
         
+        # 2. Обновляем или создаем call_status (переносим ручное прибытие в call_status)
+        from src.database.connection import get_db_session
+        from src.models.order import CallStatusDB
         with get_db_session() as session:
             call_status = session.query(CallStatusDB).filter(
                 CallStatusDB.user_id == user_id,
@@ -1429,43 +1445,81 @@ class OrderHandlers:
                 CallStatusDB.call_date == today
             ).first()
             
+            call_time_was_manual = call_status.is_manual_call if call_status else False
+            if call_time_was_manual:
+                logger.info(f"⚠️ Время звонка для заказа {order_number} было установлено вручную, не изменяем его")
+            
+            call_time_to_set = call_status.call_time if call_time_was_manual and call_status else calculated_call_time
+            
             if call_status:
-                # Обновляем существующую запись
-                call_status.call_time = calculated_call_time
+                call_status.call_time = call_time_to_set
                 call_status.arrival_time = manual_arrival_time
-                call_status.is_manual = True
+                call_status.manual_arrival_time = manual_arrival_time
+                call_status.is_manual_arrival = True
+                # Флаг ручного звонка сохраняем, не трогаем
                 # Если статус был confirmed/failed - сбрасываем на pending
                 if call_status.status in ['confirmed', 'failed', 'sent']:
                     call_status.status = 'pending'
                     call_status.attempts = 0
                 session.commit()
-                logger.info(f"Обновлено ручное время прибытия для заказа {order_number}: звонок {calculated_call_time.strftime('%H:%M')}, прибытие {manual_arrival_time.strftime('%H:%M')}")
+                logger.info(
+                    f"Обновлено ручное время прибытия для заказа {order_number}: "
+                    f"звонок {call_status.call_time.strftime('%H:%M')} ({'ручное' if call_time_was_manual else 'авто'}), "
+                    f"прибытие {manual_arrival_time.strftime('%H:%M')}"
+                )
             else:
-                # Создаем новую запись
-                phone = order_data.get('phone', 'Не указан')  # Разрешаем создание даже без телефона
+                phone = order_data.get('phone') or 'Не указан'
+                customer_name = order_data.get('customer_name') or 'Не указано'
+                
                 new_call_status = CallStatusDB(
                     user_id=user_id,
                     order_number=order_number,
                     call_date=today,
                     call_time=calculated_call_time,
                     arrival_time=manual_arrival_time,
-                    is_manual=True,
+                    manual_arrival_time=manual_arrival_time,
+                    is_manual_call=False,
+                    is_manual_arrival=True,
                     phone=phone,
-                    customer_name=order_data.get('customer_name'),
+                    customer_name=customer_name,
                     status='pending',
                     attempts=0
                 )
                 session.add(new_call_status)
                 session.commit()
-                logger.info(f"Создана запись о ручном времени прибытия для заказа {order_number}: звонок {calculated_call_time.strftime('%H:%M')}, прибытие {manual_arrival_time.strftime('%H:%M')}")
+                logger.info(
+                    f"Создана запись о ручном времени прибытия для заказа {order_number}: "
+                    f"звонок {calculated_call_time.strftime('%H:%M')} (авто), прибытие {manual_arrival_time.strftime('%H:%M')} (ручное)"
+                )
         
         # Показываем подтверждение
-        markup = self.parent._edit_order_markup()
+        markup = self.parent._main_menu_markup()
+        
+        # Определяем какое время звонка показывать
+        with get_db_session() as session:
+            call_status = session.query(CallStatusDB).filter(
+                CallStatusDB.user_id == user_id,
+                CallStatusDB.order_number == order_number,
+                CallStatusDB.call_date == today
+            ).first()
+            
+            if call_status and call_status.call_time:
+                actual_call_time = call_status.call_time
+                # Проверяем, ручное ли это время или рассчитанное
+                time_diff_minutes = (manual_arrival_time - actual_call_time).total_seconds() / 60
+                if abs(time_diff_minutes - user_settings.call_advance_minutes) > 1:
+                    call_time_label = "Время звонка (ручное)"
+                else:
+                    call_time_label = "Расчетное время звонка"
+            else:
+                actual_call_time = calculated_call_time
+                call_time_label = "Расчетное время звонка"
+        
         text = (
             f"✅ <b>Время прибытия обновлено!</b>\n\n"
             f"Заказ №{order_number}\n"
             f"<b>Время прибытия:</b> {manual_arrival_time.strftime('%H:%M')}\n"
-            f"<b>Расчетное время звонка:</b> {calculated_call_time.strftime('%H:%M')}\n\n"
+            f"<b>{call_time_label}:</b> {actual_call_time.strftime('%H:%M')}\n\n"
             f"Выберите следующее поле для обновления:"
         )
         self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=markup)
@@ -1565,8 +1619,10 @@ class OrderHandlers:
                                             field_value,
                                             order_data.get('customer_name'),
                                             today,
-                                            is_manual=False,
-                                            arrival_time=arrival_time
+                                            is_manual_call=False,
+                                            is_manual_arrival=False,
+                                            arrival_time=arrival_time,
+                                            manual_arrival_time=None
                                         )
                                         logger.debug(f"Создана запись call_status для заказа {order_number} при обновлении телефона")
                             except (ValueError, KeyError, Exception) as e:
