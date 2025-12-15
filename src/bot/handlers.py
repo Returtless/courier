@@ -1840,6 +1840,8 @@ class CourierBot:
         reply_markup.row("📞 Телефон", "👤 ФИО")
         reply_markup.row("💬 Комментарий", "🏢 Подъезд")
         reply_markup.row("🚪 Квартира", "🕐 Время доставки")
+        reply_markup.row("⏰ Время прибытия", "📞⏰ Время звонка")
+        reply_markup.row("⬅️ К списку заказов")
         reply_markup.row("⬅️ Главное меню")
         
         # Сохраняем номер заказа для быстрого редактирования
@@ -1862,22 +1864,99 @@ class CourierBot:
         )
         
         if updated:
-            # Очищаем маршрут, так как заказ доставлен
+            # Очищаем маршрут из state (но оставляем в БД)
             self.update_user_state(user_id, 'route_summary', [])
             self.update_user_state(user_id, 'call_schedule', [])
             self.update_user_state(user_id, 'route_order', [])
             
-            # Также удаляем маршрут из БД
-            self.db_service.get_route_data(user_id, today)  # Загружаем для проверки
-            # Можно оставить маршрут в БД, но очистить его при следующей оптимизации
-            
+            # Отправляем подтверждение
             self.bot.send_message(
                 chat_id,
-                f"✅ Заказ №{order_number} помечен как доставленный и исключен из маршрута",
+                f"✅ Заказ №{order_number} помечен как доставленный",
                 reply_markup=self._main_menu_markup()
             )
+            
+            # Ищем следующий заказ в маршруте
+            try:
+                route_data = self.db_service.get_route_data(user_id, today)
+                if route_data and route_data.get('route_order'):
+                    route_order = route_data['route_order']
+                    route_points_data = route_data.get('route_points_data', [])
+                    
+                    # Находим индекс текущего заказа
+                    try:
+                        current_index = route_order.index(order_number)
+                        
+                        # Ищем следующий недоставленный заказ
+                        next_order_number = None
+                        next_point_data = None
+                        
+                        for i in range(current_index + 1, len(route_order)):
+                            next_order_num = route_order[i]
+                            # Проверяем, что следующий заказ не доставлен
+                            orders_data = self.db_service.get_today_orders(user_id)
+                            next_order_data = next((od for od in orders_data if od.get('order_number') == next_order_num), None)
+                            
+                            if next_order_data and next_order_data.get('status', 'pending') != 'delivered':
+                                next_order_number = next_order_num
+                                if i < len(route_points_data):
+                                    next_point_data = route_points_data[i]
+                                break
+                        
+                        # Если найден следующий заказ - показываем его
+                        if next_order_number and next_order_data:
+                            self._show_next_order_info(chat_id, next_order_data, next_point_data)
+                        else:
+                            # Все заказы доставлены!
+                            self.bot.send_message(
+                                chat_id,
+                                "🎉 <b>Отличная работа!</b>\n\n✅ Все заказы в маршруте доставлены!",
+                                parse_mode='HTML'
+                            )
+                    except ValueError:
+                        # Заказ не найден в маршруте
+                        logger.warning(f"Заказ {order_number} не найден в route_order")
+            except Exception as e:
+                logger.error(f"Ошибка поиска следующего заказа: {e}", exc_info=True)
         else:
             self.bot.send_message(chat_id, f"❌ Заказ №{order_number} не найден")
+    
+    def _show_next_order_info(self, chat_id: int, order_data: dict, point_data: dict = None):
+        """Показать информацию о следующем заказе после доставки"""
+        order_number = order_data.get('order_number', 'Без номера')
+        address = order_data.get('address', 'Адрес не указан')
+        customer_name = order_data.get('customer_name', 'Не указано')
+        phone = order_data.get('phone', 'Не указан')
+        comment = order_data.get('comment', '')
+        
+        text = f"➡️ <b>Следующий заказ:</b>\n\n"
+        text += f"📦 <b>№{order_number}</b>\n"
+        text += f"📍 <b>Адрес:</b> {address}\n"
+        text += f"👤 <b>Клиент:</b> {customer_name}\n"
+        text += f"📞 <b>Телефон:</b> {phone}\n"
+        
+        # Время прибытия из маршрута
+        if point_data:
+            estimated_arrival = point_data.get('estimated_arrival')
+            if estimated_arrival:
+                try:
+                    arrival_time = datetime.fromisoformat(estimated_arrival)
+                    text += f"⏰ <b>Время прибытия:</b> {arrival_time.strftime('%H:%M')}\n"
+                except:
+                    pass
+            
+            call_time = point_data.get('call_time')
+            if call_time:
+                try:
+                    call_dt = datetime.fromisoformat(call_time)
+                    text += f"📞 <b>Время звонка:</b> {call_dt.strftime('%H:%M')}\n"
+                except:
+                    pass
+        
+        if comment:
+            text += f"\n💬 <b>Комментарий:</b> {comment}\n"
+        
+        self.bot.send_message(chat_id, text, parse_mode='HTML')
 
     def show_delivered_orders(self, user_id: int, chat_id: int):
         """Показать список доставленных заказов"""
