@@ -10,12 +10,16 @@ aiohttp==3.9.1
 # Database
 psycopg2-binary==2.9.9  # PostgreSQL driver
 alembic==1.13.1  # Database migrations
+cryptography==41.0.7  # Password encryption
 
 # Maps and geocoding
 geopy==2.4.1
 
 # Route optimization
 ortools==9.14.6206
+
+# Web scraping
+playwright==1.40.0
 
 # Timezone support
 pytz==2023.3

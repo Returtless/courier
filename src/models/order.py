@@ -116,6 +116,19 @@ class UserSettingsDB(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class UserCredentialsDB(Base):
+    """Зашифрованные учетные данные пользователей для внешних сервисов"""
+    __tablename__ = "user_credentials"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, unique=True, index=True)  # Telegram user ID
+    site = Column(String, default="chefmarket", nullable=False)  # Название сервиса (chefmarket, и т.д.)
+    encrypted_login = Column(Text, nullable=False)  # Зашифрованный логин
+    encrypted_password = Column(Text, nullable=False)  # Зашифрованный пароль
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class UserSettings(BaseModel):
     """Pydantic модель для настроек пользователя"""
     user_id: int

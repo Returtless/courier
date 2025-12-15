@@ -2,11 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Установка системных зависимостей
+# Установка системных зависимостей + зависимости для Playwright
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     tzdata \
+    wget \
+    gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 # Копирование requirements
@@ -14,6 +16,10 @@ COPY requirements.txt .
 
 # Установка Python зависимостей
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Установка браузеров для Playwright
+RUN playwright install chromium
+RUN playwright install-deps chromium
 
 # Копирование кода приложения
 COPY . .

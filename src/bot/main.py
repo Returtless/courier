@@ -3,10 +3,11 @@ import logging
 from src.config import settings
 from src.database.connection import engine, Base
 # Импортируем модели, чтобы они зарегистрировались в Base.metadata
-from src.models.order import OrderDB, StartLocationDB, RouteDataDB, CallStatusDB, UserSettingsDB  # noqa: F401
+from src.models.order import OrderDB, StartLocationDB, RouteDataDB, CallStatusDB, UserSettingsDB, UserCredentialsDB  # noqa: F401
 from src.models.geocache import GeocodeCacheDB  # noqa: F401
 # from src.services.llm_service import LLMService  # Пока отключено
 from src.bot.handlers import CourierBot
+# ImportCommands теперь часть handlers (import_handlers.py)
 
 
 def main():
@@ -42,10 +43,10 @@ def main():
     # llm_service = LLMService()  # Пока отключено
     llm_service = None
 
-    # Initialize bot handler
+    # Initialize bot handler (все сервисы инициализируются внутри)
     courier_bot = CourierBot(bot, llm_service)
 
-    # Register handlers
+    # Register all handlers (включая import handlers)
     courier_bot.register_handlers()
     
     # Start call notifier
