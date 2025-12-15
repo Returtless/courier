@@ -1,6 +1,6 @@
 from datetime import datetime, time, date
 from typing import Optional, List
-from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Time, Date, JSON, Index
+from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Time, Date, JSON, Index, Boolean
 from pydantic import BaseModel
 from src.database.connection import Base
 
