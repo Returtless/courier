@@ -2419,14 +2419,15 @@ class CourierBot:
                     self.bot.answer_callback_query(call.id, "❌ Запись о звонке не найдена", show_alert=True)
                     return
                 
-                # Увеличиваем количество попыток
-                call_status.attempts += 1
+                # Получаем настройки пользователя
+                user_settings = self.settings_service.get_settings(user_id)
                 
                 customer_info = call_status.customer_name or "Клиент"
                 order_info = f"Заказ №{call_status.order_number}" if call_status.order_number else "Заказ"
                 
-                if call_status.attempts >= 3:
-                    # После 3 попыток помечаем как failed
+                # Проверяем количество попыток (attempts уже был увеличен в _send_call_notification)
+                if call_status.attempts >= user_settings.call_max_attempts:
+                    # Превышено максимальное количество попыток
                     call_status.status = "failed"
                     call_status.next_attempt_time = None
                     session.commit()
@@ -2438,7 +2439,7 @@ class CourierBot:
                         f"📦 {order_info}\n"
                         f"📱 {call_status.phone}\n"
                         f"🕐 Время: {call_status.call_time.strftime('%H:%M')}\n\n"
-                        f"❌ <b>Недозвон</b>\nПревышено количество попыток (3)"
+                        f"❌ <b>Недозвон</b>\nПревышено количество попыток ({user_settings.call_max_attempts})"
                     )
                     
                     try:
@@ -2451,20 +2452,20 @@ class CourierBot:
                     except Exception as edit_error:
                         logger.warning(f"Ошибка обновления сообщения: {edit_error}")
                     
-                    self.bot.answer_callback_query(call.id, "❌ Превышено количество попыток (3)")
+                    self.bot.answer_callback_query(call.id, f"❌ Превышено количество попыток ({user_settings.call_max_attempts})")
                     self.bot.send_message(
                         call.message.chat.id,
-                        f"❌ <b>Недозвон</b>\n\nЗаказ №{call_status.order_number}\nПревышено количество попыток звонка (3)",
+                        f"❌ <b>Недозвон</b>\n\nЗаказ №{call_status.order_number}\nПревышено количество попыток звонка ({user_settings.call_max_attempts})",
                         parse_mode='HTML',
                         reply_markup=self._route_menu_markup()
                     )
                 else:
-                    # Планируем повторную попытку через 2 минуты
+                    # Планируем повторную попытку через настроенный интервал
                     now = get_local_now()
                     if now.tzinfo is not None:
                         now = now.replace(tzinfo=None)
                     call_status.status = "rejected"
-                    call_status.next_attempt_time = now + timedelta(minutes=2)
+                    call_status.next_attempt_time = now + timedelta(minutes=user_settings.call_retry_interval_minutes)
                     session.commit()
                     
                     # Обновляем сообщение, убирая кнопки
@@ -2474,7 +2475,7 @@ class CourierBot:
                         f"📦 {order_info}\n"
                         f"📱 {call_status.phone}\n"
                         f"🕐 Время: {call_status.call_time.strftime('%H:%M')}\n\n"
-                        f"❌ <b>Отклонено</b>\nПовтор через 2 минуты (попытка {call_status.attempts}/3)"
+                        f"❌ <b>Отклонено</b>\nПовтор через {user_settings.call_retry_interval_minutes} мин (попытка {call_status.attempts}/{user_settings.call_max_attempts})"
                     )
                     
                     try:
@@ -2487,10 +2488,10 @@ class CourierBot:
                     except Exception as edit_error:
                         logger.warning(f"Ошибка обновления сообщения: {edit_error}")
                     
-                    self.bot.answer_callback_query(call.id, f"❌ Отклонено. Повтор через 2 минуты (попытка {call_status.attempts}/3)")
+                    self.bot.answer_callback_query(call.id, f"❌ Отклонено. Повтор через {user_settings.call_retry_interval_minutes} мин (попытка {call_status.attempts}/{user_settings.call_max_attempts})")
                     self.bot.send_message(
                         call.message.chat.id,
-                        f"⏰ <b>Повторный звонок запланирован</b>\n\nЗаказ №{call_status.order_number}\nПовтор через 2 минуты (попытка {call_status.attempts}/3)",
+                        f"⏰ <b>Повторный звонок запланирован</b>\n\nЗаказ №{call_status.order_number}\nПовтор через {user_settings.call_retry_interval_minutes} мин (попытка {call_status.attempts}/{user_settings.call_max_attempts})",
                         parse_mode='HTML',
                         reply_markup=self._route_menu_markup()
                     )
