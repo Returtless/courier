@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 512
 
     # Security
-    encryption_key: str = "your_encryption_key_here"  # For encrypting sensitive data
+    encryption_key: Optional[str] = None  # For encrypting sensitive data (will be auto-generated if not set)
 
     # Route optimization
     delivery_time_per_stop: int = 10  # minutes

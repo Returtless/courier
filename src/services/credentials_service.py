@@ -2,11 +2,11 @@
 Сервис для безопасного хранения учетных данных пользователей
 """
 import logging
-import os
 from cryptography.fernet import Fernet
 from sqlalchemy.orm import Session
 from src.database.connection import get_db_session
 from src.models.order import UserCredentialsDB
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -15,16 +15,26 @@ class CredentialsService:
     """Сервис для шифрования и хранения учетных данных"""
     
     def __init__(self):
-        # Получаем ключ шифрования из переменных окружения
-        encryption_key = os.getenv("ENCRYPTION_KEY")
+        # Получаем ключ шифрования из настроек
+        encryption_key = settings.encryption_key
         
-        if not encryption_key:
-            # Генерируем новый ключ, если его нет
-            logger.warning("ENCRYPTION_KEY не найден в .env! Генерирую новый ключ...")
+        # Проверяем, что ключ установлен и не является дефолтным значением
+        if not encryption_key or encryption_key == "your_encryption_key_here":
+            # Генерируем новый ключ
+            logger.warning("⚠️ ENCRYPTION_KEY не установлен! Генерирую новый ключ...")
             encryption_key = Fernet.generate_key().decode()
-            logger.warning(f"Добавьте в .env файл: ENCRYPTION_KEY={encryption_key}")
+            logger.warning(f"⚠️ ВАЖНО! Добавьте в файл 'env':\nENCRYPTION_KEY={encryption_key}")
+            logger.warning("⚠️ Без этого ключа вы не сможете расшифровать сохраненные пароли после перезапуска!")
         
-        self.cipher = Fernet(encryption_key.encode() if isinstance(encryption_key, str) else encryption_key)
+        # Проверяем, что ключ в правильном формате
+        try:
+            self.cipher = Fernet(encryption_key.encode() if isinstance(encryption_key, str) else encryption_key)
+        except Exception as e:
+            # Если ключ невалидный, генерируем новый
+            logger.error(f"❌ Невалидный ENCRYPTION_KEY: {e}")
+            encryption_key = Fernet.generate_key().decode()
+            logger.warning(f"⚠️ Сгенерирован новый ключ. Добавьте в файл 'env':\nENCRYPTION_KEY={encryption_key}")
+            self.cipher = Fernet(encryption_key.encode())
     
     def encrypt(self, text: str) -> str:
         """Зашифровать текст"""

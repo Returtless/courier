@@ -51,7 +51,7 @@ class CourierBot:
         self.traffic = TrafficHandlers(self)
         
         # Настройка callback для мониторинга пробок
-        self.traffic_monitor.set_notification_callback(self._send_traffic_notification)
+        self.traffic_monitor.add_callback(self._send_traffic_notification)
     
     def _send_traffic_notification(self, user_id: int, message: str):
         """Callback для отправки уведомлений о пробках"""
