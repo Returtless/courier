@@ -783,7 +783,9 @@ class RouteHandlers:
                             call_time,
                             order.phone,
                             order.customer_name,
-                            today
+                            today,
+                            is_manual=False,  # Автоматически рассчитанное время
+                            arrival_time=point.estimated_arrival  # Расчетное время прибытия
                         )
 
             # Сохраняем порядок заказов в маршруте

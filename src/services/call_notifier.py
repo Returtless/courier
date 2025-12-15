@@ -229,8 +229,9 @@ class CallNotifier:
             logger.error(f"Ошибка отправки уведомления о звонке: {e}", exc_info=True)
     
     def create_call_status(self, user_id: int, order_number: str, call_time: datetime, 
-                          phone: str, customer_name: Optional[str] = None, call_date: date = None):
-        """Создать запись о звонке"""
+                          phone: str, customer_name: Optional[str] = None, call_date: date = None,
+                          is_manual: bool = False, arrival_time: datetime = None):
+        """Создать запись о звонке (не перезаписывает ручные установки)"""
         if call_date is None:
             call_date = date.today()
         
@@ -245,19 +246,29 @@ class CallNotifier:
             ).first()
             
             if existing:
+                # ВАЖНО: Не перезаписываем ручные установки при автоматической оптимизации!
+                if existing.is_manual and not is_manual:
+                    logger.info(f"⏭️ Пропускаем обновление call_status для заказа {order_number} - установлено вручную")
+                    return existing
+                
                 # Обновляем существующую запись
                 existing.call_time = call_time
+                existing.arrival_time = arrival_time
+                existing.is_manual = is_manual
                 existing.phone = phone
                 existing.customer_name = customer_name
-                existing.status = "pending"
-                existing.attempts = 0
-                existing.next_attempt_time = None
+                # Сбрасываем статус только если не подтвержден
+                if existing.status not in ['confirmed']:
+                    existing.status = "pending"
+                    existing.attempts = 0
+                    existing.next_attempt_time = None
                 session.commit()
                 now = get_local_now()
                 if now.tzinfo is not None:
                     now = now.replace(tzinfo=None)
                 time_diff = (call_time - now).total_seconds() / 60
-                logger.debug(f"✅ Обновлена запись о звонке: заказ {order_number}, время звонка {call_time.strftime('%Y-%m-%d %H:%M:%S')}, до звонка {time_diff:.1f} мин (сейчас {now.strftime('%Y-%m-%d %H:%M:%S')})")
+                manual_flag = "🖐️ручное" if is_manual else "🤖авто"
+                logger.debug(f"✅ Обновлена запись о звонке ({manual_flag}): заказ {order_number}, время звонка {call_time.strftime('%Y-%m-%d %H:%M:%S')}, до звонка {time_diff:.1f} мин (сейчас {now.strftime('%Y-%m-%d %H:%M:%S')})")
                 return existing
             
             # Создаем новую запись
@@ -266,6 +277,8 @@ class CallNotifier:
                 order_number=order_number,
                 call_date=call_date,
                 call_time=call_time,
+                arrival_time=arrival_time,
+                is_manual=is_manual,
                 phone=phone,
                 customer_name=customer_name,
                 status="pending",

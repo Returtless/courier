@@ -64,6 +64,7 @@ class DatabaseService:
                 'entrance_number': order_db.entrance_number,
                 'apartment_number': order_db.apartment_number,
                 'gis_id': order_db.gis_id,
+                'manual_arrival_time': order_db.manual_arrival_time,  # Ручное время прибытия (ограничение для оптимизации)
             }
             result.append(order_dict)
         

@@ -180,7 +180,24 @@ class RouteOptimizer:
 
             # Add time window constraints for each order
             for i, order in enumerate(orders):
-                if order.delivery_time_start and order.delivery_time_end:
+                node_index = manager.NodeToIndex(i + 1)
+                
+                # Приоритет 1: Ручное время прибытия (жесткое ограничение)
+                if order.manual_arrival_time:
+                    # Если установлено ручное время прибытия - это фиксированная точка
+                    # Вычисляем секунды от start_time до manual_arrival_time
+                    time_diff = (order.manual_arrival_time - start_time).total_seconds()
+                    
+                    # Даем небольшой диапазон ±5 минут для возможности решения
+                    tolerance_seconds = 5 * 60
+                    arrival_seconds_min = max(0, int(time_diff - tolerance_seconds))
+                    arrival_seconds_max = int(time_diff + tolerance_seconds)
+                    
+                    time_dimension.CumulVar(node_index).SetRange(arrival_seconds_min, arrival_seconds_max)
+                    logger.info(f"🔒 Заказ №{order.order_number}: фиксированное время прибытия {order.manual_arrival_time.strftime('%H:%M')} (диапазон ±5 мин)")
+                
+                # Приоритет 2: Временное окно доставки
+                elif order.delivery_time_start and order.delivery_time_end:
                     # Convert time windows to minutes from start of day
                     start_minutes = order.delivery_time_start.hour * 60 + order.delivery_time_start.minute
                     end_minutes = order.delivery_time_end.hour * 60 + order.delivery_time_end.minute
@@ -190,7 +207,6 @@ class RouteOptimizer:
                     end_seconds = end_minutes * 60
 
                     # Add time window constraint for this order (node index i+1, depot is 0)
-                    node_index = manager.NodeToIndex(i + 1)
                     time_dimension.CumulVar(node_index).SetRange(start_seconds, end_seconds)
 
             # Set advanced search parameters

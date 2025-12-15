@@ -34,8 +34,7 @@ class OrderDB(Base):
     route_order = Column(Integer, nullable=True)
     
     # Manual time override fields (приоритет над расчетными)
-    manual_arrival_time = Column(DateTime, nullable=True)  # Ручное время прибытия
-    manual_call_time = Column(DateTime, nullable=True)  # Ручное время звонка
+    manual_arrival_time = Column(DateTime, nullable=True)  # Ручное время прибытия (ограничение для оптимизации)
 
 
 class StartLocationDB(Base):
@@ -77,6 +76,8 @@ class CallStatusDB(Base):
     order_number = Column(String, nullable=False, index=True)
     call_date = Column(Date, nullable=False, index=True)
     call_time = Column(DateTime, nullable=False)  # Время когда нужно звонить
+    arrival_time = Column(DateTime, nullable=True)  # Время прибытия (для ручных установок)
+    is_manual = Column(Boolean, default=False)  # Ручная установка времени
     phone = Column(String, nullable=False)
     customer_name = Column(String, nullable=True)
     status = Column(String, default="pending")  # pending, confirmed, rejected, failed (после 3 отклонений)
@@ -161,8 +162,7 @@ class Order(BaseModel):
     entrance_number: Optional[str] = None  # Номер подъезда для точного адреса
     apartment_number: Optional[str] = None  # Номер квартиры
     gis_id: Optional[str] = None  # ID объекта 2ГИС (для точного открытия точки)
-    manual_arrival_time: Optional[datetime] = None  # Ручное время прибытия
-    manual_call_time: Optional[datetime] = None  # Ручное время звонка
+    manual_arrival_time: Optional[datetime] = None  # Ручное время прибытия (ограничение для оптимизации)
 
     def __init__(self, *args, **kwargs):
         # Поддержка позиционных аргументов для обратной совместимости
