@@ -253,23 +253,23 @@ class OrderHandlers:
             if current_state == 'waiting_for_orders':
                 self.process_order_number(message)
             elif current_state == 'waiting_for_order_phone':
-                self.process_order_phone(message)
+                self.process_order_phone(message, state_data)
             elif current_state == 'waiting_for_order_name':
-                self.process_order_name(message)
+                self.process_order_name(message, state_data)
             elif current_state == 'waiting_for_order_comment':
-                self.process_order_comment(message)
+                self.process_order_comment(message, state_data)
             elif current_state == 'waiting_for_order_entrance':
-                self.process_order_entrance(message)
+                self.process_order_entrance(message, state_data)
             elif current_state == 'waiting_for_order_apartment':
-                self.process_order_apartment(message)
+                self.process_order_apartment(message, state_data)
             elif current_state == 'waiting_for_order_delivery_time':
-                self.process_order_delivery_time(message)
+                self.process_order_delivery_time(message, state_data)
             elif current_state == 'waiting_for_manual_arrival_time':
-                self.process_manual_arrival_time(message)
+                self.process_manual_arrival_time(message, state_data)
             elif current_state == 'waiting_for_manual_call_time':
-                self.process_manual_call_time(message)
+                self.process_manual_call_time(message, state_data)
             elif current_state == 'searching_order_by_number':
-                self.process_search_order_by_number(message)
+                self.process_search_order_by_number(message, state_data)
             else:
                 logger.warning(f"Неизвестное состояние заказа: {current_state}")
                 self.bot.reply_to(
