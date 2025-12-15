@@ -43,6 +43,44 @@ class OrderHandlers:
             func=lambda m: m.text == "✅ Доставленные"
         )
         
+        # Кнопки редактирования полей заказа
+        self.bot.register_message_handler(
+            self.handle_edit_phone,
+            func=lambda m: m.text == "📞 Телефон"
+        )
+        self.bot.register_message_handler(
+            self.handle_edit_name,
+            func=lambda m: m.text == "👤 ФИО"
+        )
+        self.bot.register_message_handler(
+            self.handle_edit_comment,
+            func=lambda m: m.text == "💬 Комментарий"
+        )
+        self.bot.register_message_handler(
+            self.handle_edit_entrance,
+            func=lambda m: m.text == "🏢 Подъезд"
+        )
+        self.bot.register_message_handler(
+            self.handle_edit_apartment,
+            func=lambda m: m.text == "🚪 Квартира"
+        )
+        self.bot.register_message_handler(
+            self.handle_edit_delivery_time,
+            func=lambda m: m.text == "🕐 Время доставки"
+        )
+        self.bot.register_message_handler(
+            self.handle_edit_arrival_time,
+            func=lambda m: m.text == "⏰ Время прибытия"
+        )
+        self.bot.register_message_handler(
+            self.handle_edit_call_time,
+            func=lambda m: m.text == "📞⏰ Время звонка"
+        )
+        self.bot.register_message_handler(
+            self.handle_back_to_orders_list,
+            func=lambda m: m.text == "⬅️ К списку заказов"
+        )
+        
         logger.info("✅ Order handlers зарегистрированы")
     
     def handle_callback(self, call):
@@ -61,6 +99,151 @@ class OrderHandlers:
             order_number = callback_data.replace("mark_delivered_", "")
             self.mark_order_delivered(call.from_user.id, order_number, call.message.chat.id)
             self.bot.answer_callback_query(call.id, "✅ Заказ отмечен как доставленный")
+    
+    # ==================== ОБРАБОТЧИКИ КНОПОК РЕДАКТИРОВАНИЯ ====================
+    
+    def handle_edit_phone(self, message):
+        """Обработка кнопки 'Телефон'"""
+        user_id = message.from_user.id
+        state_data = self.parent.get_user_state(user_id)
+        order_number = state_data.get('updating_order_number')
+        
+        if not order_number:
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            return
+        
+        self.parent.update_user_state(user_id, 'state', 'waiting_for_order_phone')
+        from telebot import types
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("⬅️ К списку заказов")
+        markup.row("⬅️ Главное меню")
+        self.bot.reply_to(message, f"📞 Введите номер телефона для заказа №{order_number}:", reply_markup=markup)
+    
+    def handle_edit_name(self, message):
+        """Обработка кнопки 'ФИО'"""
+        user_id = message.from_user.id
+        state_data = self.parent.get_user_state(user_id)
+        order_number = state_data.get('updating_order_number')
+        
+        if not order_number:
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            return
+        
+        self.parent.update_user_state(user_id, 'state', 'waiting_for_order_name')
+        from telebot import types
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("⬅️ К списку заказов")
+        markup.row("⬅️ Главное меню")
+        self.bot.reply_to(message, f"👤 Введите ФИО клиента для заказа №{order_number}:", reply_markup=markup)
+    
+    def handle_edit_comment(self, message):
+        """Обработка кнопки 'Комментарий'"""
+        user_id = message.from_user.id
+        state_data = self.parent.get_user_state(user_id)
+        order_number = state_data.get('updating_order_number')
+        
+        if not order_number:
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            return
+        
+        self.parent.update_user_state(user_id, 'state', 'waiting_for_order_comment')
+        from telebot import types
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("⬅️ К списку заказов")
+        markup.row("⬅️ Главное меню")
+        self.bot.reply_to(message, f"💬 Введите комментарий для заказа №{order_number}:", reply_markup=markup)
+    
+    def handle_edit_entrance(self, message):
+        """Обработка кнопки 'Подъезд'"""
+        user_id = message.from_user.id
+        state_data = self.parent.get_user_state(user_id)
+        order_number = state_data.get('updating_order_number')
+        
+        if not order_number:
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            return
+        
+        self.parent.update_user_state(user_id, 'state', 'waiting_for_order_entrance')
+        from telebot import types
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("⬅️ К списку заказов")
+        markup.row("⬅️ Главное меню")
+        self.bot.reply_to(message, f"🏢 Введите номер подъезда для заказа №{order_number}:", reply_markup=markup)
+    
+    def handle_edit_apartment(self, message):
+        """Обработка кнопки 'Квартира'"""
+        user_id = message.from_user.id
+        state_data = self.parent.get_user_state(user_id)
+        order_number = state_data.get('updating_order_number')
+        
+        if not order_number:
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            return
+        
+        self.parent.update_user_state(user_id, 'state', 'waiting_for_order_apartment')
+        from telebot import types
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("⬅️ К списку заказов")
+        markup.row("⬅️ Главное меню")
+        self.bot.reply_to(message, f"🚪 Введите номер квартиры для заказа №{order_number}:", reply_markup=markup)
+    
+    def handle_edit_delivery_time(self, message):
+        """Обработка кнопки 'Время доставки'"""
+        user_id = message.from_user.id
+        state_data = self.parent.get_user_state(user_id)
+        order_number = state_data.get('updating_order_number')
+        
+        if not order_number:
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            return
+        
+        self.parent.update_user_state(user_id, 'state', 'waiting_for_order_delivery_time')
+        from telebot import types
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("⬅️ К списку заказов")
+        markup.row("⬅️ Главное меню")
+        self.bot.reply_to(message, f"🕐 Введите время доставки для заказа №{order_number} (формат ЧЧ:ММ - ЧЧ:ММ):\nПример: 10:00 - 13:00", reply_markup=markup)
+    
+    def handle_edit_arrival_time(self, message):
+        """Обработка кнопки 'Время прибытия'"""
+        user_id = message.from_user.id
+        state_data = self.parent.get_user_state(user_id)
+        order_number = state_data.get('updating_order_number')
+        
+        if not order_number:
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            return
+        
+        self.parent.update_user_state(user_id, 'state', 'waiting_for_manual_arrival_time')
+        from telebot import types
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("⬅️ К списку заказов")
+        markup.row("⬅️ Главное меню")
+        self.bot.reply_to(message, f"⏰ Введите время прибытия для заказа №{order_number} (формат ЧЧ:ММ):\nПример: 14:20", reply_markup=markup)
+    
+    def handle_edit_call_time(self, message):
+        """Обработка кнопки 'Время звонка'"""
+        user_id = message.from_user.id
+        state_data = self.parent.get_user_state(user_id)
+        order_number = state_data.get('updating_order_number')
+        
+        if not order_number:
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            return
+        
+        self.parent.update_user_state(user_id, 'state', 'waiting_for_manual_call_time')
+        from telebot import types
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("⬅️ К списку заказов")
+        markup.row("⬅️ Главное меню")
+        self.bot.reply_to(message, f"📞⏰ Введите время звонка для заказа №{order_number} (формат ЧЧ:ММ):\nПример: 14:20", reply_markup=markup)
+    
+    def handle_back_to_orders_list(self, message):
+        """Обработка кнопки 'К списку заказов'"""
+        user_id = message.from_user.id
+        self.parent.update_user_state(user_id, 'state', None)
+        self.parent.update_user_state(user_id, 'updating_order_number', None)
+        self.handle_order_details_start(message)
     
     # ==================== ОБРАБОТКА СОСТОЯНИЙ ====================
     
