@@ -386,4 +386,43 @@ class DatabaseService:
             'routes': routes_count,
             'calls': calls_count
         }
+    
+    def get_confirmed_calls(self, user_id: int, call_date: date = None, session: Session = None) -> List[Dict]:
+        """Получить все подтвержденные звонки пользователя за дату
+        
+        Returns:
+            List[Dict]: Список словарей с информацией о подтвержденных звонках
+        """
+        if call_date is None:
+            call_date = date.today()
+        
+        if session is None:
+            with get_db_session() as session:
+                return self._get_confirmed_calls(user_id, call_date, session)
+        return self._get_confirmed_calls(user_id, call_date, session)
+    
+    def _get_confirmed_calls(self, user_id: int, call_date: date, session: Session) -> List[Dict]:
+        """Внутренний метод получения подтвержденных звонков"""
+        from src.models.order import CallStatusDB
+        
+        confirmed_calls = session.query(CallStatusDB).filter(
+            and_(
+                CallStatusDB.user_id == user_id,
+                CallStatusDB.call_date == call_date,
+                CallStatusDB.status == "confirmed"
+            )
+        ).order_by(CallStatusDB.call_time).all()
+        
+        return [
+            {
+                'id': call.id,
+                'order_number': call.order_number,
+                'call_time': call.call_time,
+                'phone': call.phone,
+                'customer_name': call.customer_name,
+                'attempts': call.attempts,
+                'confirmation_comment': call.confirmation_comment
+            }
+            for call in confirmed_calls
+        ]
 

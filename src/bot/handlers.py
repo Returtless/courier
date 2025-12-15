@@ -271,6 +271,16 @@ class CourierBot:
             if not active_orders_data:
                 self.bot.reply_to(message, "❌ Нет активных заказов для оптимизации. Все заказы доставлены.", reply_markup=self._orders_menu_markup())
                 return
+            
+            # Загружаем подтвержденные звонки для сохранения их при повторной оптимизации
+            try:
+                confirmed_calls = self.db_service.get_confirmed_calls(user_id, today)
+                confirmed_order_numbers = set(call['order_number'] for call in confirmed_calls)
+                logger.info(f"Найдено {len(confirmed_calls)} подтвержденных звонков: {confirmed_order_numbers}")
+            except Exception as e:
+                logger.error(f"Ошибка загрузки подтвержденных звонков: {e}", exc_info=True)
+                confirmed_calls = []
+                confirmed_order_numbers = set()
 
             # Загружаем точку старта из БД
             try:
@@ -295,8 +305,11 @@ class CourierBot:
                 self.bot.reply_to(message, "❌ Не установлено время старта. Используйте кнопку 📍 Точка старта", reply_markup=self._route_menu_markup())
                 return
 
-            # Convert data back to Order objects (только активные заказы)
-            orders = []
+            # Convert data back to Order objects
+            # Разделяем на подтвержденные (confirmed calls) и неподтвержденные заказы
+            confirmed_orders = []  # Заказы с подтвержденными звонками (сохраняем порядок из предыдущего маршрута)
+            unconfirmed_orders = []  # Заказы для новой оптимизации
+            
             for order_data in active_orders_data:
                 try:
                     # Преобразуем строки времени обратно в time объекты
@@ -315,13 +328,28 @@ class CourierBot:
                                 order_dict['delivery_time_end'] = time(int(parts[0]), int(parts[1]))
                             else:
                                 order_dict['delivery_time_end'] = None
-                    orders.append(Order(**order_dict))
+                    
+                    order = Order(**order_dict)
+                    
+                    # Разделяем по признаку подтвержденного звонка
+                    if order.order_number and order.order_number in confirmed_order_numbers:
+                        confirmed_orders.append(order)
+                    else:
+                        unconfirmed_orders.append(order)
                 except Exception as e:
                     logger.error(f"Ошибка создания Order из данных: {e}, данные: {order_data}", exc_info=True)
                     continue
             
-            if not orders:
+            # Для оптимизации используем только неподтвержденные заказы
+            orders = unconfirmed_orders
+            
+            if not orders and not confirmed_orders:
                 self.bot.reply_to(message, "❌ Не удалось обработать заказы. Проверьте данные.", reply_markup=self._route_menu_markup())
+                return
+            
+            if not orders and confirmed_orders:
+                # Все заказы уже подтверждены - повторная оптимизация не нужна
+                self.bot.reply_to(message, "✅ Все заказы уже подтверждены. Маршрут не требует оптимизации.", reply_markup=self._route_menu_markup())
                 return
             
             try:
@@ -331,8 +359,61 @@ class CourierBot:
                 self.bot.reply_to(message, f"❌ Ошибка обработки времени старта: {str(e)}", reply_markup=self._route_menu_markup())
                 return
             
+            # Если есть подтвержденные заказы - начинаем маршрут с последнего подтвержденного
+            # Загружаем предыдущий маршрут из БД
+            actual_start_from_confirmed = None
+            if confirmed_orders:
+                try:
+                    route_data = self.db_service.get_route_data(user_id, today)
+                    if route_data:
+                        route_points_data = route_data.get('route_points_data', [])
+                        route_order = route_data.get('route_order', [])
+                        
+                        # Находим последний подтвержденный заказ в маршруте
+                        last_confirmed_index = -1
+                        last_confirmed_order_number = None
+                        for i, order_num in enumerate(route_order):
+                            if order_num in confirmed_order_numbers:
+                                last_confirmed_index = i
+                                last_confirmed_order_number = order_num
+                        
+                        if last_confirmed_index >= 0 and last_confirmed_index < len(route_points_data):
+                            last_point_data = route_points_data[last_confirmed_index]
+                            # Находим соответствующий Order объект для получения координат
+                            last_confirmed_order = next(
+                                (o for o in confirmed_orders if o.order_number == last_confirmed_order_number),
+                                None
+                            )
+                            
+                            if last_confirmed_order and last_confirmed_order.latitude and last_confirmed_order.longitude:
+                                # Получаем настройки пользователя для времени на точке
+                                user_settings = self.settings_service.get_settings(user_id)
+                                
+                                # Время прибытия + время на точке = новая точка старта
+                                arrival_time = datetime.fromisoformat(last_point_data['estimated_arrival'])
+                                new_start_time = arrival_time + timedelta(minutes=user_settings.service_time_minutes)
+                                
+                                actual_start_from_confirmed = {
+                                    'lat': last_confirmed_order.latitude,
+                                    'lon': last_confirmed_order.longitude,
+                                    'time': new_start_time,
+                                    'order_number': last_confirmed_order_number
+                                }
+                                
+                                logger.info(f"🎯 Начинаем оптимизацию от последнего подтвержденного заказа {last_confirmed_order_number}: координаты ({last_confirmed_order.latitude}, {last_confirmed_order.longitude}), время {new_start_time.strftime('%H:%M')}")
+                except Exception as e:
+                    logger.error(f"Ошибка определения точки старта от подтвержденного заказа: {e}", exc_info=True)
+                    # Продолжаем с обычной точкой старта
+            
             # Определяем координаты старта - используем сохраненные координаты из БД
-            if start_lat and start_lon:
+            # Или координаты последнего подтвержденного заказа
+            if actual_start_from_confirmed:
+                # Начинаем от последнего подтвержденного заказа
+                start_location = {'lat': actual_start_from_confirmed['lat'], 'lon': actual_start_from_confirmed['lon']}
+                start_location_coords = (actual_start_from_confirmed['lat'], actual_start_from_confirmed['lon'])
+                start_datetime = actual_start_from_confirmed['time']
+                location_description = f"последнего подтвержденного заказа {actual_start_from_confirmed['order_number']}"
+            elif start_lat and start_lon:
                 # Координаты уже есть в БД (были сохранены при подтверждении адреса или при отправке геопозиции)
                 start_location = {'lat': start_lat, 'lon': start_lon}
                 start_location_coords = (start_lat, start_lon)
@@ -480,29 +561,72 @@ class CourierBot:
             
             # Получаем настройки пользователя для времени звонка
             user_settings = self.settings_service.get_settings(user_id)
+            
+            # Если есть подтвержденные заказы - добавляем их в начало маршрута
+            if actual_start_from_confirmed and confirmed_orders:
+                try:
+                    # Загружаем данные предыдущего маршрута
+                    previous_route_data = self.db_service.get_route_data(user_id, today)
+                    if previous_route_data:
+                        previous_route_points = previous_route_data.get('route_points_data', [])
+                        previous_route_order = previous_route_data.get('route_order', [])
+                        previous_call_schedule = previous_route_data.get('call_schedule', [])
+                        
+                        # Добавляем подтвержденные точки из предыдущего маршрута
+                        for order_num in previous_route_order:
+                            if order_num in confirmed_order_numbers:
+                                # Находим данные точки в предыдущем маршруте
+                                point_index = previous_route_order.index(order_num)
+                                if point_index < len(previous_route_points):
+                                    route_points_data.append(previous_route_points[point_index])
+                                
+                                # Находим данные звонка в предыдущем расписании
+                                call_data = next(
+                                    (c for c in previous_call_schedule if c.get('order_number') == order_num),
+                                    None
+                                )
+                                if call_data:
+                                    call_schedule.append(call_data)
+                        
+                        logger.info(f"✅ Добавлено {len([o for o in previous_route_order if o in confirmed_order_numbers])} подтвержденных точек в начало маршрута")
+                except Exception as e:
+                    logger.error(f"Ошибка добавления подтвержденных заказов в маршрут: {e}", exc_info=True)
 
             for i, point in enumerate(optimized_route.points, 1):
                 order = point.order
 
-                # Calculate call time (используем настройку пользователя вместо жестко заданных 40 минут)
-                call_time = point.estimated_arrival - timedelta(minutes=user_settings.call_advance_minutes)
+                # Проверяем, указано ли ручное время звонка
+                if order.manual_call_time:
+                    # Используем ручное время звонка
+                    call_time = order.manual_call_time
+                    logger.info(f"📞⏰ Используется ручное время звонка для заказа {order.order_number}: {call_time.strftime('%H:%M')}")
+                else:
+                    # Calculate call time (используем настройку пользователя вместо жестко заданных 40 минут)
+                    call_time = point.estimated_arrival - timedelta(minutes=user_settings.call_advance_minutes)
 
-                # If order has time window, ensure call is not too early
-                if order.delivery_time_start:
-                    today = point.estimated_arrival.date()
-                    window_start = datetime.combine(today, order.delivery_time_start)
-                    earliest_call = window_start - timedelta(minutes=user_settings.call_advance_minutes)
+                    # If order has time window, ensure call is not too early
+                    if order.delivery_time_start:
+                        today = point.estimated_arrival.date()
+                        window_start = datetime.combine(today, order.delivery_time_start)
+                        earliest_call = window_start - timedelta(minutes=user_settings.call_advance_minutes)
 
-                    if call_time < earliest_call:
-                        call_time = earliest_call
+                        if call_time < earliest_call:
+                            call_time = earliest_call
 
+                # Используем ручное время прибытия если указано
+                actual_arrival_time = order.manual_arrival_time if order.manual_arrival_time else point.estimated_arrival
+                if order.manual_arrival_time:
+                    logger.info(f"⏰ Используется ручное время прибытия для заказа {order.order_number}: {actual_arrival_time.strftime('%H:%M')}")
+                
                 # Сохраняем структурированные данные для каждой точки маршрута
                 route_point_data = {
                     "order_number": order.order_number or str(order.id),
-                    "estimated_arrival": point.estimated_arrival.isoformat(),
+                    "estimated_arrival": actual_arrival_time.isoformat(),
                     "distance_from_previous": point.distance_from_previous,
                     "time_from_previous": point.time_from_previous,
-                    "call_time": call_time.isoformat()
+                    "call_time": call_time.isoformat(),
+                    "manual_arrival_time": order.manual_arrival_time.isoformat() if order.manual_arrival_time else None,
+                    "manual_call_time": order.manual_call_time.isoformat() if order.manual_call_time else None
                 }
                 route_points_data.append(route_point_data)
 
@@ -510,26 +634,37 @@ class CourierBot:
                 call_data = {
                     "order_number": order.order_number or str(order.id),
                     "call_time": call_time.isoformat(),
-                    "arrival_time": point.estimated_arrival.isoformat(),
+                    "arrival_time": actual_arrival_time.isoformat(),
                     "phone": order.phone or None,
                     "customer_name": order.customer_name or None
                 }
                 call_schedule.append(call_data)
                 
                 # Создаем запись о звонке для уведомлений (если есть телефон)
+                # НЕ перезаписываем подтвержденные звонки при повторной оптимизации
                 if order.phone and order.order_number:
-                    logger.debug(f"Создание записи о звонке: заказ {order.order_number}, время звонка {call_time.strftime('%Y-%m-%d %H:%M:%S')}, прибытие {point.estimated_arrival.strftime('%Y-%m-%d %H:%M:%S')}")
-                    self.call_notifier.create_call_status(
-                        user_id,
-                        order.order_number,
-                        call_time,
-                        order.phone,
-                        order.customer_name,
-                        today
-                    )
+                    if order.order_number in confirmed_order_numbers:
+                        logger.info(f"⏭️ Пропускаем создание call_status для заказа {order.order_number} - звонок уже подтвержден")
+                    else:
+                        logger.debug(f"Создание записи о звонке: заказ {order.order_number}, время звонка {call_time.strftime('%Y-%m-%d %H:%M:%S')}, прибытие {point.estimated_arrival.strftime('%Y-%m-%d %H:%M:%S')}")
+                        self.call_notifier.create_call_status(
+                            user_id,
+                            order.order_number,
+                            call_time,
+                            order.phone,
+                            order.customer_name,
+                            today
+                        )
 
             # Сохраняем порядок заказов в маршруте
-            route_order = [point.order.order_number or str(point.order.id) for point in optimized_route.points]
+            # Сначала подтвержденные (в порядке из предыдущего маршрута), затем новые
+            confirmed_route_order = [
+                point_data['order_number'] 
+                for point_data in route_points_data 
+                if 'order_number' in point_data
+            ]  # Уже добавленные подтвержденные заказы
+            new_route_order = [point.order.order_number or str(point.order.id) for point in optimized_route.points]
+            route_order = confirmed_route_order + new_route_order
             
             # Сохраняем обновленные координаты заказов в БД (если они были загеокодированы)
             for point in optimized_route.points:
@@ -1053,6 +1188,10 @@ class CourierBot:
                 self.update_user_state(message.from_user.id, 'state', None)
                 self.update_user_state(message.from_user.id, 'updating_order_number', None)
                 return self.bot.reply_to(message, "🏠 Главное меню", reply_markup=self._main_menu_markup())
+            if text == "⬅️ К списку заказов":
+                self.update_user_state(message.from_user.id, 'state', None)
+                self.update_user_state(message.from_user.id, 'updating_order_number', None)
+                return self.handle_order_details_start(message)
         
         # Кнопки выбора поля для обновления заказа
         text = message.text.strip()
@@ -1095,6 +1234,58 @@ class CourierBot:
                     )
                 else:
                     self.bot.reply_to(message, "❌ Ошибка: номер заказа не найден")
+            elif text == "⏰ Время прибытия":
+                order_number = state_data.get('updating_order_number')
+                if order_number:
+                    self.update_user_state(user_id, 'state', 'waiting_for_manual_arrival_time')
+                    # Загружаем текущее время если есть
+                    orders_data = self.db_service.get_today_orders(user_id)
+                    current_time_text = ""
+                    for od in orders_data:
+                        if od.get('order_number') == order_number:
+                            manual_time = od.get('manual_arrival_time')
+                            if manual_time:
+                                if isinstance(manual_time, str):
+                                    manual_time = datetime.fromisoformat(manual_time)
+                                current_time_text = f"\n✏️ Текущее: {manual_time.strftime('%H:%M')}\n"
+                            break
+                    self.bot.reply_to(
+                        message,
+                        f"⏰ <b>Ручное время прибытия</b>{current_time_text}\n"
+                        f"Введите время в формате ЧЧ:ММ\n"
+                        f"Пример: 14:30\n\n"
+                        f"💡 Это время будет использовано вместо расчетного",
+                        parse_mode='HTML',
+                        reply_markup=self._update_order_back_markup()
+                    )
+                else:
+                    self.bot.reply_to(message, "❌ Ошибка: номер заказа не найден")
+            elif text == "📞⏰ Время звонка":
+                order_number = state_data.get('updating_order_number')
+                if order_number:
+                    self.update_user_state(user_id, 'state', 'waiting_for_manual_call_time')
+                    # Загружаем текущее время если есть
+                    orders_data = self.db_service.get_today_orders(user_id)
+                    current_time_text = ""
+                    for od in orders_data:
+                        if od.get('order_number') == order_number:
+                            manual_time = od.get('manual_call_time')
+                            if manual_time:
+                                if isinstance(manual_time, str):
+                                    manual_time = datetime.fromisoformat(manual_time)
+                                current_time_text = f"\n✏️ Текущее: {manual_time.strftime('%H:%M')}\n"
+                            break
+                    self.bot.reply_to(
+                        message,
+                        f"📞⏰ <b>Ручное время звонка</b>{current_time_text}\n"
+                        f"Введите время в формате ЧЧ:ММ\n"
+                        f"Пример: 14:20\n\n"
+                        f"💡 Это время будет использовано для уведомления",
+                        parse_mode='HTML',
+                        reply_markup=self._update_order_back_markup()
+                    )
+                else:
+                    self.bot.reply_to(message, "❌ Ошибка: номер заказа не найден")
             return
 
         if current_state == 'waiting_for_orders':
@@ -1128,6 +1319,10 @@ class CourierBot:
             self.process_order_apartment(message, state_data)
         elif current_state == 'waiting_for_order_delivery_time':
             self.process_order_delivery_time(message, state_data)
+        elif current_state == 'waiting_for_manual_arrival_time':
+            self.process_manual_arrival_time(message, state_data)
+        elif current_state == 'waiting_for_manual_call_time':
+            self.process_manual_call_time(message, state_data)
         elif current_state == 'waiting_for_call_comment':
             self.process_call_comment(message, state_data)
         elif current_state == 'waiting_for_setting_value':
@@ -1614,6 +1809,19 @@ class CourierBot:
         else:
             details.append(f"💬 <b>Комментарий:</b> Нет")
         
+        # Ручное время прибытия и звонка
+        if order_data.get('manual_arrival_time'):
+            manual_arrival = order_data['manual_arrival_time']
+            if isinstance(manual_arrival, str):
+                manual_arrival = datetime.fromisoformat(manual_arrival)
+            details.append(f"⏰ <b>Время прибытия (ручное):</b> {manual_arrival.strftime('%H:%M')}")
+        
+        if order_data.get('manual_call_time'):
+            manual_call = order_data['manual_call_time']
+            if isinstance(manual_call, str):
+                manual_call = datetime.fromisoformat(manual_call)
+            details.append(f"📞⏰ <b>Время звонка (ручное):</b> {manual_call.strftime('%H:%M')}")
+        
         if order.latitude and order.longitude:
             details.append(f"🗺️ <b>Координаты:</b> {order.latitude:.6f}, {order.longitude:.6f}")
         
@@ -2007,8 +2215,30 @@ class CourierBot:
         # Формируем только кнопки с информацией
         from telebot import types
         
-        # Сортируем по номеру заказа для удобства
-        active_orders_sorted = sorted(active_orders, key=lambda x: x.get('order_number', ''))
+        # Сортируем по порядку в маршруте (если есть), иначе по номеру заказа
+        try:
+            route_data = self.db_service.get_route_data(user_id, today)
+            if route_data and route_data.get('route_order'):
+                route_order = route_data['route_order']
+                # Сортируем заказы по их позиции в маршруте
+                def get_route_position(order_data):
+                    order_num = order_data.get('order_number', '')
+                    try:
+                        return route_order.index(order_num)
+                    except ValueError:
+                        # Если заказа нет в маршруте - в конец
+                        return len(route_order) + 1
+                
+                active_orders_sorted = sorted(active_orders, key=get_route_position)
+                logger.info(f"Заказы отсортированы по маршруту: {[o.get('order_number') for o in active_orders_sorted]}")
+            else:
+                # Нет маршрута - сортируем по номеру заказа
+                active_orders_sorted = sorted(active_orders, key=lambda x: x.get('order_number', ''))
+                logger.info("Маршрут не найден, сортировка по номеру заказа")
+        except Exception as e:
+            logger.error(f"Ошибка загрузки маршрута для сортировки: {e}", exc_info=True)
+            # Fallback - сортируем по номеру заказа
+            active_orders_sorted = sorted(active_orders, key=lambda x: x.get('order_number', ''))
         
         inline_markup = types.InlineKeyboardMarkup(row_width=1)
         
@@ -2599,6 +2829,152 @@ class CourierBot:
                     self._update_route_point(user_id, order_number, updated_order, MapsService(), state_data)
                     break
 
+    def process_manual_arrival_time(self, message, state_data):
+        """Обработка ввода ручного времени прибытия"""
+        user_id = message.from_user.id
+        text = message.text.strip()
+        
+        if text == "⬅️ Главное меню":
+            self.update_user_state(user_id, 'state', None)
+            self.update_user_state(user_id, 'updating_order_number', None)
+            self.bot.reply_to(message, "🏠 Возврат в главное меню", reply_markup=self._main_menu_markup())
+            return
+        
+        order_number = state_data.get('updating_order_number')
+        if not order_number:
+            self.bot.reply_to(message, "❌ Ошибка: номер заказа не найден")
+            return
+        
+        # Проверяем формат времени (ЧЧ:ММ)
+        import re
+        time_pattern = r'^(\d{1,2}):(\d{2})$'
+        match = re.match(time_pattern, text)
+        
+        if not match:
+            self.bot.reply_to(
+                message,
+                "❌ Неверный формат времени. Используйте формат ЧЧ:ММ\nПример: 14:30",
+                reply_markup=self._update_order_back_markup()
+            )
+            return
+        
+        # Парсим время
+        try:
+            hour, minute = map(int, match.groups())
+            if not (0 <= hour < 24 and 0 <= minute < 60):
+                raise ValueError("Invalid time")
+            
+            # Создаем datetime для сегодняшнего дня
+            today = date.today()
+            manual_time = datetime.combine(today, time(hour, minute))
+            
+            # Обновляем в БД
+            self._update_order_field(user_id, order_number, 'manual_arrival_time', manual_time.isoformat(), message)
+        except ValueError:
+            self.bot.reply_to(
+                message,
+                "❌ Некорректное время. Проверьте значения (00:00 - 23:59)",
+                reply_markup=self._update_order_back_markup()
+            )
+    
+    def process_manual_call_time(self, message, state_data):
+        """Обработка ввода ручного времени звонка"""
+        user_id = message.from_user.id
+        text = message.text.strip()
+        
+        if text == "⬅️ Главное меню":
+            self.update_user_state(user_id, 'state', None)
+            self.update_user_state(user_id, 'updating_order_number', None)
+            self.bot.reply_to(message, "🏠 Возврат в главное меню", reply_markup=self._main_menu_markup())
+            return
+        
+        order_number = state_data.get('updating_order_number')
+        if not order_number:
+            self.bot.reply_to(message, "❌ Ошибка: номер заказа не найден")
+            return
+        
+        # Проверяем формат времени (ЧЧ:ММ)
+        import re
+        time_pattern = r'^(\d{1,2}):(\d{2})$'
+        match = re.match(time_pattern, text)
+        
+        if not match:
+            self.bot.reply_to(
+                message,
+                "❌ Неверный формат времени. Используйте формат ЧЧ:ММ\nПример: 14:20",
+                reply_markup=self._update_order_back_markup()
+            )
+            return
+        
+        # Парсим время
+        try:
+            hour, minute = map(int, match.groups())
+            if not (0 <= hour < 24 and 0 <= minute < 60):
+                raise ValueError("Invalid time")
+            
+            # Создаем datetime для сегодняшнего дня
+            today = date.today()
+            manual_time = datetime.combine(today, time(hour, minute))
+            
+            # Обновляем в БД и создаем/обновляем call_status
+            self._update_manual_call_time(user_id, order_number, manual_time, message)
+        except ValueError:
+            self.bot.reply_to(
+                message,
+                "❌ Некорректное время. Проверьте значения (00:00 - 23:59)",
+                reply_markup=self._update_order_back_markup()
+            )
+
+    def _update_manual_call_time(self, user_id: int, order_number: str, manual_time: datetime, message):
+        """Обновить ручное время звонка и создать/обновить call_status"""
+        today = date.today()
+        
+        # Обновляем поле в заказе
+        self._update_order_field(user_id, order_number, 'manual_call_time', manual_time.isoformat(), message)
+        
+        # Обновляем или создаем call_status
+        from src.database.connection import get_db_session
+        from src.models.order import CallStatusDB
+        
+        orders_data = self.db_service.get_today_orders(user_id)
+        order_data = None
+        for od in orders_data:
+            if od.get('order_number') == order_number:
+                order_data = od
+                break
+        
+        if not order_data:
+            return
+        
+        with get_db_session() as session:
+            call_status = session.query(CallStatusDB).filter(
+                CallStatusDB.user_id == user_id,
+                CallStatusDB.order_number == order_number,
+                CallStatusDB.call_date == today
+            ).first()
+            
+            if call_status:
+                # Обновляем существующую запись
+                call_status.call_time = manual_time
+                # Если статус был confirmed/failed - сбрасываем на pending
+                if call_status.status in ['confirmed', 'failed', 'sent']:
+                    call_status.status = 'pending'
+                    call_status.attempts = 0
+                session.commit()
+                logger.info(f"Обновлено время звонка для заказа {order_number}: {manual_time.strftime('%H:%M')}")
+            else:
+                # Создаем новую запись если есть телефон
+                if order_data.get('phone'):
+                    self.call_notifier.create_call_status(
+                        user_id,
+                        order_number,
+                        manual_time,
+                        order_data['phone'],
+                        order_data.get('customer_name'),
+                        today
+                    )
+                    logger.info(f"Создана запись о звонке для заказа {order_number}: {manual_time.strftime('%H:%M')}")
+
     def _update_order_field(self, user_id: int, order_number: str, field_name: str, field_value: str, message):
         """Обновить конкретное поле заказа"""
         today = date.today()
@@ -2621,7 +2997,7 @@ class CourierBot:
         # Обновляем поле
         updates = {field_name: field_value}
         
-        # Если обновлен подъезд, обновляем адрес
+        # Если обновлен подъезд, обновляем адрес (БЕЗ геокодирования - координаты остаются те же)
         if field_name == 'entrance_number':
             original_address = order_data['address']
             # Удаляем старый подъезд из адреса, если есть
@@ -2630,13 +3006,9 @@ class CourierBot:
             address_clean = re.sub(r'\s+подъезд\s+\d+', '', address_clean, flags=re.IGNORECASE)
             updates['address'] = f"{address_clean}, подъезд {field_value}"
             
-            # Пересчитываем геокодирование
-            maps_service = MapsService()
-            lat, lon, gid = maps_service.geocode_address_sync(updates['address'])
-            if lat and lon:
-                updates['latitude'] = lat
-                updates['longitude'] = lon
-                updates['gis_id'] = gid
+            # НЕ пересчитываем геокодирование - подъезд не меняет координаты здания!
+            # Это экономит 1-2 секунды на запросе к API карт
+            logger.info(f"Обновлен подъезд для заказа {order_number}: {field_value} (геокодирование пропущено)")
         
         # Если обновлено время доставки, парсим его
         if field_name == 'delivery_time_window':
@@ -2645,6 +3017,13 @@ class CourierBot:
                 updates['delivery_time_start'] = temp_order.delivery_time_start
             if temp_order.delivery_time_end:
                 updates['delivery_time_end'] = temp_order.delivery_time_end
+        
+        # Если обновлено ручное время прибытия/звонка, парсим datetime
+        if field_name in ['manual_arrival_time', 'manual_call_time']:
+            try:
+                updates[field_name] = datetime.fromisoformat(field_value)
+            except (ValueError, AttributeError):
+                logger.error(f"Ошибка парсинга времени: {field_value}")
         
         # Обновляем в БД
         try:
@@ -2747,6 +3126,8 @@ class CourierBot:
             markup.row("📞 Телефон", "👤 ФИО")
             markup.row("💬 Комментарий", "🏢 Подъезд")
             markup.row("🚪 Квартира", "🕐 Время доставки")
+            markup.row("⏰ Время прибытия", "📞⏰ Время звонка")
+            markup.row("⬅️ К списку заказов")
             markup.row("⬅️ Главное меню")
             
             field_names = {
@@ -2755,7 +3136,9 @@ class CourierBot:
                 'comment': 'Комментарий',
                 'entrance_number': 'Подъезд',
                 'apartment_number': 'Квартира',
-                'delivery_time_window': 'Время доставки'
+                'delivery_time_window': 'Время доставки',
+                'manual_arrival_time': 'Время прибытия',
+                'manual_call_time': 'Время звонка'
             }
             
             text = (

@@ -29,9 +29,13 @@ class OrderDB(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Route optimization fields
-    estimated_delivery_time = Column(DateTime, nullable=True)
-    call_time = Column(DateTime, nullable=True)
+    estimated_delivery_time = Column(DateTime, nullable=True)  # Расчетное время прибытия
+    call_time = Column(DateTime, nullable=True)  # Расчетное время звонка
     route_order = Column(Integer, nullable=True)
+    
+    # Manual time override fields (приоритет над расчетными)
+    manual_arrival_time = Column(DateTime, nullable=True)  # Ручное время прибытия
+    manual_call_time = Column(DateTime, nullable=True)  # Ручное время звонка
 
 
 class StartLocationDB(Base):
@@ -144,6 +148,8 @@ class Order(BaseModel):
     entrance_number: Optional[str] = None  # Номер подъезда для точного адреса
     apartment_number: Optional[str] = None  # Номер квартиры
     gis_id: Optional[str] = None  # ID объекта 2ГИС (для точного открытия точки)
+    manual_arrival_time: Optional[datetime] = None  # Ручное время прибытия
+    manual_call_time: Optional[datetime] = None  # Ручное время звонка
 
     def __init__(self, *args, **kwargs):
         # Поддержка позиционных аргументов для обратной совместимости

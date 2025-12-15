@@ -12,10 +12,22 @@ from src.bot.handlers import CourierBot
 def main():
     # Configure logging
     logging.basicConfig(level=logging.INFO)
-
-    # Create database tables (модели должны быть импортированы выше)
-    Base.metadata.create_all(bind=engine)
     logger = logging.getLogger(__name__)
+
+    # Run database migrations first (like Flyway)
+    logger.info("🔄 Применение миграций базы данных...")
+    try:
+        from migrate import run_migrations
+        if not run_migrations():
+            logger.error("❌ Ошибка применения миграций. Проверьте логи выше.")
+            return
+    except Exception as e:
+        logger.error(f"❌ Не удалось применить миграции: {e}")
+        logger.warning("⚠️ Продолжаем без миграций (используется create_all)")
+    
+    # Create database tables (модели должны быть импортированы выше)
+    # create_all не изменяет существующие таблицы, поэтому безопасно
+    Base.metadata.create_all(bind=engine)
     logger.info("✅ База данных инициализирована")
 
     # Initialize bot
