@@ -3,7 +3,10 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Установка системных зависимостей + зависимости для Playwright
-RUN apt-get update && apt-get install -y \
+ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBCONF_NONINTERACTIVE_SEEN=true
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     tzdata \
@@ -19,7 +22,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Установка браузеров для Playwright
 RUN playwright install chromium
-RUN playwright install-deps chromium
+RUN DEBIAN_FRONTEND=noninteractive playwright install-deps chromium
 
 # Копирование кода приложения
 COPY . .
