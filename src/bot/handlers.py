@@ -42,7 +42,7 @@ class CourierBot:
         from telebot import types
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.row("➕ Добавить заказы")
-        markup.row("ℹ️ Детали заказа")
+        markup.row("✏️ Редактирование заказов")
         markup.row("✅ Доставленные")
         markup.row("⬅️ Главное меню")
         return markup
@@ -1123,7 +1123,7 @@ class CourierBot:
             # Меню заказов
             if text == "➕ Добавить заказы":
                 return self.handle_add_orders(message)
-            if text == "ℹ️ Детали заказа":
+            if text == "✏️ Редактирование заказов":
                 try:
                     return self.handle_order_details_start(message)
                 except Exception as e:
@@ -1775,7 +1775,7 @@ class CourierBot:
             self.bot.send_message(chat_id, f"❌ Ошибка обработки данных заказа: {str(e)}", reply_markup=self._main_menu_markup())
             return
         details = [
-            f"ℹ️ <b>Детали заказа №{order_number}</b>\n",
+            f"✏️ <b>Редактирование заказа №{order_number}</b>\n",
             f"📍 <b>Адрес:</b> {order.address}",
         ]
         
