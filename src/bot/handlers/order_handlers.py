@@ -814,18 +814,22 @@ class OrderHandlers:
         else:
             details.append(f"💬 <b>Комментарий:</b> Нет")
         
-        # Ручное время прибытия и звонка
+        # Ручное время прибытия и звонка (показываем всегда)
         if order_data.get('manual_arrival_time'):
             manual_arrival = order_data['manual_arrival_time']
             if isinstance(manual_arrival, str):
                 manual_arrival = datetime.fromisoformat(manual_arrival)
             details.append(f"⏰ <b>Время прибытия (ручное):</b> {manual_arrival.strftime('%H:%M')}")
+        else:
+            details.append(f"⏰ <b>Время прибытия (ручное):</b> Не указано")
         
         if order_data.get('manual_call_time'):
             manual_call = order_data['manual_call_time']
             if isinstance(manual_call, str):
                 manual_call = datetime.fromisoformat(manual_call)
             details.append(f"📞⏰ <b>Время звонка (ручное):</b> {manual_call.strftime('%H:%M')}")
+        else:
+            details.append(f"📞⏰ <b>Время звонка (ручное):</b> Не указано")
         
         if order.latitude and order.longitude:
             details.append(f"🗺️ <b>Координаты:</b> {order.latitude:.6f}, {order.longitude:.6f}")
@@ -1486,9 +1490,19 @@ class OrderHandlers:
                 'manual_call_time': 'Время звонка'
             }
             
+            # Форматируем значение для отображения
+            display_value = field_value
+            if field_name in ['manual_arrival_time', 'manual_call_time']:
+                try:
+                    dt = datetime.fromisoformat(field_value)
+                    display_value = dt.strftime('%H:%M')
+                except:
+                    display_value = field_value
+            
             text = (
                 f"✅ <b>{field_names.get(field_name, 'Поле')} обновлено!</b>\n\n"
                 f"Заказ №{order_number}\n"
+                f"<b>Новое значение:</b> {display_value}\n\n"
                 f"Выберите следующее поле для обновления:"
             )
             self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=markup)
