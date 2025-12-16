@@ -31,8 +31,11 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = "env"
+        env_file_encoding = "utf-8"
         case_sensitive = False
         extra = "allow"  # Allow extra fields from .env
+        # Pydantic BaseSettings автоматически читает из переменных окружения
+        # даже если они установлены через Portainer или docker-compose
 
 
 settings = Settings()

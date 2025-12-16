@@ -152,8 +152,12 @@ class BaseHandlers:
                 self.parent.imports.handle_callback(call)
             elif callback_data.startswith("traffic_"):
                 self.parent.traffic.handle_callback(call)
-            elif callback_data.startswith("reset_") or callback_data.startswith("confirm_start_"):
-                # Обработка callback'ов маршрутов (сброс дня, подтверждение точки старта)
+            elif (callback_data.startswith("reset_") or 
+                  callback_data.startswith("confirm_start_") or 
+                  callback_data.startswith("recalculate_without_manual") or
+                  callback_data == "reject_start_address" or
+                  callback_data == "route_menu"):
+                # Обработка callback'ов маршрутов (сброс дня, подтверждение точки старта, пересчет без ручных времен)
                 self.parent.routes.handle_callback(call)
             elif callback_data == "view_delivered_orders":
                 self.parent.orders.handle_view_delivered(call)

@@ -9,47 +9,99 @@ from src.bot.handlers import CourierBot
 
 
 def main():
-    # Configure logging
-    logging.basicConfig(level=logging.INFO)
+    # Configure logging to stdout/stderr (для Docker/Portainer)
+    import sys
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout)  # Явно указываем stdout
+        ],
+        force=True  # Перезаписываем существующую конфигурацию
+    )
+    # Отключаем буферизацию для stdout (чтобы логи появлялись сразу)
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(line_buffering=True)
+    
     logger = logging.getLogger(__name__)
+    logger.info("=" * 60)
+    logger.info("🚀 Запуск Courier Bot")
+    logger.info("=" * 60)
 
     # Применяем миграции (создают таблицы и изменяют схему)
     logger.info("🔄 Применение миграций базы данных...")
-    from migrate import run_migrations
-    if not run_migrations():
-        logger.error("❌ Ошибка применения миграций. Проверьте логи выше.")
+    try:
+        from migrate import run_migrations
+        logger.info("📝 Вызов run_migrations()...")
+        result = run_migrations()
+        logger.info(f"📝 run_migrations() вернула: {result}")
+        if not result:
+            logger.error("❌ Ошибка применения миграций. Проверьте логи выше.")
+            return
+        logger.info("✅ База данных готова")
+    except SystemExit as se:
+        logger.warning(f"⚠️ SystemExit({se.code}) в main после миграций")
+        if se.code != 0:
+            raise
+        logger.info("✅ SystemExit(0) - продолжаем работу бота")
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка при применении миграций: {e}", exc_info=True)
         return
-    logger.info("✅ База данных готова")
 
     # Initialize bot
-    logger = logging.getLogger(__name__)
+    logger.info("🔧 Инициализация бота...")
     if not settings.telegram_bot_token or settings.telegram_bot_token == "your_bot_token_here":
         logger.error("❌ Установите TELEGRAM_BOT_TOKEN в файле env")
         return
 
-    bot = telebot.TeleBot(settings.telegram_bot_token)
+    try:
+        bot = telebot.TeleBot(settings.telegram_bot_token)
+        logger.info("✅ Telegram Bot инициализирован")
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации Telegram Bot: {e}", exc_info=True)
+        return
 
     # Initialize services
     # llm_service = LLMService()  # Пока отключено
     llm_service = None
 
     # Initialize bot handler (все сервисы инициализируются внутри)
-    courier_bot = CourierBot(bot, llm_service)
+    logger.info("🔧 Инициализация обработчиков...")
+    try:
+        courier_bot = CourierBot(bot, llm_service)
+        logger.info("✅ CourierBot инициализирован")
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации CourierBot: {e}", exc_info=True)
+        return
 
     # Register all handlers (включая import handlers)
-    courier_bot.register_handlers()
+    logger.info("🔧 Регистрация обработчиков...")
+    try:
+        courier_bot.register_handlers()
+        logger.info("✅ Обработчики зарегистрированы")
+    except Exception as e:
+        logger.error(f"❌ Ошибка регистрации обработчиков: {e}", exc_info=True)
+        return
     
     # Start call notifier
-    courier_bot.call_notifier.start()
+    logger.info("🔧 Запуск уведомлений о звонках...")
+    try:
+        courier_bot.call_notifier.start()
+        logger.info("✅ Уведомления о звонках запущены")
+    except Exception as e:
+        logger.error(f"❌ Ошибка запуска уведомлений: {e}", exc_info=True)
+        return
 
     # Start polling
-    logger = logging.getLogger(__name__)
-    logger.info("🤖 Courier Bot started!")
+    logger.info("🤖 Courier Bot started! Начинаю polling...")
     try:
         bot.polling(none_stop=True)
     except KeyboardInterrupt:
         logger.info("\n🛑 Остановка бота...")
         courier_bot.call_notifier.stop()
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка в polling: {e}", exc_info=True)
+        raise
 
 
 if __name__ == "__main__":

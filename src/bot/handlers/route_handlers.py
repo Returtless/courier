@@ -84,6 +84,26 @@ class RouteHandlers:
             self.handle_confirm_start_address(call)
         elif callback_data == "reject_start_address":
             self.handle_reject_start_address(call)
+        elif callback_data == "recalculate_without_manual":
+            self.handle_recalculate_without_manual_confirm(call)
+        elif callback_data == "recalculate_without_manual_yes":
+            self.handle_recalculate_without_manual(call)
+        elif callback_data == "recalculate_without_manual_no":
+            self.bot.answer_callback_query(call.id, "❌ Отменено")
+            self.bot.edit_message_text(
+                "❌ Пересчет отменен",
+                call.message.chat.id,
+                call.message.message_id
+            )
+        elif callback_data == "route_menu":
+            # Показываем меню маршрута
+            self.bot.answer_callback_query(call.id)
+            self.bot.send_message(
+                call.message.chat.id,
+                "🗺️ <b>Меню маршрута</b>",
+                parse_mode='HTML',
+                reply_markup=self.parent._route_menu_markup()
+            )
     
     # ==================== ТОЧКА СТАРТА ====================
     
@@ -723,9 +743,93 @@ class RouteHandlers:
                 logger.info(f"   → Заказ #{order.order_number}: manual_arrival_time = {order.manual_arrival_time}")
             
             route_optimizer = RouteOptimizer(maps_service)
+            # Проверяем, есть ли ручные времена - если нет, используем fallback при ошибке
+            has_manual_times_check = False
+            with get_db_session() as session:
+                from sqlalchemy import and_
+                manual_calls_check = session.query(CallStatusDB).filter(
+                    and_(
+                        CallStatusDB.user_id == user_id,
+                        CallStatusDB.call_date == today,
+                        CallStatusDB.is_manual_arrival == True,
+                        CallStatusDB.manual_arrival_time.isnot(None)
+                    )
+                ).all()
+                has_manual_times_check = len(manual_calls_check) > 0
+            
             optimized_route = route_optimizer.optimize_route_sync(
-                orders, start_location_coords, start_datetime, user_id=user_id
+                orders, start_location_coords, start_datetime, 
+                user_id=user_id,
+                use_fallback=not has_manual_times_check  # Используем fallback только если нет ручных времен
             )
+            
+            # Проверяем результат оптимизации
+            if not optimized_route or not optimized_route.points:
+                # Проверяем наличие ручных времен
+                has_manual_times = False
+                with get_db_session() as session:
+                    from sqlalchemy import and_
+                    manual_calls = session.query(CallStatusDB).filter(
+                        and_(
+                            CallStatusDB.user_id == user_id,
+                            CallStatusDB.call_date == today,
+                            CallStatusDB.is_manual_arrival == True,
+                            CallStatusDB.manual_arrival_time.isnot(None)
+                        )
+                    ).all()
+                    has_manual_times = len(manual_calls) > 0
+                
+                # Загружаем предыдущий маршрут, если он есть
+                previous_route_data = self.parent.db_service.get_route_data(user_id, today)
+                if previous_route_data:
+                    error_text = (
+                        "❌ <b>Не удалось оптимизировать маршрут</b>\n\n"
+                        "⚠️ Возможен конфликт между временными окнами доставки и ручными временами прибытия.\n\n"
+                        "💡 <b>Рекомендации:</b>\n"
+                        "• Проверьте временные окна доставки заказов\n"
+                        "• Убедитесь, что ручные времена прибытия не конфликтуют с окнами доставки\n"
+                        "• Попробуйте изменить ручные времена или временные окна\n\n"
+                        "📋 <b>Предыдущий маршрут сохранен</b>"
+                    )
+                else:
+                    error_text = (
+                        "❌ <b>Не удалось оптимизировать маршрут</b>\n\n"
+                        "⚠️ Возможен конфликт между временными окнами доставки и ручными временами прибытия.\n\n"
+                        "💡 <b>Рекомендации:</b>\n"
+                        "• Проверьте временные окна доставки заказов\n"
+                        "• Убедитесь, что ручные времена прибытия не конфликтуют с окнами доставки\n"
+                        "• Попробуйте изменить ручные времена или временные окна"
+                    )
+                
+                # Удаляем статусное сообщение и отправляем новое с клавиатурой
+                try:
+                    self.bot.delete_message(message.chat.id, status_msg.message_id)
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить статусное сообщение: {e}")
+                
+                # Создаем клавиатуру
+                if has_manual_times:
+                    from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+                    markup = InlineKeyboardMarkup()
+                    markup.add(InlineKeyboardButton(
+                        "🔄 Пересчитать без ручных времен",
+                        callback_data="recalculate_without_manual"
+                    ))
+                    markup.add(InlineKeyboardButton(
+                        "📋 Меню маршрута",
+                        callback_data="route_menu"
+                    ))
+                    reply_markup = markup
+                else:
+                    reply_markup = self.parent._route_menu_markup()
+                
+                self.bot.reply_to(
+                    message,
+                    error_text,
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                return
             
             self.bot.edit_message_text(
                 f"🔄 <b>Оптимизация маршрута</b>\n\n✅ Маршрут рассчитан\n⏳ Формирую детальный план...",
@@ -742,6 +846,24 @@ class RouteHandlers:
             
             # Получаем настройки пользователя для времени звонка
             user_settings = self.parent.settings_service.get_settings(user_id)
+
+            # Загружаем существующие call_status для текущего дня,
+            # чтобы учитывать РУЧНЫЕ времена звонка/прибытия при формировании плана.
+            # ВАЖНО: сохраняем только примитивные значения, а не ORM-объекты,
+            # чтобы не обращаться к ним после закрытия сессии.
+            call_status_map = {}
+            with get_db_session() as session:
+                statuses = session.query(CallStatusDB).filter(
+                    CallStatusDB.user_id == user_id,
+                    CallStatusDB.call_date == today
+                ).all()
+                for cs in statuses:
+                    call_status_map[cs.order_number] = {
+                        "is_manual_call": bool(getattr(cs, "is_manual_call", False)),
+                        "call_time": cs.call_time,
+                        "is_manual_arrival": bool(getattr(cs, "is_manual_arrival", False)),
+                        "manual_arrival_time": cs.manual_arrival_time,
+                    }
             
             # Если есть подтвержденные заказы - добавляем их в начало маршрута
             if actual_start_from_confirmed and confirmed_orders:
@@ -776,23 +898,44 @@ class RouteHandlers:
             for i, point in enumerate(optimized_route.points, 1):
                 order = point.order
 
-                # Calculate call time (используем настройку пользователя вместо жестко заданных 40 минут)
-                # Примечание: create_call_status автоматически сохранит ручное время если оно было установлено (is_manual=True)
-                call_time = point.estimated_arrival - timedelta(minutes=user_settings.call_advance_minutes)
+                # Подтягиваем существующий call_status (если есть)
+                cs = call_status_map.get(order.order_number) if order.order_number else None
+                manual_call_time = None
+                manual_arrival_time = None
+                if cs:
+                    if cs.get("is_manual_call") and cs.get("call_time"):
+                        manual_call_time = cs["call_time"]
+                    if cs.get("is_manual_arrival") and cs.get("manual_arrival_time"):
+                        manual_arrival_time = cs["manual_arrival_time"]
 
-                # If order has time window, ensure call is not too early
-                if order.delivery_time_start:
-                    today = point.estimated_arrival.date()
-                    window_start = datetime.combine(today, order.delivery_time_start)
-                    earliest_call = window_start - timedelta(minutes=user_settings.call_advance_minutes)
+                # Синхронизируем manual_arrival_time в Order с БД, если его не было
+                if manual_arrival_time and not order.manual_arrival_time:
+                    order.manual_arrival_time = manual_arrival_time
 
-                    if call_time < earliest_call:
-                        call_time = earliest_call
-
-                # Используем ручное время прибытия если указано (оно уже учтено оптимизатором)
+                # Фактическое время прибытия: ручное (если есть) или рассчитанное оптимизатором
                 actual_arrival_time = order.manual_arrival_time if order.manual_arrival_time else point.estimated_arrival
                 if order.manual_arrival_time:
                     logger.info(f"⏰ Используется ручное время прибытия для заказа {order.order_number}: {actual_arrival_time.strftime('%H:%M')}")
+
+                # Время звонка:
+                #  - если есть РУЧНОЕ время звонка -> используем его
+                #  - иначе рассчитываем от фактического времени прибытия
+                if manual_call_time:
+                    call_time = manual_call_time
+                    logger.info(
+                        f"📞 Используется РУЧНОЕ время звонка для заказа {order.order_number}: "
+                        f"{call_time.strftime('%H:%M')}"
+                    )
+                else:
+                    call_time = actual_arrival_time - timedelta(minutes=user_settings.call_advance_minutes)
+
+                    # Если есть окно доставки, не звоним слишком рано
+                    if order.delivery_time_start:
+                        today_call = actual_arrival_time.date()
+                        window_start = datetime.combine(today_call, order.delivery_time_start)
+                        earliest_call = window_start - timedelta(minutes=user_settings.call_advance_minutes)
+                        if call_time < earliest_call:
+                            call_time = earliest_call
                 
                 # Сохраняем структурированные данные для каждой точки маршрута
                 route_point_data = {
@@ -821,7 +964,11 @@ class RouteHandlers:
                     if order.order_number in confirmed_order_numbers:
                         logger.info(f"⏭️ Пропускаем создание call_status для заказа {order.order_number} - звонок уже подтвержден")
                     else:
-                        logger.debug(f"Создание записи о звонке: заказ {order.order_number}, время звонка {call_time.strftime('%Y-%m-%d %H:%M:%S')}, прибытие {point.estimated_arrival.strftime('%Y-%m-%d %H:%M:%S')}")
+                        logger.debug(
+                            f"Создание записи о звонке: заказ {order.order_number}, "
+                            f"время звонка {call_time.strftime('%Y-%m-%d %H:%M:%S')}, "
+                            f"прибытие {actual_arrival_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
                         self.parent.call_notifier.create_call_status(
                             user_id,
                             order.order_number,
@@ -829,9 +976,9 @@ class RouteHandlers:
                             order.phone,
                             order.customer_name,
                             today,
-                            is_manual_call=False,
+                            is_manual_call=bool(manual_call_time),
                             is_manual_arrival=bool(order.manual_arrival_time),
-                            arrival_time=point.estimated_arrival,
+                            arrival_time=actual_arrival_time,
                             manual_arrival_time=order.manual_arrival_time
                         )
 
@@ -931,24 +1078,28 @@ class RouteHandlers:
             # Обновляем статусное сообщение с ошибкой (если оно было создано)
             try:
                 if 'status_msg' in locals():
-                    self.bot.edit_message_text(
+                    # Удаляем статусное сообщение и отправляем новое с клавиатурой
+                    try:
+                        self.bot.delete_message(message.chat.id, status_msg.message_id)
+                    except Exception as del_error:
+                        logger.warning(f"Не удалось удалить статусное сообщение: {del_error}")
+                    
+                    self.bot.reply_to(
+                        message,
                         f"❌ <b>Ошибка оптимизации</b>\n\n{str(e)}",
-                        message.chat.id,
-                        status_msg.message_id,
-                        parse_mode='HTML'
+                        parse_mode='HTML',
+                        reply_markup=self.parent._route_menu_markup()
                     )
                 else:
                     # Если статусное сообщение не было создано, отправляем новое
                     self.bot.reply_to(message, f"❌ Ошибка оптимизации: {str(e)}", reply_markup=self.parent._route_menu_markup())
             except Exception as edit_error:
-                logger.warning(f"Ошибка при редактировании сообщения: {edit_error}")
-                # Если не удалось отредактировать, отправляем новое сообщение
+                logger.warning(f"Ошибка при отправке сообщения об ошибке: {edit_error}")
+                # Если не удалось отправить, пробуем еще раз без форматирования
                 try:
-                    if 'status_msg' in locals():
-                        self.bot.delete_message(message.chat.id, status_msg.message_id)
-                except Exception as e:
-                    logger.warning(f"Не удалось удалить сообщение: {e}")
-                self.bot.reply_to(message, f"❌ Ошибка оптимизации: {str(e)}", reply_markup=self.parent._route_menu_markup())
+                    self.bot.reply_to(message, f"❌ Ошибка оптимизации: {str(e)}", reply_markup=self.parent._route_menu_markup())
+                except Exception as final_error:
+                    logger.error(f"Критическая ошибка при отправке сообщения: {final_error}")
     
     # ==================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ====================
     
@@ -966,7 +1117,18 @@ class RouteHandlers:
             elif start_location_data.get('latitude') and start_location_data.get('longitude'):
                 prev_latlon = (start_location_data.get('latitude'), start_location_data.get('longitude'))
         
-        for i, point_data in enumerate(route_points_data, 1):
+        # ВАЖНО: выводим маршрут в хронологическом порядке по фактическому времени прибытия,
+        # а не в "сыром" порядке вершин из оптимизатора. Это делает план понятным для человека.
+        try:
+            sorted_points = sorted(
+                route_points_data,
+                key=lambda pd: datetime.fromisoformat(pd.get("estimated_arrival"))
+            )
+        except Exception as e:
+            logger.error(f"Ошибка сортировки точек маршрута по времени прибытия: {e}", exc_info=True)
+            sorted_points = route_points_data
+
+        for i, point_data in enumerate(sorted_points, 1):
             order_number = point_data.get('order_number')
             if not order_number:
                 continue
@@ -1204,6 +1366,211 @@ class RouteHandlers:
                     self.bot.send_message(message.chat.id, chunk, parse_mode='HTML')
         else:
             self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=self.parent._route_menu_markup())
+    
+    # ==================== ПЕРЕСЧЕТ БЕЗ РУЧНЫХ ВРЕМЕН ====================
+    
+    def handle_recalculate_without_manual_confirm(self, call):
+        """Запрос подтверждения пересчета без ручных времен"""
+        user_id = call.from_user.id
+        today = date.today()
+        
+        try:
+            # Проверяем количество ручных времен
+            manual_times_list = []
+            manual_count = 0
+            with get_db_session() as session:
+                from sqlalchemy import and_
+                manual_calls = session.query(CallStatusDB).filter(
+                    and_(
+                        CallStatusDB.user_id == user_id,
+                        CallStatusDB.call_date == today,
+                        CallStatusDB.is_manual_arrival == True,
+                        CallStatusDB.manual_arrival_time.isnot(None)
+                    )
+                ).all()
+                
+                # Извлекаем значения ДО закрытия сессии
+                manual_count = len(manual_calls)
+                for cs in manual_calls[:5]:
+                    if cs.manual_arrival_time:
+                        manual_times_list.append(cs.manual_arrival_time.strftime("%H:%M"))
+            
+            if not manual_times_list:
+                self.bot.answer_callback_query(call.id, "ℹ️ Ручные времена не найдены")
+                return
+            
+            manual_times_text = ", ".join(manual_times_list)
+            if manual_count > 5:
+                manual_times_text += f" и еще {manual_count - 5}"
+            
+            # Создаем клавиатуру с подтверждением
+            from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton(
+                "✅ Да, пересчитать",
+                callback_data="recalculate_without_manual_yes"
+            ))
+            markup.add(InlineKeyboardButton(
+                "❌ Нет, отменить",
+                callback_data="recalculate_without_manual_no"
+            ))
+            
+            confirm_text = (
+                "⚠️ <b>Подтверждение пересчета</b>\n\n"
+                f"Найдено <b>{manual_count}</b> заказ(ов) с ручными временами прибытия.\n"
+                f"Времена: {manual_times_text}\n\n"
+                "При пересчете:\n"
+                "• Ручные времена будут перенесены в комментарии заказов\n"
+                "• Маршрут будет пересчитан автоматически\n"
+                "• Ручные времена больше не будут учитываться при оптимизации\n\n"
+                "<b>Вы уверены, что хотите пересчитать маршрут?</b>"
+            )
+            
+            self.bot.edit_message_text(
+                confirm_text,
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='HTML',
+                reply_markup=markup
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка при запросе подтверждения: {e}", exc_info=True)
+            self.bot.answer_callback_query(call.id, f"❌ Ошибка: {str(e)}")
+    
+    def handle_recalculate_without_manual(self, call):
+        """Пересчет маршрута без учета ручных времен (перенос в комментарии)"""
+        # Явно импортируем для избежания проблем с областью видимости
+        from src.database.connection import get_db_session
+        
+        user_id = call.from_user.id
+        today = date.today()
+        
+        try:
+            self.bot.answer_callback_query(call.id, "🔄 Пересчитываю маршрут...")
+            
+            # Получаем все заказы с ручными временами
+            with get_db_session() as session:
+                from sqlalchemy import and_
+                from src.models.order import OrderDB
+                
+                # Находим все call_status с ручными временами (прибытия или звонка)
+                from sqlalchemy import or_
+                manual_statuses = session.query(CallStatusDB).filter(
+                    and_(
+                        CallStatusDB.user_id == user_id,
+                        CallStatusDB.call_date == today,
+                        or_(
+                            and_(
+                                CallStatusDB.is_manual_arrival == True,
+                                CallStatusDB.manual_arrival_time.isnot(None)
+                            ),
+                            and_(
+                                CallStatusDB.is_manual_call == True,
+                                CallStatusDB.call_time.isnot(None)
+                            )
+                        )
+                    )
+                ).all()
+                
+                if not manual_statuses:
+                    self.bot.edit_message_text(
+                        "ℹ️ Ручные времена не найдены",
+                        call.message.chat.id,
+                        call.message.message_id
+                    )
+                    return
+                
+                # Переносим ручные времена в комментарии и удаляем ручные времена
+                moved_count = 0
+                for call_status in manual_statuses:
+                    order = session.query(OrderDB).filter(
+                        and_(
+                            OrderDB.user_id == user_id,
+                            OrderDB.order_date == today,
+                            OrderDB.order_number == call_status.order_number
+                        )
+                    ).first()
+                    
+                    if order:
+                        # Формируем комментарий с ручными временами
+                        comment_parts_to_add = []
+                        
+                        # Добавляем ручное время прибытия, если есть и еще не в комментарии
+                        if call_status.manual_arrival_time:
+                            manual_arrival_str = call_status.manual_arrival_time.strftime("%H:%M")
+                            arrival_part = f"[Ручное время: {manual_arrival_str}]"
+                            if not order.comment or arrival_part not in order.comment:
+                                comment_parts_to_add.append(arrival_part)
+                        
+                        # Добавляем ручное время звонка, если есть и еще не в комментарии
+                        if call_status.is_manual_call and call_status.call_time:
+                            manual_call_str = call_status.call_time.strftime("%H:%M")
+                            call_part = f"[Ручный звонок: {manual_call_str}]"
+                            if not order.comment or call_part not in order.comment:
+                                comment_parts_to_add.append(call_part)
+                        
+                        # Добавляем новые части в комментарий
+                        if comment_parts_to_add:
+                            comment_prefix = " ".join(comment_parts_to_add) + " "
+                            if order.comment:
+                                order.comment = comment_prefix + order.comment
+                            else:
+                                order.comment = comment_prefix
+                        
+                        # Удаляем ручное время прибытия из call_status
+                        if call_status.is_manual_arrival:
+                            call_status.is_manual_arrival = False
+                            call_status.manual_arrival_time = None
+                        # Оставляем arrival_time как есть (это расчетное время)
+                        
+                        # Сбрасываем флаг ручного времени звонка для этого же заказа
+                        # чтобы оно пересчиталось автоматически от нового времени прибытия
+                        # call_time не трогаем - оно будет пересчитано при оптимизации
+                        if call_status.is_manual_call:
+                            call_status.is_manual_call = False
+                        
+                        moved_count += 1
+                
+                session.commit()
+                logger.info(f"✅ Перенесено {moved_count} ручных времен в комментарии и удалены ручные времена звонков")
+            
+            # Удаляем сообщение и запускаем оптимизацию заново
+            # (теперь без ручных времен, так как мы их удалили из call_status)
+            try:
+                self.bot.delete_message(call.message.chat.id, call.message.message_id)
+            except Exception as e:
+                logger.warning(f"Не удалось удалить сообщение: {e}")
+            
+            # Создаем фиктивное сообщение для вызова handle_optimize_route
+            # Нужно отправить новое сообщение, чтобы получить message_id для reply_to
+            status_msg = self.bot.send_message(
+                call.message.chat.id,
+                "🔄 <b>Начинаю оптимизацию маршрута...</b>\n\n⏳ Загружаю данные...",
+                parse_mode='HTML'
+            )
+            
+            # Создаем фиктивное сообщение с message_id для совместимости
+            class FakeMessage:
+                def __init__(self, chat_id, user, message_id):
+                    self.chat = type('obj', (object,), {'id': chat_id})()
+                    self.from_user = user
+                    self.message_id = message_id
+            
+            fake_message = FakeMessage(call.message.chat.id, call.from_user, status_msg.message_id)
+            
+            # Запускаем оптимизацию (теперь без ручных времен)
+            # OR-Tools должен найти решение, или будет использован fallback
+            self.handle_optimize_route(fake_message)
+            
+        except Exception as e:
+            logger.error(f"Ошибка при пересчете без ручных времен: {e}", exc_info=True)
+            self.bot.edit_message_text(
+                f"❌ <b>Ошибка пересчета</b>\n\n{str(e)}",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='HTML'
+            )
     
     # ==================== СБРОС ДНЯ ====================
     

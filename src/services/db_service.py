@@ -29,29 +29,31 @@ class DatabaseService:
     
     def _get_orders(self, user_id: int, order_date: date, session: Session) -> List[Dict]:
         """Внутренний метод получения заказов"""
-        # ВАЖНО: Для каждого order_number берем ПОСЛЕДНЮЮ запись (по updated_at)
+        # ВАЖНО: Для каждого order_number берем ПОСЛЕДНЮЮ запись (по id)
         # чтобы избежать проблем с дубликатами
         from sqlalchemy import func
         
-        # Подзапрос для получения максимального id (последней записи) для каждого order_number
-        subquery = session.query(
-            OrderDB.order_number,
-            func.max(OrderDB.id).label('max_id')
-        ).filter(
+        # Получаем все заказы за дату
+        all_orders = session.query(OrderDB).filter(
             and_(
                 OrderDB.user_id == user_id,
                 OrderDB.order_date == order_date
             )
-        ).group_by(OrderDB.order_number).subquery()
+        ).order_by(OrderDB.id.desc()).all()
         
-        # Получаем только последние записи для каждого order_number
-        orders = session.query(OrderDB).join(
-            subquery,
-            and_(
-                OrderDB.order_number == subquery.c.order_number,
-                OrderDB.id == subquery.c.max_id
-            )
-        ).all()
+        logger.info(f"📦 Найдено {len(all_orders)} заказов в БД для user_id={user_id}, date={order_date}")
+        
+        # Группируем по order_number в Python, беря последнюю запись для каждого
+        orders_dict = {}
+        for order in all_orders:
+            # Используем order_number как ключ, или id если order_number None
+            key = order.order_number if order.order_number else f"id_{order.id}"
+            if key not in orders_dict:
+                orders_dict[key] = order
+                logger.debug(f"   ✅ Добавлен заказ: order_number={order.order_number}, id={order.id}, address={order.address}")
+        
+        orders = list(orders_dict.values())
+        logger.info(f"📦 После дедупликации: {len(orders)} уникальных заказов")
         
         # Загружаем call_status для текущей даты, чтобы подтянуть ручные времена
         from src.models.order import CallStatusDB
@@ -139,7 +141,6 @@ class DatabaseService:
                 entrance_number=order.entrance_number,
                 apartment_number=order.apartment_number,
                 gis_id=order.gis_id,
-                manual_arrival_time=order.manual_arrival_time,  # Ручное время прибытия
             )
             session.add(order_db)
             session.commit()

@@ -15,15 +15,44 @@ class CredentialsService:
     """Сервис для шифрования и хранения учетных данных"""
     
     def __init__(self):
+        # Диагностика: проверяем переменные окружения напрямую ПЕРВЫМ делом
+        import os
+        env_key = os.getenv("ENCRYPTION_KEY") or os.getenv("encryption_key")
+        
         # Получаем ключ шифрования из настроек
         encryption_key = settings.encryption_key
+        
+        # Приоритет: переменные окружения > settings
+        if env_key:
+            if not encryption_key:
+                logger.info(f"✅ ENCRYPTION_KEY найден в переменных окружения (но не в settings). Используем из env.")
+                encryption_key = env_key
+            elif encryption_key != env_key:
+                logger.warning(f"⚠️ ENCRYPTION_KEY из settings отличается от переменной окружения. Используем из env.")
+                encryption_key = env_key
+            else:
+                logger.debug(f"✅ ENCRYPTION_KEY совпадает в settings и env")
+        else:
+            logger.debug(f"🔍 ENCRYPTION_KEY не найден в переменных окружения, проверяем settings...")
+        
+        # Детальная диагностика
+        import os
+        logger.debug(f"🔍 Диагностика ENCRYPTION_KEY:")
+        logger.debug(f"   - os.getenv('ENCRYPTION_KEY'): {os.getenv('ENCRYPTION_KEY')}")
+        logger.debug(f"   - os.getenv('encryption_key'): {os.getenv('encryption_key')}")
+        logger.debug(f"   - settings.encryption_key: {settings.encryption_key}")
+        logger.debug(f"   - encryption_key (после обработки): {encryption_key}")
         
         # Проверяем, что ключ установлен и не является дефолтным значением
         if not encryption_key or encryption_key == "your_encryption_key_here":
             # Генерируем новый ключ
             logger.warning("⚠️ ENCRYPTION_KEY не установлен! Генерирую новый ключ...")
+            logger.warning("⚠️ Проверьте:")
+            logger.warning("   1. Файл 'env' содержит строку: ENCRYPTION_KEY=...")
+            logger.warning("   2. В docker-compose.yml используется env_file: - env")
+            logger.warning("   3. Контейнер перезапущен после добавления переменной")
             encryption_key = Fernet.generate_key().decode()
-            logger.warning(f"⚠️ ВАЖНО! Добавьте в файл 'env':\nENCRYPTION_KEY={encryption_key}")
+            logger.warning(f"⚠️ ВАЖНО! Добавьте в файл 'env' или переменные окружения:\nENCRYPTION_KEY={encryption_key}")
             logger.warning("⚠️ Без этого ключа вы не сможете расшифровать сохраненные пароли после перезапуска!")
         
         # Проверяем, что ключ в правильном формате

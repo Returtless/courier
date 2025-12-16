@@ -830,6 +830,7 @@ class OrderHandlers:
         from src.models.order import CallStatusDB
         
         manual_call_time_display = None
+        manual_arrival_time_display = None
         
         # Загружаем call_status для заказа
         with get_db_session() as session:
@@ -839,13 +840,17 @@ class OrderHandlers:
                 CallStatusDB.call_date == today
             ).first()
             
-            if call_status and getattr(call_status, "is_manual_call", False) and call_status.call_time:
-                manual_call_time_display = call_status.call_time.strftime('%H:%M')
+            # ВАЖНО: Извлекаем данные ВНУТРИ сессии
+            if call_status:
+                if getattr(call_status, "is_manual_call", False) and call_status.call_time:
+                    manual_call_time_display = call_status.call_time.strftime('%H:%M')
+                if getattr(call_status, "is_manual_arrival", False) and call_status.manual_arrival_time:
+                    manual_arrival_time_display = call_status.manual_arrival_time.strftime('%H:%M')
         
         # Отображаем РУЧНОЕ время прибытия из call_status
-        if call_status and getattr(call_status, "is_manual_arrival", False) and call_status.manual_arrival_time:
-            details.append(f"⏰ <b>Время прибытия (ручное):</b> {call_status.manual_arrival_time.strftime('%H:%M')}")
-            logger.debug(f"Отображено ручное время прибытия из call_status: {call_status.manual_arrival_time.strftime('%H:%M')}")
+        if manual_arrival_time_display:
+            details.append(f"⏰ <b>Время прибытия (ручное):</b> {manual_arrival_time_display}")
+            logger.debug(f"Отображено ручное время прибытия из call_status: {manual_arrival_time_display}")
         else:
             details.append(f"⏰ <b>Время прибытия (ручное):</b> Не указано")
         
@@ -1567,12 +1572,13 @@ class OrderHandlers:
             if temp_order.delivery_time_end:
                 updates['delivery_time_end'] = temp_order.delivery_time_end
         
-        # Если обновлено ручное время прибытия/звонка, парсим datetime
+        # ВАЖНО: manual_arrival_time и manual_call_time больше не хранятся в orders
+        # Они обновляются через специальные методы (_update_manual_arrival_time, _update_manual_call_time)
+        # и хранятся в call_status
         if field_name in ['manual_arrival_time', 'manual_call_time']:
-            try:
-                updates[field_name] = datetime.fromisoformat(field_value)
-            except (ValueError, AttributeError):
-                logger.error(f"Ошибка парсинга времени: {field_value}")
+            logger.warning(f"Попытка обновить {field_name} через _update_order_field - это поле больше не в OrderDB")
+            # Удаляем из updates, чтобы не пытаться обновить в БД
+            return
         
         # Обновляем в БД
         try:
