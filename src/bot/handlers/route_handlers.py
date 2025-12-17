@@ -958,22 +958,25 @@ class RouteHandlers:
                 }
                 call_schedule.append(call_data)
                 
-                # Создаем запись о звонке для уведомлений (если есть телефон)
-                # НЕ перезаписываем подтвержденные звонки при повторной оптимизации
-                if order.phone and order.order_number:
+                # Создаем/обновляем запись о звонке для уведомлений
+                # ВАЖНО: обновляем call_time для ВСЕХ заказов, даже без телефона,
+                # чтобы уведомления использовали актуальное время
+                if order.order_number:
                     if order.order_number in confirmed_order_numbers:
                         logger.info(f"⏭️ Пропускаем создание call_status для заказа {order.order_number} - звонок уже подтвержден")
                     else:
                         logger.debug(
-                            f"Создание записи о звонке: заказ {order.order_number}, "
+                            f"Создание/обновление записи о звонке: заказ {order.order_number}, "
                             f"время звонка {call_time.strftime('%Y-%m-%d %H:%M:%S')}, "
                             f"прибытие {actual_arrival_time.strftime('%Y-%m-%d %H:%M:%S')}"
                         )
+                        # Используем телефон из заказа или "Не указан" если его нет
+                        phone = order.phone or "Не указан"
                         self.parent.call_notifier.create_call_status(
                             user_id,
                             order.order_number,
                             call_time,
-                            order.phone,
+                            phone,
                             order.customer_name,
                             today,
                             is_manual_call=bool(manual_call_time),
@@ -1526,9 +1529,12 @@ class RouteHandlers:
                         
                         # Сбрасываем флаг ручного времени звонка для этого же заказа
                         # чтобы оно пересчиталось автоматически от нового времени прибытия
-                        # call_time не трогаем - оно будет пересчитано при оптимизации
+                        # ВАЖНО: call_time будет обновлен при оптимизации через create_call_status,
+                        # но нужно явно сбросить флаг, чтобы create_call_status знал, что можно обновлять
                         if call_status.is_manual_call:
                             call_status.is_manual_call = False
+                            # Временно устанавливаем call_time в None невозможно (NOT NULL constraint),
+                            # поэтому оставляем старое значение - оно будет перезаписано при оптимизации
                         
                         moved_count += 1
                 

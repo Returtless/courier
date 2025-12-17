@@ -260,8 +260,15 @@ class CallNotifier:
                 if existing.is_manual_call and not is_manual_call:
                     logger.info(f"⏭️ Пропускаем обновление call_time для заказа {order_number} - звонок установлен вручную")
                 else:
+                    # Обновляем call_time если это не ручная установка или если флаг был сброшен
+                    old_call_time = existing.call_time
                     existing.call_time = call_time
                     existing.is_manual_call = is_manual_call
+                    logger.info(
+                        f"🔄 Обновлен call_time для заказа {order_number}: "
+                        f"{old_call_time.strftime('%H:%M') if old_call_time else 'None'} -> "
+                        f"{call_time.strftime('%H:%M')}, is_manual_call: {existing.is_manual_call} -> {is_manual_call}"
+                    )
 
                 if existing.is_manual_arrival and not is_manual_arrival:
                     logger.info(f"⏭️ Пропускаем обновление arrival_time для заказа {order_number} - прибытие установлено вручную")
