@@ -30,12 +30,29 @@ class Settings(BaseSettings):
     traffic_check_interval: int = 5  # minutes
 
     class Config:
-        env_file = "env"
+        # Не используем env_file, так как переменные передаются напрямую из Portainer
+        # env_file = "env"  # Отключено, используем только переменные окружения
         env_file_encoding = "utf-8"
         case_sensitive = False
         extra = "allow"  # Allow extra fields from .env
         # Pydantic BaseSettings автоматически читает из переменных окружения
-        # даже если они установлены через Portainer или docker-compose
+        # которые передаются через docker-compose environment: секцию
 
 
 settings = Settings()
+
+# Диагностика при загрузке модуля (только если logging настроен)
+import logging
+logger = logging.getLogger(__name__)
+# Логируем только если encryption_key не установлен (чтобы не спамить)
+if not settings.encryption_key:
+    logger.info(f"🔍 Config загружен (encryption_key не найден):")
+    logger.info(f"   - settings.encryption_key: {settings.encryption_key}")
+    logger.info(f"   - settings.yandex_maps_api_key: {settings.yandex_maps_api_key[:10] if settings.yandex_maps_api_key else None}...")
+    logger.info(f"   - settings.two_gis_api_key: {settings.two_gis_api_key[:10] if settings.two_gis_api_key else None}...")
+    logger.info(f"   - settings.telegram_bot_token: {settings.telegram_bot_token[:10] if settings.telegram_bot_token else None}...")
+    # Проверяем, что Pydantic видит из переменных окружения
+    import os
+    logger.info(f"   - os.getenv('ENCRYPTION_KEY'): {os.getenv('ENCRYPTION_KEY')}")
+    logger.info(f"   - os.getenv('encryption_key'): {os.getenv('encryption_key')}")
+    logger.info(f"   - Проверка всех переменных с 'ENCRYPTION' или 'encryption': {[k for k in os.environ.keys() if 'encryption' in k.lower()]}")

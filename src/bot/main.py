@@ -65,6 +65,16 @@ def main():
     # llm_service = LLMService()  # Пока отключено
     llm_service = None
 
+    # Проверяем доступность Tesseract OCR для парсинга изображений
+    logger.info("🔍 Проверка доступности Tesseract OCR...")
+    try:
+        from src.services.image_parser import ImageOrderParser
+        test_parser = ImageOrderParser()
+        logger.info("✅ Tesseract OCR доступен - парсинг изображений включен")
+    except Exception as e:
+        logger.warning(f"⚠️ Tesseract OCR недоступен: {e}")
+        logger.warning("⚠️ Парсинг изображений будет недоступен. Установите Tesseract для использования этой функции.")
+    
     # Initialize bot handler (все сервисы инициализируются внутри)
     logger.info("🔧 Инициализация обработчиков...")
     try:

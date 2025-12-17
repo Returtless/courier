@@ -42,6 +42,10 @@ class RouteHandlers:
             func=lambda m: m.text == "📋 Показать маршрут"
         )
         self.bot.register_message_handler(
+            self.handle_current_order,
+            func=lambda m: m.text == "📋 Текущий заказ"
+        )
+        self.bot.register_message_handler(
             self.handle_show_calls,
             func=lambda m: m.text == "📞 Звонки"
         )
@@ -104,6 +108,21 @@ class RouteHandlers:
                 parse_mode='HTML',
                 reply_markup=self.parent._route_menu_markup()
             )
+        elif callback_data.startswith("route_delivered_"):
+            self.handle_mark_order_delivered(call)
+        elif callback_data.startswith("route_edit_order_"):
+            self.handle_edit_order_from_route(call)
+        elif callback_data.startswith("current_order_"):
+            # Формат: current_order_<index> или current_order_next_<index> или current_order_prev_<index>
+            if callback_data.startswith("current_order_next_"):
+                index = int(callback_data.replace("current_order_next_", ""))
+                self.handle_show_order_by_index(call, index + 1)
+            elif callback_data.startswith("current_order_prev_"):
+                index = int(callback_data.replace("current_order_prev_", ""))
+                self.handle_show_order_by_index(call, index - 1)
+            else:
+                index = int(callback_data.replace("current_order_", ""))
+                self.handle_show_order_by_index(call, index)
     
     # ==================== ТОЧКА СТАРТА ====================
     
@@ -226,7 +245,7 @@ class RouteHandlers:
                 self.bot.reply_to(
                     message,
                     "⚠️ Неизвестное состояние. Возврат в главное меню.",
-                    reply_markup=self.parent._main_menu_markup()
+                    reply_markup=self.parent._main_menu_markup(message.from_user.id)
                 )
                 self.parent.clear_user_state(message.from_user.id)
         
@@ -235,7 +254,7 @@ class RouteHandlers:
             self.bot.reply_to(
                 message,
                 f"❌ Ошибка обработки: {str(e)}",
-                reply_markup=self.parent._main_menu_markup()
+                reply_markup=self.parent._main_menu_markup(message.from_user.id)
             )
             self.parent.clear_user_state(message.from_user.id)
     
@@ -396,7 +415,7 @@ class RouteHandlers:
             self.bot.send_message(
                 message.chat.id,
                 "Главное меню",
-                reply_markup=self.parent._main_menu_markup()
+                reply_markup=self.parent._main_menu_markup(user_id)
             )
             return
         
@@ -430,7 +449,7 @@ class RouteHandlers:
         self.bot.send_message(
             message.chat.id,
             f"✅ Время старта установлено: {start_datetime.strftime('%H:%M')}",
-            reply_markup=self.parent._main_menu_markup()
+            reply_markup=self.parent._main_menu_markup(user_id)
         )
         
         self.parent.clear_user_state(user_id)
@@ -455,14 +474,16 @@ class RouteHandlers:
                 return
             
             if not orders_data:
-                self.bot.reply_to(message, "❌ Нет добавленных заказов. Добавьте их через кнопку ➕ Добавить заказы", reply_markup=self.parent._orders_menu_markup())
+                user_id = message.from_user.id
+                self.bot.reply_to(message, "❌ Нет добавленных заказов. Добавьте их через кнопку ➕ Добавить заказы", reply_markup=self.parent._orders_menu_markup(user_id))
                 return
 
             # Фильтруем доставленные заказы
             active_orders_data = [od for od in orders_data if od.get('status', 'pending') != 'delivered']
             
             if not active_orders_data:
-                self.bot.reply_to(message, "❌ Нет активных заказов для оптимизации. Все заказы доставлены.", reply_markup=self.parent._orders_menu_markup())
+                user_id = message.from_user.id
+                self.bot.reply_to(message, "❌ Нет активных заказов для оптимизации. Все заказы доставлены.", reply_markup=self.parent._orders_menu_markup(user_id))
                 return
             
             # Загружаем подтвержденные звонки для сохранения их при повторной оптимизации
@@ -703,11 +724,15 @@ class RouteHandlers:
                             parse_mode='HTML'
                         )
                     self.bot.send_chat_action(message.chat.id, 'typing')
-                    lat, lon, gid = maps_service.geocode_address_sync(order.address)
-                    if lat and lon:
-                        order.latitude = lat
-                        order.longitude = lon
-                        order.gis_id = gid
+                    # Проверяем, что адрес не пустой перед геокодированием
+                    if order.address and order.address.strip():
+                        lat, lon, gid = maps_service.geocode_address_sync(order.address)
+                        if lat and lon:
+                            order.latitude = lat
+                            order.longitude = lon
+                            order.gis_id = gid
+                    else:
+                        logger.warning(f"⚠️ Заказ {order.order_number} не может быть загеокодирован: адрес отсутствует")
 
             # Initialize route optimizer
             total_orders = len(orders)
@@ -1055,7 +1080,7 @@ class RouteHandlers:
                 f"📏 Общее расстояние: {optimized_route.total_distance:.1f} км\n"
                 f"⏱️ Общее время: {optimized_route.total_time:.0f} мин\n"
                 f"🏁 Завершение: {optimized_route.estimated_completion.strftime('%H:%M')}\n\n"
-                f"<b>Маршрут:</b>\n" + "\n\n".join(formatted_route[:3])
+                f"<b>Маршрут:</b>\n" + "\n\n".join(item["text"] for item in formatted_route[:3])
             )
 
             if len(formatted_route) > 3:
@@ -1106,19 +1131,41 @@ class RouteHandlers:
     
     # ==================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ====================
     
+    def _build_order_delivered_keyboard(self, order_number: str):
+        """Строит inline‑клавиатуру для одного заказа: кнопка "✅ Доставлен"."""
+        from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+        markup = InlineKeyboardMarkup()
+        callback_data = f"route_delivered_{order_number}"
+        # callback_data ограничено 64 символами, наш формат безопасен
+        markup.add(InlineKeyboardButton("✅ Доставлен", callback_data=callback_data))
+        return markup
+
     def _format_route_summary(self, user_id: int, route_points_data: List[Dict], orders_dict: Dict[str, Dict], 
-                              start_location_data: Dict, maps_service) -> List[str]:
-        """Форматирует маршрут из структурированных данных"""
-        route_summary = []
+                              start_location_data: Dict, maps_service, start_index: int = 1, 
+                              prev_latlon: tuple = None, prev_gid: str = None) -> List[Dict]:
+        """
+        Форматирует маршрут из структурированных данных.
         
-        # Получаем координаты старта
-        prev_latlon = None
-        prev_gid = None
-        if start_location_data:
-            if start_location_data.get('location_type') == 'geo':
-                prev_latlon = (start_location_data.get('latitude'), start_location_data.get('longitude'))
-            elif start_location_data.get('latitude') and start_location_data.get('longitude'):
-                prev_latlon = (start_location_data.get('latitude'), start_location_data.get('longitude'))
+        Args:
+            start_index: Начальный номер для нумерации заказов (по умолчанию 1)
+        
+        Returns:
+            Список словарей:
+            {
+                "text": "<строка с описанием точки маршрута>",
+                "order_number": "<номер заказа или None>"
+            }
+        """
+        route_summary: List[Dict] = []
+        
+        # Получаем координаты старта (если не переданы явно)
+        if prev_latlon is None:
+            if start_location_data:
+                if start_location_data.get('location_type') == 'geo':
+                    prev_latlon = (start_location_data.get('latitude'), start_location_data.get('longitude'))
+                elif start_location_data.get('latitude') and start_location_data.get('longitude'):
+                    prev_latlon = (start_location_data.get('latitude'), start_location_data.get('longitude'))
         
         # ВАЖНО: выводим маршрут в хронологическом порядке по фактическому времени прибытия,
         # а не в "сыром" порядке вершин из оптимизатора. Это делает план понятным для человека.
@@ -1131,13 +1178,18 @@ class RouteHandlers:
             logger.error(f"Ошибка сортировки точек маршрута по времени прибытия: {e}", exc_info=True)
             sorted_points = route_points_data
 
-        for i, point_data in enumerate(sorted_points, 1):
+        for i, point_data in enumerate(sorted_points, start_index):
             order_number = point_data.get('order_number')
             if not order_number:
                 continue
                 
             order_data = orders_dict.get(order_number)
             if not order_data:
+                continue
+            
+            # ВАЖНО: Пропускаем доставленные заказы
+            if order_data.get('status', 'pending') == 'delivered':
+                logger.debug(f"Пропускаем доставленный заказ {order_number} в маршруте")
                 continue
             
             # Преобразуем данные заказа
@@ -1167,7 +1219,10 @@ class RouteHandlers:
             order_info = [f"<b>{i}. {order_title}</b>"]
             
             # Адрес
-            order_info.append(f"📍 {order.address}")
+            if order.address:
+                order_info.append(f"📍 {order.address}")
+            else:
+                order_info.append("📍 Адрес не указан")
             
             # Контакты (компактно)
             contact_parts = []
@@ -1258,7 +1313,10 @@ class RouteHandlers:
             if order.comment:
                 order_info.append(f"💬 {order.comment}")
             
-            route_summary.append("\n".join(order_info))
+            route_summary.append({
+                "text": "\n".join(order_info),
+                "order_number": order.order_number
+            })
         
         return route_summary
     
@@ -1284,29 +1342,40 @@ class RouteHandlers:
         
         # Загружаем заказы из БД
         orders_data = self.parent.db_service.get_today_orders(user_id)
-        orders_dict = {od.get('order_number'): od for od in orders_data if od.get('order_number')}
+        
+        # Фильтруем только активные (не доставленные) заказы
+        active_orders_data = [od for od in orders_data if od.get('status', 'pending') != 'delivered']
+        orders_dict = {od.get('order_number'): od for od in active_orders_data if od.get('order_number')}
+        
+        # Фильтруем route_points_data, оставляя только активные заказы
+        active_order_numbers = set(orders_dict.keys())
+        active_route_points_data = [p for p in route_points_data if p.get('order_number') in active_order_numbers]
+        
+        if not active_route_points_data:
+            self.bot.reply_to(message, "✅ Все заказы доставлены", reply_markup=self.parent._route_menu_markup())
+            return
         
         # Загружаем точку старта
         start_location_data = self.parent.db_service.get_start_location(user_id, today) or {}
         
-        # Форматируем маршрут
+        # Форматируем маршрут только для активных заказов
         maps_service = MapsService()
-        route_summary = self._format_route_summary(user_id, route_points_data, orders_dict, start_location_data, maps_service)
+        route_summary = self._format_route_summary(user_id, active_route_points_data, orders_dict, start_location_data, maps_service)
         
         if not route_summary:
             self.bot.reply_to(message, "❌ Не удалось сформировать маршрут", reply_markup=self.parent._route_menu_markup())
             return
         
-        # Отправляем маршрут по частям (по 3 заказа в сообщении)
+        # Отправляем маршрут по частям (по 3 заказа в сообщении) - БЕЗ кнопок
         text_header = "<b>🗺️ Маршрут доставки</b>\n\n"
         
         # Первое сообщение с заголовком и первыми заказами
-        first_chunk = text_header + "\n\n".join(route_summary[:3])
+        first_chunk = text_header + "\n\n".join(item["text"] for item in route_summary[:3])
         self.bot.reply_to(message, first_chunk, parse_mode='HTML', reply_markup=self.parent._route_menu_markup(), disable_web_page_preview=True)
         
         # Остальные заказы по 5 в сообщении
         for i in range(3, len(route_summary), 5):
-            chunk = "\n\n".join(route_summary[i:i+5])
+            chunk = "\n\n".join(item["text"] for item in route_summary[i:i+5])
             self.bot.send_message(message.chat.id, chunk, parse_mode='HTML', disable_web_page_preview=True)
     
     def handle_show_calls(self, message):
@@ -1638,3 +1707,349 @@ class RouteHandlers:
                 call.message.chat.id,
                 call.message.message_id
             )
+
+    # ==================== ТЕКУЩИЙ ЗАКАЗ ====================
+    
+    def handle_current_order(self, message):
+        """Показать текущий (ближайший) заказ с навигацией"""
+        user_id = message.from_user.id
+        today = date.today()
+        
+        # Загружаем маршрут из БД
+        route_data = self.parent.db_service.get_route_data(user_id, today)
+        if not route_data:
+            self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Используйте кнопку ▶️ Оптимизировать", reply_markup=self.parent._route_menu_markup())
+            return
+        
+        route_points_data = route_data.get('route_points_data', [])
+        if not route_points_data:
+            self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Используйте кнопку ▶️ Оптимизировать", reply_markup=self.parent._route_menu_markup())
+            return
+        
+        # Сортируем по времени прибытия и берем первый (ближайший) заказ
+        try:
+            sorted_points = sorted(
+                route_points_data,
+                key=lambda pd: datetime.fromisoformat(pd.get("estimated_arrival"))
+            )
+        except Exception as e:
+            logger.error(f"Ошибка сортировки точек маршрута: {e}", exc_info=True)
+            sorted_points = route_points_data
+        
+        # Фильтруем только активные (не доставленные) заказы
+        orders_data = self.parent.db_service.get_today_orders(user_id)
+        active_order_numbers = {od.get('order_number') for od in orders_data if od.get('status', 'pending') != 'delivered'}
+        
+        active_points = [p for p in sorted_points if p.get('order_number') in active_order_numbers]
+        
+        if not active_points:
+            self.bot.reply_to(message, "✅ Все заказы доставлены", reply_markup=self.parent._main_menu_markup(user_id))
+            return
+        
+        # Показываем первый заказ (индекс 0) - отправляем новое сообщение
+        self._show_order_at_index(message.chat.id, user_id, active_points, 0, None)
+    
+    def handle_show_order_by_index(self, call, index: int):
+        """Показать заказ по индексу (для навигации)"""
+        user_id = call.from_user.id
+        today = date.today()
+        
+        # Загружаем маршрут из БД
+        route_data = self.parent.db_service.get_route_data(user_id, today)
+        if not route_data:
+            self.bot.answer_callback_query(call.id, "❌ Маршрут не найден")
+            return
+        
+        route_points_data = route_data.get('route_points_data', [])
+        if not route_points_data:
+            self.bot.answer_callback_query(call.id, "❌ Маршрут пуст")
+            return
+        
+        # Сортируем и фильтруем активные заказы
+        try:
+            sorted_points = sorted(
+                route_points_data,
+                key=lambda pd: datetime.fromisoformat(pd.get("estimated_arrival"))
+            )
+        except Exception as e:
+            logger.error(f"Ошибка сортировки точек маршрута: {e}", exc_info=True)
+            sorted_points = route_points_data
+        
+        orders_data = self.parent.db_service.get_today_orders(user_id)
+        active_order_numbers = {od.get('order_number') for od in orders_data if od.get('status', 'pending') != 'delivered'}
+        active_points = [p for p in sorted_points if p.get('order_number') in active_order_numbers]
+        
+        if not active_points:
+            self.bot.answer_callback_query(call.id, "✅ Все заказы доставлены")
+            return
+        
+        # Проверяем границы
+        if index < 0:
+            index = 0
+        elif index >= len(active_points):
+            index = len(active_points) - 1
+        
+        self.bot.answer_callback_query(call.id)
+        self._show_order_at_index(call.message.chat.id, user_id, active_points, index, call.message.message_id)
+    
+    def _show_order_at_index(self, chat_id: int, user_id: int, active_points: List[Dict], index: int, message_id: int = None):
+        """Показать заказ по индексу с навигацией"""
+        today = date.today()
+        
+        if index < 0 or index >= len(active_points):
+            return
+        
+        point_data = active_points[index]
+        order_number = point_data.get('order_number')
+        if not order_number:
+            return
+        
+        # Загружаем данные заказа
+        orders_data = self.parent.db_service.get_today_orders(user_id)
+        orders_dict = {od.get('order_number'): od for od in orders_data if od.get('order_number')}
+        order_data = orders_dict.get(order_number)
+        
+        if not order_data:
+            return
+        
+        # Определяем координаты предыдущей точки для построения маршрута
+        # Если это не первый заказ, используем координаты предыдущего заказа
+        prev_latlon = None
+        prev_gid = None
+        
+        if index > 0:
+            # Берем предыдущий заказ из списка
+            prev_point_data = active_points[index - 1]
+            prev_order_number = prev_point_data.get('order_number')
+            if prev_order_number:
+                prev_order_data = orders_dict.get(prev_order_number)
+                if prev_order_data and prev_order_data.get('latitude') and prev_order_data.get('longitude'):
+                    prev_latlon = (prev_order_data['latitude'], prev_order_data['longitude'])
+                    prev_gid = prev_order_data.get('gis_id')
+        
+        # Если предыдущего заказа нет, используем стартовую точку
+        if prev_latlon is None:
+            start_location_data = self.parent.db_service.get_start_location(user_id, today) or {}
+            if start_location_data:
+                if start_location_data.get('location_type') == 'geo':
+                    prev_latlon = (start_location_data.get('latitude'), start_location_data.get('longitude'))
+                elif start_location_data.get('latitude') and start_location_data.get('longitude'):
+                    prev_latlon = (start_location_data.get('latitude'), start_location_data.get('longitude'))
+        else:
+            start_location_data = {}  # Не нужна стартовая точка, если есть предыдущий заказ
+        
+        # Получаем номер заказа из point_data
+        order_number = point_data.get('order_number')
+        if not order_number:
+            logger.warning(f"Не найден номер заказа в point_data для индекса {index}")
+            return
+        
+        # Форматируем один заказ с правильным порядковым номером (index + 1, так как нумерация с 1)
+        maps_service = MapsService()
+        route_summary = self._format_route_summary(user_id, [point_data], orders_dict, start_location_data, maps_service, start_index=index + 1, prev_latlon=prev_latlon, prev_gid=prev_gid)
+        
+        if not route_summary:
+            return
+        
+        order_text = route_summary[0]["text"]
+        
+        # Создаем клавиатуру навигации
+        from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+        markup = InlineKeyboardMarkup()
+        
+        # Кнопки навигации
+        nav_buttons = []
+        if index > 0:
+            nav_buttons.append(InlineKeyboardButton("⬅️ Предыдущий", callback_data=f"current_order_prev_{index}"))
+        if index < len(active_points) - 1:
+            nav_buttons.append(InlineKeyboardButton("➡️ Следующий", callback_data=f"current_order_next_{index}"))
+        
+        if nav_buttons:
+            markup.row(*nav_buttons)
+        
+        # Кнопки действий
+        action_buttons = []
+        action_buttons.append(InlineKeyboardButton("✏️ Отредактировать", callback_data=f"route_edit_order_{order_number}"))
+        action_buttons.append(InlineKeyboardButton("✅ Доставлен", callback_data=f"route_delivered_{order_number}"))
+        markup.row(*action_buttons)
+        
+        # Отправляем или редактируем сообщение
+        if message_id:
+            try:
+                self.bot.edit_message_text(
+                    order_text,
+                    chat_id,
+                    message_id,
+                    parse_mode='HTML',
+                    reply_markup=markup,
+                    disable_web_page_preview=True
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось отредактировать сообщение: {e}")
+                # Если не удалось отредактировать, отправляем новое
+                self.bot.send_message(
+                    chat_id,
+                    order_text,
+                    parse_mode='HTML',
+                    reply_markup=markup,
+                    disable_web_page_preview=True
+                )
+        else:
+            self.bot.send_message(
+                chat_id,
+                order_text,
+                parse_mode='HTML',
+                reply_markup=markup,
+                disable_web_page_preview=True
+            )
+    
+    # ==================== ОТМЕТКА ДОСТАВКИ ЗАКАЗА ====================
+
+    def handle_mark_order_delivered(self, call):
+        """Обработчик нажатия на кнопку 'Доставлен' в списке маршрута."""
+        user_id = call.from_user.id
+        today = date.today()
+
+        try:
+            data = call.data or ""
+            # Формат callback_data: route_delivered_<order_number>
+            prefix = "route_delivered_"
+            if not data.startswith(prefix):
+                self.bot.answer_callback_query(call.id, "❌ Некорректные данные", show_alert=True)
+                return
+
+            order_number = data[len(prefix):]
+            if not order_number:
+                self.bot.answer_callback_query(call.id, "❌ Не указан номер заказа", show_alert=True)
+                return
+
+            # Загружаем маршрут ДО обновления статуса, чтобы найти индекс текущего заказа
+            route_data = self.parent.db_service.get_route_data(user_id, today)
+            if not route_data:
+                # Если маршрута нет, просто обновляем статус
+                updated = self.parent.db_service.update_order(
+                    user_id,
+                    order_number,
+                    {"status": "delivered"},
+                    today,
+                )
+                if updated:
+                    self.bot.answer_callback_query(call.id, f"✅ Заказ №{order_number} отмечен доставленным")
+                else:
+                    self.bot.answer_callback_query(call.id, f"❌ Заказ №{order_number} не найден", show_alert=True)
+                return
+            
+            route_points_data = route_data.get('route_points_data', [])
+            try:
+                sorted_points = sorted(
+                    route_points_data,
+                    key=lambda pd: datetime.fromisoformat(pd.get("estimated_arrival"))
+                )
+            except Exception:
+                sorted_points = route_points_data
+            
+            # Находим индекс текущего заказа ДО обновления статуса
+            orders_data_before = self.parent.db_service.get_today_orders(user_id)
+            active_order_numbers_before = {od.get('order_number') for od in orders_data_before if od.get('status', 'pending') != 'delivered'}
+            active_points_before = [p for p in sorted_points if p.get('order_number') in active_order_numbers_before]
+            current_index = next((i for i, p in enumerate(active_points_before) if p.get('order_number') == order_number), None)
+            
+            # Обновляем статус заказа в БД
+            updated = self.parent.db_service.update_order(
+                user_id,
+                order_number,
+                {"status": "delivered"},
+                today,
+            )
+
+            if not updated:
+                self.bot.answer_callback_query(
+                    call.id,
+                    f"❌ Заказ №{order_number} не найден за сегодня",
+                    show_alert=True
+                )
+                return
+
+            # Отвечаем на callback
+            self.bot.answer_callback_query(call.id, f"✅ Заказ №{order_number} отмечен доставленным")
+            
+            # Загружаем активные заказы ПОСЛЕ обновления статуса
+            orders_data_after = self.parent.db_service.get_today_orders(user_id)
+            active_order_numbers_after = {od.get('order_number') for od in orders_data_after if od.get('status', 'pending') != 'delivered'}
+            active_points_after = [p for p in sorted_points if p.get('order_number') in active_order_numbers_after]
+            
+            if active_points_after:
+                # Определяем, какой заказ показать
+                if current_index is not None:
+                    # Если был не последний - показываем следующий (который теперь на том же индексе)
+                    if current_index < len(active_points_after):
+                        next_index = current_index
+                    else:
+                        # Если был последний - показываем предыдущий
+                        next_index = len(active_points_after) - 1
+                else:
+                    # Если не нашли индекс (не должно случиться), показываем первый
+                    next_index = 0
+                
+                self._show_order_at_index(call.message.chat.id, user_id, active_points_after, next_index, call.message.message_id)
+            else:
+                # Больше нет активных заказов
+                try:
+                    # Удаляем старое сообщение и отправляем новое с клавиатурой
+                    # (на случай, если исходное сообщение не имело reply_markup)
+                    try:
+                        self.bot.delete_message(call.message.chat.id, call.message.message_id)
+                    except:
+                        pass  # Игнорируем ошибку, если сообщение уже удалено
+                    
+                    self.bot.send_message(
+                        call.message.chat.id,
+                        "✅ Все заказы доставлены",
+                        parse_mode='HTML',
+                        reply_markup=self.parent._main_menu_markup(user_id)
+                    )
+                except Exception as edit_error:
+                    logger.error(f"Ошибка при обновлении сообщения после доставки всех заказов: {edit_error}")
+                    # Пытаемся хотя бы ответить на callback
+                    try:
+                        self.bot.answer_callback_query(call.id, "✅ Все заказы доставлены")
+                    except:
+                        pass
+
+        except Exception as e:
+            logger.error(f"Ошибка при отметке заказа доставленным: {e}", exc_info=True)
+            try:
+                self.bot.answer_callback_query(call.id, f"❌ Ошибка: {str(e)}", show_alert=True)
+            except Exception:
+                # Игнорируем вторичную ошибку ответа
+                pass
+    
+    def handle_edit_order_from_route(self, call):
+        """Обработчик нажатия на кнопку 'Отредактировать' в текущем заказе"""
+        user_id = call.from_user.id
+        
+        try:
+            data = call.data or ""
+            # Формат callback_data: route_edit_order_<order_number>
+            prefix = "route_edit_order_"
+            if not data.startswith(prefix):
+                self.bot.answer_callback_query(call.id, "❌ Некорректные данные", show_alert=True)
+                return
+            
+            order_number = data[len(prefix):]
+            if not order_number:
+                self.bot.answer_callback_query(call.id, "❌ Не указан номер заказа", show_alert=True)
+                return
+            
+            # Отвечаем на callback
+            self.bot.answer_callback_query(call.id, "✏️ Открываю редактирование...")
+            
+            # Вызываем метод из order_handlers для показа деталей заказа и начала редактирования
+            self.parent.orders.show_order_details(user_id, order_number, call.message.chat.id)
+            
+        except Exception as e:
+            logger.error(f"Ошибка при открытии редактирования заказа: {e}", exc_info=True)
+            try:
+                self.bot.answer_callback_query(call.id, f"❌ Ошибка: {str(e)}", show_alert=True)
+            except Exception:
+                pass

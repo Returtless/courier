@@ -16,6 +16,7 @@ class ChefMarketParser:
     
     def __init__(self):
         self.base_url = "https://deliver.chefmarket.ru"
+        self.last_screenshot_path = None  # Путь к последнему скриншоту (если был сделан)
     
     async def import_orders(self, login: str, password: str, target_date: date = None) -> List[Dict]:
         """
@@ -28,7 +29,11 @@ class ChefMarketParser:
         
         Returns:
             Список словарей с данными заказов
+        
+        Note:
+            Если заказов нет, скриншот сохраняется в self.last_screenshot_path
         """
+        self.last_screenshot_path = None  # Сбрасываем путь к скриншоту перед новым импортом
         if target_date is None:
             target_date = date.today()
         
@@ -83,8 +88,12 @@ class ChefMarketParser:
                     
                     if "/orders" not in current_url:
                         logger.error("❌ Авторизация не удалась - не попали на страницу заказов")
-                        await page.screenshot(path="auth_error.png")
-                        logger.error("Скриншот сохранен в auth_error.png")
+                        # Сохраняем скриншот в директорию data (которая монтируется как volume)
+                        os.makedirs("data", exist_ok=True)
+                        screenshot_path = os.path.join("data", "auth_error.png")
+                        await page.screenshot(path=screenshot_path)
+                        logger.error(f"Скриншот сохранен в {screenshot_path}")
+                        logger.error(f"📁 Полный путь: {os.path.abspath(screenshot_path)}")
                         raise Exception("Ошибка авторизации. Проверьте логин и пароль.")
                 
                 # 5. Дополнительная проверка авторизации
@@ -108,26 +117,141 @@ class ChefMarketParser:
                 
                 logger.info(f"📦 Получение списка заказов...")
                 
-                # 6. Получаем все ссылки на заказы
-                order_links = await page.query_selector_all('.link')
-                logger.info(f"📊 Найдено заказов на странице: {len(order_links)}")
+                # Ждем загрузки контейнера с заказами и появления хотя бы одного заказа
+                try:
+                    # Ждем появления контейнера
+                    await page.wait_for_selector('.index-orders', timeout=10000)
+                    logger.info("✅ Контейнер .index-orders найден")
+                    
+                    # Дополнительно ждем появления хотя бы одного заказа (это важно для SPA)
+                    await page.wait_for_selector('.index-orders .link, .index-orders .order-cell', timeout=10000)
+                    logger.info("✅ Заказы загружены на странице")
+                except Exception as e:
+                    logger.warning(f"⚠️ Ожидание загрузки заказов: {e}")
+                    # Пробуем продолжить, возможно заказы уже загружены
                 
-                # Если заказов нет, делаем скриншот для проверки
+                # 6. Получаем все ссылки на заказы ВНУТРИ контейнера .index-orders
+                # Ищем более специфично: заказы внутри .index-orders, а не все .link на странице
+                order_links = await page.query_selector_all('.index-orders .link')
+                logger.info(f"📊 Найдено заказов по селектору '.index-orders .link': {len(order_links)}")
+                
+                # Если заказов нет, пробуем альтернативные селекторы
+                if len(order_links) == 0:
+                    logger.warning("⚠️ Заказы не найдены по селектору '.index-orders .link', пробуем альтернативные варианты...")
+                    
+                    # Альтернативный вариант 1: используем JavaScript для поиска всех .link внутри .index-orders
+                    try:
+                        # Используем evaluate для получения всех .link элементов
+                        link_count = await page.evaluate('''() => {
+                            const indexOrders = document.querySelector('.index-orders');
+                            if (!indexOrders) return 0;
+                            return indexOrders.querySelectorAll('.link').length;
+                        }''')
+                        logger.info(f"📊 JavaScript поиск: найдено {link_count} .link в .index-orders")
+                        
+                        if link_count > 0:
+                            # Теперь получаем элементы через Playwright
+                            order_links = await page.query_selector_all('.index-orders .link')
+                            logger.info(f"📊 После JavaScript проверки: найдено {len(order_links)} .link")
+                    except Exception as e:
+                        logger.debug(f"Ошибка JavaScript поиска: {e}")
+                    
+                    # Альтернативный вариант 2: ищем все .link на странице и фильтруем те, что внутри .index-orders
+                    if len(order_links) == 0:
+                        all_links = await page.query_selector_all('.link')
+                        logger.info(f"📊 Всего .link на странице: {len(all_links)}")
+                        
+                        # Фильтруем только те, что внутри .index-orders через JavaScript
+                        found_links = []
+                        for link in all_links:
+                            is_in_index_orders = await link.evaluate('(el) => el.closest(".index-orders") !== null')
+                            if is_in_index_orders:
+                                found_links.append(link)
+                        order_links = found_links
+                        logger.info(f"📊 Отфильтровано .link внутри .index-orders: {len(order_links)}")
+                    
+                    # Диагностика: проверяем, есть ли элементы с номерами заказов
+                    if len(order_links) == 0:
+                        order_numbers_found = await page.locator('.index-orders:has-text("№")').count()
+                        logger.info(f"📊 Элементов с '№' в .index-orders: {order_numbers_found}")
+                        
+                        # Пробуем найти заказы через order-header__id
+                        order_ids = await page.query_selector_all('.index-orders .order-header__id')
+                        logger.info(f"📊 Найдено .order-header__id: {len(order_ids)}")
+                        
+                        if len(order_ids) > 0:
+                            # Если нашли order-header__id, значит заказы есть, но .link не найдены
+                            # Пробуем найти родительские .link через JavaScript
+                            link_selectors = await page.evaluate('''() => {
+                                const ids = document.querySelectorAll('.index-orders .order-header__id');
+                                const links = [];
+                                ids.forEach(id => {
+                                    const link = id.closest('.link');
+                                    if (link && !links.includes(link)) {
+                                        links.push(link);
+                                    }
+                                });
+                                return links.length;
+                            }''')
+                            logger.info(f"📊 JavaScript поиск .link через .order-header__id: найдено {link_selectors}")
+                            
+                            # Если JavaScript нашел ссылки, пробуем получить их через Playwright еще раз
+                            if link_selectors > 0:
+                                order_links = await page.query_selector_all('.index-orders .link')
+                                logger.info(f"📊 После диагностики: найдено {len(order_links)} .link")
+                
+                # Если заказов все еще нет, делаем скриншот для проверки
                 if len(order_links) == 0:
                     logger.warning("⚠️ Список заказов пуст!")
-                    screenshot_path = "empty_orders_list.png"
+                    # Сохраняем скриншот в директорию data (которая монтируется как volume)
+                    os.makedirs("data", exist_ok=True)
+                    screenshot_path = os.path.join("data", "empty_orders_list.png")
                     await page.screenshot(path=screenshot_path, full_page=True)
+                    self.last_screenshot_path = screenshot_path  # Сохраняем путь для отправки пользователю
                     logger.info(f"📸 Скриншот пустого списка сохранен в {screenshot_path}")
+                    logger.info(f"📁 Полный путь: {os.path.abspath(screenshot_path)}")
+                    
+                    # Дополнительная диагностика: проверяем структуру страницы
+                    try:
+                        index_orders_exists = await page.query_selector('.index-orders') is not None
+                        logger.info(f"🔍 Диагностика: .index-orders существует: {index_orders_exists}")
+                        
+                        if index_orders_exists:
+                            index_orders_text = await page.locator('.index-orders').first.inner_text()
+                            logger.info(f"🔍 Содержимое .index-orders (первые 500 символов): {index_orders_text[:500]}")
+                    except Exception as e:
+                        logger.debug(f"Ошибка диагностики: {e}")
+                    
                     logger.info("Возможные причины:")
                     logger.info("  - На сегодня действительно нет заказов")
                     logger.info("  - Заказы на другую дату (проверьте дату в заголовке)")
-                    logger.info("  - Изменилась структура сайта (селектор .link)")
+                    logger.info("  - Изменилась структура сайта (селектор .link или .index-orders)")
                     return []  # Возвращаем пустой список
                 
                 # 7. Проходим по каждому заказу
-                for i, link_element in enumerate(order_links, 1):
+                # ВАЖНО: не сохраняем ссылки на элементы, так как они становятся неактуальными после навигации
+                # Вместо этого находим элементы заново перед каждым кликом
+                total_orders = len(order_links)
+                
+                for i in range(1, total_orders + 1):
                     try:
-                        logger.info(f"📋 Обработка заказа {i}/{len(order_links)}...")
+                        logger.info(f"📋 Обработка заказа {i}/{total_orders}...")
+                        
+                        # Убеждаемся, что мы на странице списка заказов
+                        if "/orders" not in page.url:
+                            logger.info(f"🔄 Возвращаемся на страницу списка заказов...")
+                            await page.goto(f"{self.base_url}/orders", wait_until='networkidle', timeout=10000)
+                            await page.wait_for_selector('.index-orders .link, .index-orders .order-cell', timeout=10000)
+                        
+                        # Находим все заказы заново (элементы могли стать неактуальными)
+                        current_order_links = await page.query_selector_all('.index-orders .link')
+                        
+                        if len(current_order_links) < i:
+                            logger.warning(f"⚠️ Заказ {i} не найден (всего заказов: {len(current_order_links)})")
+                            continue
+                        
+                        # Берем i-й заказ (индекс i-1, так как начинаем с 1)
+                        link_element = current_order_links[i - 1]
                         
                         # СНАЧАЛА извлекаем время доставки ИЗ СПИСКА (до клика)
                         time_window = None
@@ -162,13 +286,17 @@ class ChefMarketParser:
                         await page.go_back()
                         await page.wait_for_load_state('networkidle', timeout=5000)
                         
+                        # Дополнительное ожидание для стабилизации страницы
+                        await page.wait_for_selector('.index-orders .link, .index-orders .order-cell', timeout=5000)
+                        
                     except Exception as e:
                         logger.error(f"❌ Ошибка обработки заказа {i}: {e}")
                         # Пытаемся вернуться к списку
                         try:
-                            await page.goto(f"{self.base_url}/orders", timeout=5000)
-                        except:
-                            pass
+                            await page.goto(f"{self.base_url}/orders", wait_until='networkidle', timeout=10000)
+                            await page.wait_for_selector('.index-orders .link, .index-orders .order-cell', timeout=10000)
+                        except Exception as nav_error:
+                            logger.error(f"❌ Ошибка возврата к списку: {nav_error}")
                         continue
                 
                 await browser.close()

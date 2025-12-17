@@ -12,6 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     wget \
     gnupg \
+    # Tesseract OCR для парсинга изображений
+    tesseract-ocr \
+    tesseract-ocr-rus \
+    tesseract-ocr-eng \
     # Зависимости для Playwright Chromium
     libnss3 \
     libnspr4 \

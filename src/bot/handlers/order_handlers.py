@@ -26,13 +26,31 @@ class OrderHandlers:
     def __init__(self, bot_instance):
         self.bot = bot_instance.bot
         self.parent = bot_instance
+        
+        # Инициализируем парсер изображений один раз
+        try:
+            from src.services.image_parser import ImageOrderParser
+            self.image_parser = ImageOrderParser()
+            logger.info("✅ Парсер изображений инициализирован")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось инициализировать парсер изображений: {e}")
+            self.image_parser = None
     
     def register(self):
         """Регистрация обработчиков заказов"""
+        # Обработчик фотографий (скриншотов заказов)
+        self.bot.register_message_handler(
+            self.handle_photo,
+            content_types=['photo']
+        )
         # Кнопки меню заказов
         self.bot.register_message_handler(
             self.handle_add_orders,
             func=lambda m: m.text and "Добавить заказы" in m.text
+        )
+        self.bot.register_message_handler(
+            self.handle_load_from_screenshot,
+            func=lambda m: m.text and "Загрузить из скриншота" in m.text
         )
         self.bot.register_message_handler(
             self.handle_order_details_start,
@@ -100,15 +118,95 @@ class OrderHandlers:
             self.bot.send_message(
                 call.message.chat.id,
                 "🔍 Введите номер заказа:",
-                reply_markup=self.parent._orders_menu_markup()
+                reply_markup=self.parent._orders_menu_markup(user_id)
             )
-        elif callback_data == "view_delivered_orders":
-            self.show_delivered_orders(call.from_user.id, call.message.chat.id)
-            self.bot.answer_callback_query(call.id)
         elif callback_data.startswith("mark_delivered_"):
             order_number = callback_data.replace("mark_delivered_", "")
             self.mark_order_delivered(call.from_user.id, order_number, call.message.chat.id)
             self.bot.answer_callback_query(call.id, "✅ Заказ отмечен как доставленный")
+        elif callback_data.startswith("save_order_from_image_") or callback_data.startswith("overwrite_order_from_image_"):
+            # Сохранить или перезаписать заказ из изображения
+            is_overwrite = callback_data.startswith("overwrite_order_from_image_")
+            user_id = call.from_user.id
+            action_text = "перезаписи" if is_overwrite else "сохранения"
+            logger.info(f"💾 Запрос на {action_text} заказа из изображения от user_id={user_id}")
+            
+            state_data = self.parent.get_user_state(user_id)
+            order_data = state_data.get('pending_order_from_image')
+            
+            if not order_data:
+                logger.warning(f"⚠️ Данные заказа не найдены во временном состоянии для user_id={user_id}")
+                self.bot.answer_callback_query(call.id, "❌ Данные не найдены", show_alert=True)
+                return
+            
+            logger.info(f"📋 {action_text.capitalize()} заказа из изображения: order_number={order_data.get('order_number')}, user_id={user_id}")
+            logger.debug(f"📦 Полные данные для {action_text}: {order_data}")
+            
+            # Сохраняем заказ
+            today = date.today()
+            try:
+                # Преобразуем delivery_time_window в delivery_time_start и delivery_time_end, если нужно
+                if order_data.get('delivery_time_window') and not order_data.get('delivery_time_start'):
+                    time_window = order_data.get('delivery_time_window')
+                    if isinstance(time_window, str) and '-' in time_window:
+                        try:
+                            start_str, end_str = time_window.split('-', 1)
+                            start_str = start_str.strip()
+                            end_str = end_str.strip()
+                            order_data['delivery_time_start'] = datetime.strptime(start_str, '%H:%M').time()
+                            order_data['delivery_time_end'] = datetime.strptime(end_str, '%H:%M').time()
+                            logger.debug(f"🕐 Преобразовано временное окно: {time_window} -> {order_data['delivery_time_start']} - {order_data['delivery_time_end']}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Не удалось распарсить временное окно '{time_window}': {e}")
+                
+                # Преобразуем словарь в объект Order
+                order = Order(**order_data)
+                logger.info(f"💾 Вызов db_service.save_order для user_id={user_id}, order_number={order.order_number}, partial_update={is_overwrite}")
+                self.parent.db_service.save_order(user_id, order, today, partial_update=is_overwrite)
+                action_result = "перезаписан" if is_overwrite else "сохранен"
+                logger.info(f"✅ Заказ успешно {action_result} в БД: order_number={order.order_number}, user_id={user_id}")
+                
+                self.bot.answer_callback_query(call.id, f"✅ Заказ {action_result}!")
+                
+                # Очищаем временные данные
+                self.parent.update_user_state(user_id, 'pending_order_from_image', None)
+                logger.debug(f"🧹 Временные данные очищены для user_id={user_id}")
+                
+                # Обновляем сообщение
+                result_text = "перезаписан" if is_overwrite else "сохранен"
+                self.bot.edit_message_text(
+                    f"✅ <b>Заказ {result_text}!</b>\n\n"
+                    f"📦 Номер: {order_data.get('order_number', 'Не указан')}\n"
+                    f"📍 Адрес: {order_data.get('address', 'Не указан')}\n\n"
+                    f"Используйте <b>▶️ Оптимизировать</b> для построения маршрута",
+                    call.message.chat.id,
+                    call.message.message_id,
+                    parse_mode='HTML'
+                )
+                logger.info(f"✅ Сообщение о {action_result} отправлено пользователю user_id={user_id}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка {action_text} заказа из изображения для user_id={user_id}, order_number={order_data.get('order_number')}: {e}", exc_info=True)
+                # Сокращаем сообщение об ошибке для Telegram API (максимум 200 символов)
+                error_msg = str(e)
+                if len(error_msg) > 180:
+                    error_msg = error_msg[:177] + "..."
+                # Убираем технические детали для пользователя
+                if "duplicate key" in error_msg.lower() or "unique constraint" in error_msg.lower():
+                    error_msg = "Заказ уже существует"
+                elif "IntegrityError" in error_msg:
+                    error_msg = "Ошибка сохранения в БД"
+                self.bot.answer_callback_query(call.id, f"❌ {error_msg}", show_alert=True)
+        elif callback_data == "cancel_save_order":
+            user_id = call.from_user.id
+            logger.info(f"❌ Отмена сохранения заказа из изображения для user_id={user_id}")
+            self.parent.update_user_state(user_id, 'pending_order_from_image', None)
+            logger.debug(f"🧹 Временные данные очищены для user_id={user_id}")
+            self.bot.answer_callback_query(call.id, "❌ Отменено")
+            self.bot.edit_message_text(
+                "❌ Сохранение отменено",
+                call.message.chat.id,
+                call.message.message_id
+            )
     
     # ==================== ОБРАБОТЧИКИ КНОПОК РЕДАКТИРОВАНИЯ ====================
     
@@ -119,7 +217,8 @@ class OrderHandlers:
         order_number = state_data.get('updating_order_number')
         
         if not order_number:
-            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            user_id = message.from_user.id
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup(user_id))
             return
         
         self.parent.update_user_state(user_id, 'state', 'waiting_for_order_phone')
@@ -136,7 +235,8 @@ class OrderHandlers:
         order_number = state_data.get('updating_order_number')
         
         if not order_number:
-            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            user_id = message.from_user.id
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup(user_id))
             return
         
         self.parent.update_user_state(user_id, 'state', 'waiting_for_order_name')
@@ -153,7 +253,8 @@ class OrderHandlers:
         order_number = state_data.get('updating_order_number')
         
         if not order_number:
-            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            user_id = message.from_user.id
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup(user_id))
             return
         
         self.parent.update_user_state(user_id, 'state', 'waiting_for_order_comment')
@@ -170,7 +271,8 @@ class OrderHandlers:
         order_number = state_data.get('updating_order_number')
         
         if not order_number:
-            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            user_id = message.from_user.id
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup(user_id))
             return
         
         self.parent.update_user_state(user_id, 'state', 'waiting_for_order_entrance')
@@ -187,7 +289,8 @@ class OrderHandlers:
         order_number = state_data.get('updating_order_number')
         
         if not order_number:
-            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            user_id = message.from_user.id
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup(user_id))
             return
         
         self.parent.update_user_state(user_id, 'state', 'waiting_for_order_apartment')
@@ -204,7 +307,8 @@ class OrderHandlers:
         order_number = state_data.get('updating_order_number')
         
         if not order_number:
-            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            user_id = message.from_user.id
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup(user_id))
             return
         
         self.parent.update_user_state(user_id, 'state', 'waiting_for_order_delivery_time')
@@ -221,7 +325,8 @@ class OrderHandlers:
         order_number = state_data.get('updating_order_number')
         
         if not order_number:
-            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            user_id = message.from_user.id
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup(user_id))
             return
         
         self.parent.update_user_state(user_id, 'state', 'waiting_for_manual_arrival_time')
@@ -238,7 +343,8 @@ class OrderHandlers:
         order_number = state_data.get('updating_order_number')
         
         if not order_number:
-            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup())
+            user_id = message.from_user.id
+            self.bot.reply_to(message, "❌ Заказ не выбран. Вернитесь к списку заказов.", reply_markup=self.parent._orders_menu_markup(user_id))
             return
         
         self.parent.update_user_state(user_id, 'state', 'waiting_for_manual_call_time')
@@ -319,6 +425,158 @@ class OrderHandlers:
     
     # ==================== ДОБАВЛЕНИЕ ЗАКАЗОВ ====================
     
+    def handle_photo(self, message):
+        """Обработка фотографий (скриншотов заказов)"""
+        user_id = message.from_user.id
+        logger.info(f"📸 Получено изображение от user_id={user_id}, message_id={message.message_id}")
+        
+        # Получаем фото с максимальным разрешением
+        photo = message.photo[-1] if message.photo else None
+        if not photo:
+            logger.error(f"❌ Не удалось получить изображение из сообщения user_id={user_id}")
+            self.bot.reply_to(message, "❌ Не удалось получить изображение")
+            return
+        
+        logger.info(f"📷 Изображение получено: file_id={photo.file_id}, размер={photo.file_size} байт")
+        
+        # Отправляем статус
+        status_msg = self.bot.reply_to(
+            message,
+            "🔄 <b>Обработка изображения...</b>\n\n"
+            "⏳ Извлекаю данные из скриншота...",
+            parse_mode='HTML'
+        )
+        
+        try:
+            # Загружаем изображение
+            logger.info(f"⬇️ Загрузка файла изображения: file_id={photo.file_id}")
+            file_info = self.bot.get_file(photo.file_id)
+            logger.debug(f"📁 Информация о файле: file_path={file_info.file_path}, file_size={file_info.file_size}")
+            
+            image_data = self.bot.download_file(file_info.file_path)
+            logger.info(f"✅ Изображение загружено: {len(image_data)} байт")
+            
+            # Парсим изображение
+            logger.info(f"🔍 Начало парсинга изображения для user_id={user_id}")
+            
+            if not self.image_parser:
+                logger.error("❌ Парсер изображений не инициализирован")
+                self.bot.edit_message_text(
+                    "❌ <b>Парсер изображений недоступен</b>\n\n"
+                    "Парсер изображений не был инициализирован при запуске бота.\n"
+                    "Проверьте, что Tesseract OCR установлен и доступен.",
+                    message.chat.id,
+                    status_msg.message_id,
+                    parse_mode='HTML'
+                )
+                return
+            
+            order_data = self.image_parser.parse_order_from_image(image_data)
+            
+            if not order_data:
+                logger.warning(f"⚠️ Не удалось извлечь данные из изображения user_id={user_id}")
+                self.bot.edit_message_text(
+                    "❌ <b>Не удалось извлечь данные</b>\n\n"
+                    "Возможные причины:\n"
+                    "• Низкое качество изображения\n"
+                    "• Нечитаемый текст\n"
+                    "• Неподдерживаемый формат\n\n"
+                    "Попробуйте:\n"
+                    "• Отправить более четкий скриншот\n"
+                    "• Убедиться, что текст хорошо виден\n"
+                    "• Или введите данные вручную",
+                    message.chat.id,
+                    status_msg.message_id,
+                    parse_mode='HTML'
+                )
+                return
+            
+            logger.info(f"✅ Данные успешно извлечены для user_id={user_id}: order_number={order_data.get('order_number')}")
+            logger.debug(f"📋 Полные извлеченные данные: {order_data}")
+            
+            # Проверяем, существует ли уже заказ с таким номером
+            order_exists = False
+            if order_data.get('order_number'):
+                today = date.today()
+                existing_order = self.parent.db_service.get_order_by_number(user_id, order_data['order_number'], today)
+                if existing_order:
+                    order_exists = True
+                    logger.info(f"⚠️ Заказ {order_data['order_number']} уже существует в БД для user_id={user_id}, date={today}")
+            
+            # Показываем извлеченные данные для подтверждения
+            preview_text = "📋 <b>Извлеченные данные:</b>\n\n"
+            if order_data.get('order_number'):
+                preview_text += f"📦 <b>Номер заказа:</b> {order_data['order_number']}\n"
+            if order_data.get('address'):
+                preview_text += f"📍 <b>Адрес:</b> {order_data['address']}\n"
+            if order_data.get('customer_name'):
+                preview_text += f"👤 <b>Имя:</b> {order_data['customer_name']}\n"
+            if order_data.get('phone'):
+                preview_text += f"📞 <b>Телефон:</b> {order_data['phone']}\n"
+            if order_data.get('delivery_time_window'):
+                preview_text += f"🕐 <b>Время доставки:</b> {order_data['delivery_time_window']}\n"
+            if order_data.get('comment'):
+                preview_text += f"💬 <b>Комментарий:</b> {order_data['comment']}\n"
+            
+            from telebot import types
+            markup = types.InlineKeyboardMarkup()
+            
+            if order_exists:
+                preview_text += "\n⚠️ <b>Заказ уже существует!</b>\n\n💾 Перезаписать заказ?"
+                markup.add(types.InlineKeyboardButton("🔄 Перезаписать", callback_data=f"overwrite_order_from_image_{user_id}"))
+            else:
+                preview_text += "\n💾 Сохранить заказ?"
+                markup.add(types.InlineKeyboardButton("✅ Сохранить", callback_data=f"save_order_from_image_{user_id}"))
+            
+            markup.add(types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_save_order"))
+            
+            # Сохраняем данные во временное состояние
+            self.parent.update_user_state(user_id, 'pending_order_from_image', order_data)
+            logger.debug(f"💾 Данные сохранены во временное состояние для user_id={user_id}")
+            
+            self.bot.edit_message_text(
+                preview_text,
+                message.chat.id,
+                status_msg.message_id,
+                parse_mode='HTML',
+                reply_markup=markup
+            )
+            logger.info(f"✅ Превью данных отправлено пользователю user_id={user_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка обработки изображения для user_id={user_id}: {e}", exc_info=True)
+            self.bot.edit_message_text(
+                f"❌ <b>Ошибка обработки</b>\n\n{str(e)}\n\n"
+                "Попробуйте отправить изображение еще раз или введите данные вручную.",
+                message.chat.id,
+                status_msg.message_id,
+                parse_mode='HTML'
+            )
+    
+    def handle_load_from_screenshot(self, message):
+        """Обработка кнопки 'Загрузить из скриншота'"""
+        user_id = message.from_user.id
+        logger.info(f"📸 Пользователь user_id={user_id} выбрал загрузку из скриншота")
+        
+        text = (
+            "📸 <b>Загрузка заказа из скриншота</b>\n\n"
+            "Отправьте скриншот страницы заказа, и бот автоматически извлечет данные:\n\n"
+            "✅ <b>Что будет извлечено:</b>\n"
+            "• Номер заказа\n"
+            "• Адрес доставки\n"
+            "• Имя покупателя\n"
+            "• Телефон\n"
+            "• Комментарий\n"
+            "• Время доставки\n\n"
+            "💡 <b>Советы:</b>\n"
+            "• Убедитесь, что текст на скриншоте четкий и читаемый\n"
+            "• Скриншот должен содержать полную информацию о заказе\n"
+            "• После извлечения данных вы сможете проверить и сохранить заказ\n\n"
+            "📷 <b>Отправьте скриншот сейчас</b>"
+        )
+        user_id = message.from_user.id
+        self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=self.parent._orders_menu_markup(user_id))
+    
     def handle_add_orders(self, message):
         """Handle /add_orders command"""
         user_id = message.from_user.id
@@ -336,6 +594,8 @@ class OrderHandlers:
             "<code>Имя|Телефон|Адрес|Комментарий</code>\n"
             "Пример:\n"
             "<code>Иван|+7-999-123-45-67|ул. Ленина, 10|Звонок в домофон</code>\n\n"
+            "📸 <b>Формат 3 (скриншот):</b>\n"
+            "Используйте кнопку <b>📸 Загрузить из скриншота</b> для автоматического извлечения данных.\n\n"
             "Можно вставить сразу несколько строк одним сообщением — все корректные добавятся.\n"
             "Когда закончите, нажмите кнопку <b>✅ Готово</b>"
         )
@@ -350,7 +610,8 @@ class OrderHandlers:
         if text == "/done" or text == "✅ Готово":
             orders = state_data.get("orders", [])
             if not orders:
-                self.bot.reply_to(message, "❌ Нет добавленных заказов", reply_markup=self.parent._orders_menu_markup())
+                user_id = message.from_user.id
+                self.bot.reply_to(message, "❌ Нет добавленных заказов", reply_markup=self.parent._orders_menu_markup(user_id))
                 return
 
             # Сохраняем заказы в БД
@@ -362,8 +623,14 @@ class OrderHandlers:
                     # Преобразуем строки времени обратно в time объекты
                     order_dict = order_data.copy()
                     
+                    # Адрес необязателен при сохранении - можно добавить позже через редактирование
+                    # Но предупреждаем пользователя
                     if not order_dict.get('address'):
-                        errors.append(f"Заказ {i+1}: отсутствует адрес")
+                        logger.warning(f"Заказ {i+1} (№{order_dict.get('order_number', 'неизвестен')}) сохранен без адреса - добавьте адрес через редактирование")
+                    
+                    # Проверяем обязательность номера заказа
+                    if not order_dict.get('order_number'):
+                        errors.append(f"Заказ {i+1}: отсутствует номер заказа (обязательное поле)")
                         continue
                     
                     # Преобразуем время
@@ -394,7 +661,7 @@ class OrderHandlers:
             if errors:
                 response_text += f"\n\n⚠️ Ошибки при сохранении:\n" + "\n".join(errors[:5])
             
-            self.bot.reply_to(message, response_text, reply_markup=self.parent._orders_menu_markup())
+            self.bot.reply_to(message, response_text, reply_markup=self.parent._orders_menu_markup(user_id))
             return
 
         if text == "⬅️ В меню" or text == "⬅️ Главное меню":
@@ -411,12 +678,54 @@ class OrderHandlers:
             if "|" in line:
                 parts = line.split("|")
                 if len(parts) < 3:
-                    raise ValueError("Недостаточно данных в расширенном формате")
+                    raise ValueError("Недостаточно данных в расширенном формате. Формат: Имя|Телефон|Адрес|Комментарий")
+                # Расширенный формат: Имя|Телефон|Адрес|Комментарий
+                # Но номер заказа можно указать в начале: НомерЗаказа|Имя|Телефон|Адрес|Комментарий
+                # Или в конце: Имя|Телефон|Адрес|Комментарий|НомерЗаказа
+                order_number = None
+                customer_name = None
+                phone = None
+                address = None
+                comment = None
+                
+                # Проверяем, есть ли номер заказа (6+ цифр) в первой или последней части
+                if len(parts) > 0:
+                    first_part = parts[0].strip()
+                    if re.match(r'^\d{6,}$', first_part):
+                        # Номер заказа в начале
+                        order_number = first_part
+                        if len(parts) >= 2:
+                            customer_name = parts[1].strip() if parts[1].strip() else None
+                        if len(parts) >= 3:
+                            phone = parts[2].strip() if parts[2].strip() else None
+                        if len(parts) >= 4:
+                            address = parts[3].strip()
+                        if len(parts) >= 5:
+                            comment = parts[4].strip() if parts[4].strip() else None
+                    else:
+                        # Обычный формат: Имя|Телефон|Адрес|Комментарий
+                        customer_name = first_part if first_part else None
+                        if len(parts) >= 2:
+                            phone = parts[1].strip() if parts[1].strip() else None
+                        if len(parts) >= 3:
+                            address = parts[2].strip()
+                        if len(parts) >= 4:
+                            comment = parts[3].strip() if parts[3].strip() else None
+                        # Проверяем последнюю часть на номер заказа
+                        if len(parts) >= 4 and re.match(r'^\d{6,}$', parts[-1].strip()):
+                            order_number = parts[-1].strip()
+                            comment = parts[3].strip() if len(parts) > 4 and parts[3].strip() else None
+                
+                # Адрес необязателен - можно добавить позже
+                if not order_number:
+                    raise ValueError("Номер заказа обязателен. Укажите его в начале или конце: НомерЗаказа|Имя|Телефон|Адрес или Имя|Телефон|Адрес|НомерЗаказа")
+                
                 order = Order(
-                    customer_name=parts[0].strip() if len(parts) > 0 and parts[0].strip() else None,
-                    phone=parts[1].strip() if len(parts) > 1 and parts[1].strip() else None,
-                    address=parts[2].strip(),
-                    comment=parts[3].strip() if len(parts) > 3 and parts[3].strip() else None
+                    customer_name=customer_name,
+                    phone=phone,
+                    address=address if address else "",
+                    comment=comment,
+                    order_number=order_number
                 )
                 return order.model_dump()
 
@@ -427,21 +736,49 @@ class OrderHandlers:
             if time_match:
                 time_window = time_match.group(1).strip()
                 remaining_text = line.replace(time_window, '').strip()
-                order_num_match = re.match(r'(\d+)\s+', remaining_text)
+                # Ищем номер заказа (6+ цифр) - может быть с пробелом после или без
+                # Паттерн: номер заказа (6+ цифр), затем либо пробел и адрес, либо конец строки
+                order_num_match = re.match(r'(\d{6,})\s*(.*)$', remaining_text)
                 if order_num_match:
                     order_number = order_num_match.group(1)
-                    address = remaining_text[order_num_match.end():].strip()
+                    address = order_num_match.group(2).strip()
                 else:
-                    order_number = None
-                    address = remaining_text
+                    # Пробуем найти номер заказа в любом месте строки (6+ цифр подряд)
+                    order_num_match = re.search(r'\b(\d{6,})\b', remaining_text)
+                    if order_num_match:
+                        order_number = order_num_match.group(1)
+                        # Адрес - это все что до и после номера заказа
+                        address = remaining_text.replace(order_number, '').strip()
+                    else:
+                        raise ValueError("Не найден номер заказа (должно быть минимум 6 цифр)")
             else:
-                time_window = None
-                order_number = None
-                address = line
+                # Без времени - проверяем, есть ли номер заказа в начале
+                order_num_match = re.match(r'(\d{6,})\s+(.+)$', line)
+                if order_num_match:
+                    order_number = order_num_match.group(1)
+                    address = order_num_match.group(2).strip()
+                    time_window = None
+                else:
+                    # Пробуем найти номер заказа в любом месте
+                    order_num_match = re.search(r'\b(\d{6,})\b', line)
+                    if order_num_match:
+                        order_number = order_num_match.group(1)
+                        address = line.replace(order_number, '').strip()
+                        time_window = None
+                    else:
+                        # Нет номера заказа - это ошибка для формата 1
+                        raise ValueError("Не найден номер заказа. Формат: Время НомерЗаказа Адрес")
 
+            # Адрес необязателен - можно добавить позже через редактирование
+            # Но если адрес указан, он должен быть не слишком коротким
+            if address and len(address) < 3:
+                raise ValueError("Адрес слишком короткий (минимум 3 символа)")
+
+            # Если адрес не указан, используем пустую строку (БД требует не-null значение)
+            # Пользователь сможет добавить адрес позже через редактирование
             order = Order(
-                address=address,
-                order_number=order_number if order_number else None,
+                address=address if address else "",
+                order_number=order_number,
                 delivery_time_window=time_window if time_window else None
             )
             return order.model_dump()
@@ -485,7 +822,7 @@ class OrderHandlers:
             else:
                 order_info = order_data.get('customer_name') or 'Клиент'
 
-            address_short = order_data['address'][:50] + "..." if len(order_data['address']) > 50 else order_data['address']
+            address_short = (order_data.get('address') or 'Адрес не указан')[:50] + "..." if order_data.get('address') and len(order_data['address']) > 50 else (order_data.get('address') or 'Адрес не указан')
 
             self.bot.reply_to(message, f"✅ Заказ добавлен: {order_info}\n📍 {address_short}")
 
@@ -506,6 +843,13 @@ class OrderHandlers:
         """Показать список доставленных заказов"""
         user_id = message.from_user.id
         self.show_delivered_orders(user_id, message.chat.id)
+    
+    def handle_view_delivered(self, call):
+        """Обработчик callback для просмотра доставленных заказов"""
+        user_id = call.from_user.id
+        chat_id = call.message.chat.id
+        self.bot.answer_callback_query(call.id)
+        self.show_delivered_orders(user_id, chat_id)
     
     def show_delivered_orders(self, user_id: int, chat_id: int):
         """Показать список доставленных заказов"""
@@ -544,10 +888,11 @@ class OrderHandlers:
         orders_data = self.parent.db_service.get_today_orders(user_id)
         
         if not orders_data:
+            user_id = message.from_user.id
             self.bot.reply_to(
                 message,
                 "❌ Нет добавленных заказов",
-                reply_markup=self.parent._orders_menu_markup()
+                reply_markup=self.parent._orders_menu_markup(user_id)
             )
             return
         
@@ -558,7 +903,7 @@ class OrderHandlers:
             self.bot.reply_to(
                 message,
                 "✅ Все заказы доставлены!",
-                reply_markup=self.parent._orders_menu_markup()
+                reply_markup=self.parent._orders_menu_markup(message.from_user.id)
             )
             return
         
@@ -629,12 +974,15 @@ class OrderHandlers:
                 button_parts.append("📞❌")
             
             # Адрес (короткий)
-            short_address = address
-            address_parts = address.split(',')
-            if len(address_parts) >= 2:
-                short_address = ','.join(address_parts[-2:]).strip()
-            elif len(address_parts) == 1:
-                short_address = address_parts[0].strip()
+            if address:
+                short_address = address
+                address_parts = address.split(',')
+                if len(address_parts) >= 2:
+                    short_address = ','.join(address_parts[-2:]).strip()
+                elif len(address_parts) == 1:
+                    short_address = address_parts[0].strip()
+            else:
+                short_address = "Адрес не указан"
             
             # Подъезд и квартира
             location_parts = []
@@ -791,7 +1139,7 @@ class OrderHandlers:
             return
         details = [
             f"✏️ <b>Редактирование заказа №{order_number}</b>\n",
-            f"📍 <b>Адрес:</b> {order.address}",
+            f"📍 <b>Адрес:</b> {order.address if order.address else 'Не указан'}",
         ]
         
         if order.customer_name:
@@ -1281,7 +1629,7 @@ class OrderHandlers:
             self.bot.reply_to(
                 message,
                 "❌ Номер заказа должен содержать только цифры. Попробуйте еще раз:",
-                reply_markup=self.parent._orders_menu_markup()
+                reply_markup=self.parent._orders_menu_markup(user_id)
             )
             return
         
@@ -1301,11 +1649,11 @@ class OrderHandlers:
                 self.bot.reply_to(
                     message,
                     f"❌ Заказ №{text} не найден. Попробуйте еще раз или вернитесь в главное меню:",
-                    reply_markup=self.parent._orders_menu_markup()
+                    reply_markup=self.parent._orders_menu_markup(user_id)
                 )
         except Exception as e:
             logger.error(f"Ошибка при поиске заказа: {e}", exc_info=True)
-            self.bot.reply_to(message, f"❌ Ошибка: {str(e)}", reply_markup=self.parent._orders_menu_markup())
+            self.bot.reply_to(message, f"❌ Ошибка: {str(e)}", reply_markup=self.parent._orders_menu_markup(user_id))
             self.parent.update_user_state(user_id, 'state', None)
     
     def _update_manual_call_time(self, user_id: int, order_number: str, manual_call_time: datetime, message):
@@ -1553,12 +1901,16 @@ class OrderHandlers:
         
         # Если обновлен подъезд, обновляем адрес (БЕЗ геокодирования - координаты остаются те же)
         if field_name == 'entrance_number':
-            original_address = order_data['address']
-            # Удаляем старый подъезд из адреса, если есть
-            import re
-            address_clean = re.sub(r',\s*подъезд\s+\d+', '', original_address, flags=re.IGNORECASE)
-            address_clean = re.sub(r'\s+подъезд\s+\d+', '', address_clean, flags=re.IGNORECASE)
-            updates['address'] = f"{address_clean}, подъезд {field_value}"
+            original_address = order_data.get('address') or ''
+            if original_address:
+                # Удаляем старый подъезд из адреса, если есть
+                import re
+                address_clean = re.sub(r',\s*подъезд\s+\d+', '', original_address, flags=re.IGNORECASE)
+                address_clean = re.sub(r'\s+подъезд\s+\d+', '', address_clean, flags=re.IGNORECASE)
+                updates['address'] = f"{address_clean}, подъезд {field_value}"
+            else:
+                # Если адреса нет, просто добавляем подъезд
+                updates['address'] = f"подъезд {field_value}"
             
             # НЕ пересчитываем геокодирование - подъезд не меняет координаты здания!
             # Это экономит 1-2 секунды на запросе к API карт
@@ -1580,59 +1932,88 @@ class OrderHandlers:
             # Удаляем из updates, чтобы не пытаться обновить в БД
             return
         
-        # Обновляем в БД
+            # Обновляем в БД
         try:
             self.parent.db_service.update_order(user_id, order_number, updates, today)
             
-            # Если обновлен телефон, обновляем call_status и call_schedule
-            if field_name == 'phone':
-                from src.database.connection import get_db_session
-                from src.models.order import CallStatusDB
-                with get_db_session() as session:
-                    call_status = session.query(CallStatusDB).filter(
-                        CallStatusDB.user_id == user_id,
-                        CallStatusDB.order_number == order_number,
-                        CallStatusDB.call_date == today
-                    ).first()
-                    if call_status:
-                        call_status.phone = field_value
-                        # Если статус был "sent" (уведомление уже отправлено), сбрасываем на pending для повторной отправки
-                        if call_status.status == "sent":
-                            call_status.status = "pending"
+            # Обновляем call_status актуальными данными из OrderDB
+            # Это нужно для того, чтобы напоминания о звонках использовали актуальные данные
+            from src.database.connection import get_db_session
+            from src.models.order import CallStatusDB
+            with get_db_session() as session:
+                call_status = session.query(CallStatusDB).filter(
+                    CallStatusDB.user_id == user_id,
+                    CallStatusDB.order_number == order_number,
+                    CallStatusDB.call_date == today
+                ).first()
+                
+                if call_status:
+                    # Обновляем поля в call_status актуальными данными из OrderDB
+                    updated_order_data = self.parent.db_service.get_today_orders(user_id)
+                    updated_order = None
+                    for od in updated_order_data:
+                        if od.get('order_number') == order_number:
+                            updated_order = od
+                            break
+                    
+                    if updated_order:
+                        # Обновляем телефон, если он изменился
+                        if field_name == 'phone' or (updated_order.get('phone') and call_status.phone != updated_order.get('phone')):
+                            call_status.phone = updated_order.get('phone') or call_status.phone
+                            # Если статус был "sent" (уведомление уже отправлено), сбрасываем на pending для повторной отправки
+                            if call_status.status == "sent":
+                                call_status.status = "pending"
+                                call_status.attempts = 0  # Сбрасываем счетчик попыток
+                            logger.debug(f"Обновлен телефон в call_status для заказа {order_number}: {call_status.phone}")
+                        
+                        # Обновляем имя клиента, если оно изменилось
+                        if field_name == 'customer_name' or (updated_order.get('customer_name') and call_status.customer_name != updated_order.get('customer_name')):
+                            call_status.customer_name = updated_order.get('customer_name') or call_status.customer_name
+                            logger.debug(f"Обновлено имя в call_status для заказа {order_number}: {call_status.customer_name}")
+                        
                         session.commit()
-                        logger.debug(f"Обновлен телефон в call_status для заказа {order_number}: {field_value}")
-                    else:
-                        # Если записи нет, создаем ее (если есть маршрут)
-                        route_data_check = self.parent.db_service.get_route_data(user_id, today)
-                        if route_data_check and route_data_check.get('route_points_data'):
-                            # Находим время звонка из route_points_data
-                            route_points_data_check = route_data_check.get('route_points_data', [])
-                            route_order_check = route_data_check.get('route_order', [])
-                            try:
-                                order_index = route_order_check.index(order_number)
-                                if order_index < len(route_points_data_check):
-                                    point_data = route_points_data_check[order_index]
-                                    call_time_str = point_data.get('call_time')
-                                    arrival_time_str = point_data.get('estimated_arrival')
-                                    if call_time_str:
-                                        call_time = datetime.fromisoformat(call_time_str)
-                                        arrival_time = datetime.fromisoformat(arrival_time_str) if arrival_time_str else None
+                        logger.info(f"✅ Обновлен call_status для заказа {order_number} актуальными данными из OrderDB")
+                else:
+                    # Если записи нет, создаем ее (если есть маршрут)
+                    route_data_check = self.parent.db_service.get_route_data(user_id, today)
+                    if route_data_check and route_data_check.get('route_points_data'):
+                        # Находим время звонка из route_points_data
+                        route_points_data_check = route_data_check.get('route_points_data', [])
+                        route_order_check = route_data_check.get('route_order', [])
+                        try:
+                            order_index = route_order_check.index(order_number)
+                            if order_index < len(route_points_data_check):
+                                point_data = route_points_data_check[order_index]
+                                call_time_str = point_data.get('call_time')
+                                arrival_time_str = point_data.get('estimated_arrival')
+                                if call_time_str:
+                                    call_time = datetime.fromisoformat(call_time_str)
+                                    arrival_time = datetime.fromisoformat(arrival_time_str) if arrival_time_str else None
+                                    # Загружаем актуальные данные заказа
+                                    updated_order_data = self.parent.db_service.get_today_orders(user_id)
+                                    updated_order = None
+                                    for od in updated_order_data:
+                                        if od.get('order_number') == order_number:
+                                            updated_order = od
+                                            break
+                                    
+                                    if updated_order:
                                         # Создаем запись о звонке (автоматическое время)
                                         self.parent.call_notifier.create_call_status(
                                             user_id,
                                             order_number,
                                             call_time,
-                                            field_value,
-                                            order_data.get('customer_name'),
+                                            updated_order.get('phone') or "Не указан",
+                                            updated_order.get('customer_name'),
                                             today,
                                             is_manual_call=False,
                                             is_manual_arrival=False,
                                             arrival_time=arrival_time,
                                             manual_arrival_time=None
                                         )
-                                        logger.debug(f"Создана запись call_status для заказа {order_number} при обновлении телефона")
-                            except (ValueError, KeyError, Exception) as e:
-                                logger.warning(f"Не удалось создать call_status при обновлении телефона: {e}")
+                                        logger.debug(f"Создана запись call_status для заказа {order_number} при обновлении заказа")
+                        except (ValueError, KeyError, Exception) as e:
+                            logger.warning(f"Не удалось создать call_status при обновлении заказа: {e}")
             
             # Обновляем маршрут если он существует
             route_data = self.parent.db_service.get_route_data(user_id, today)

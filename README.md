@@ -111,10 +111,15 @@ services:
     image: ghcr.io/YOUR_USERNAME/courier:latest
     container_name: courier_bot
     restart: unless-stopped
-    env_file:
-      - env
     environment:
       - TZ=Europe/Moscow
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - YANDEX_MAPS_API_KEY=${YANDEX_MAPS_API_KEY}
+      - TWO_GIS_API_KEY=${TWO_GIS_API_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - LLM_MODEL_PATH=${LLM_MODEL_PATH:-models/gemma3-4b}
+      - LLM_DEVICE=${LLM_DEVICE:-cpu}
     volumes:
       - ./data:/app/data
     depends_on:
@@ -151,35 +156,31 @@ echo $GITHUB_TOKEN | docker login ghcr.io -u YOUR_USERNAME --password-stdin
 # Или используйте Personal Access Token с правами read:packages
 ```
 
-3. **Настройте переменные окружения:**
-```bash
-cp env.example env
-# Отредактируйте env файл, установите DATABASE_URL для PostgreSQL:
-# DATABASE_URL=postgresql://courier:courier_password@postgres:5432/courier_db
-```
+3. **Настройте переменные окружения в Portainer:**
+   - Перейдите в раздел "Environment variables" вашего стека в Portainer
+   - Добавьте все необходимые переменные (см. раздел "Переменные окружения" ниже)
+   - Убедитесь, что `DATABASE_URL` указывает на PostgreSQL: `postgresql://courier:courier_password@postgres:5432/courier_db`
 
 4. **Запустите через Docker Compose:**
 ```bash
 docker-compose -f docker-compose.prod.yml up -d
 ```
 
-#### Вариант 2: Локальная сборка образа
+#### Вариант 2: Локальная сборка образа (через Portainer)
 
-1. **Настройте переменные окружения:**
-```bash
-cp env.example env
-# Отредактируйте env файл, установите DATABASE_URL для PostgreSQL:
-# DATABASE_URL=postgresql://courier:courier_password@postgres:5432/courier_db
-```
+1. **Настройте переменные окружения в Portainer:**
+   - Перейдите в раздел "Environment variables" вашего стека в Portainer
+   - Добавьте все необходимые переменные (см. раздел "Переменные окружения" ниже)
+   - Убедитесь, что `DATABASE_URL` указывает на PostgreSQL: `postgresql://courier:courier_password@postgres:5432/courier_db`
 
-2. **Запустите через Docker Compose:**
-```bash
-docker-compose up -d
-```
+2. **Запустите стек через Portainer:**
+   - Загрузите `docker-compose.yml` в Portainer
+   - Portainer автоматически использует переменные окружения из раздела "Environment variables"
 
 3. **Проверьте логи:**
 ```bash
 docker-compose logs -f bot
+# Или через Portainer: перейдите в контейнер → Logs
 ```
 
 ## 📱 Использование
@@ -531,12 +532,35 @@ docker-compose logs -f bot
 docker-compose restart bot
 ```
 
-### Переменные окружения для Docker:
+### Переменные окружения для Docker (Portainer):
 
-Убедитесь, что в `env` файле установлен правильный `DATABASE_URL:
+При использовании Docker через Portainer все переменные окружения настраиваются в разделе **"Environment variables"** стека в Portainer.
+
+**Обязательные переменные:**
 ```
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+TWO_GIS_API_KEY=your_2gis_api_key_here
 DATABASE_URL=postgresql://courier:courier_password@postgres:5432/courier_db
+ENCRYPTION_KEY=your_generated_fernet_key_here
 ```
+
+**Опциональные переменные:**
+```
+YANDEX_MAPS_API_KEY=your_yandex_maps_key_here  # Резервный вариант для геокодирования
+LLM_MODEL_PATH=models/gemma3-4b
+LLM_DEVICE=cpu
+```
+
+**Генерация ENCRYPTION_KEY:**
+```python
+from cryptography.fernet import Fernet
+print(Fernet.generate_key().decode())
+```
+
+**Важно:**
+- Все переменные должны быть указаны в разделе "Environment variables" стека в Portainer
+- После добавления/изменения переменных перезапустите стек
+- `ENCRYPTION_KEY` критически важен для расшифровки сохраненных паролей - не меняйте его после первого использования!
 
 PostgreSQL автоматически создастся при первом запуске.
 
@@ -616,7 +640,7 @@ python test_parsing.py
 ```
 
 **Примечание:** 
-- Для запуска тестов необходимо настроить API ключи в файле `env`
+- Для запуска legacy тестов необходимо настроить API ключи (через переменные окружения или файл `env` для локальной разработки)
 - Legacy тесты используют `print()` для вывода результатов
 - Unit-тесты используют `pytest` и не требуют API ключей
 
@@ -657,10 +681,15 @@ services:
     image: ghcr.io/YOUR_USERNAME/courier:latest
     container_name: courier_bot
     restart: unless-stopped
-    env_file:
-      - env
     environment:
       - TZ=Europe/Moscow
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - YANDEX_MAPS_API_KEY=${YANDEX_MAPS_API_KEY}
+      - TWO_GIS_API_KEY=${TWO_GIS_API_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - LLM_MODEL_PATH=${LLM_MODEL_PATH:-models/gemma3-4b}
+      - LLM_DEVICE=${LLM_DEVICE:-cpu}
     volumes:
       - ./data:/app/data
     depends_on:
@@ -690,6 +719,10 @@ networks:
   courier_network:
     driver: bridge
 ```
+
+**Настройте переменные окружения в Portainer:**
+- Перейдите в раздел "Environment variables" стека
+- Добавьте все необходимые переменные (см. раздел "Переменные окружения для Docker" выше)
 
 Войдите в GitHub Container Registry:
 ```bash
@@ -752,10 +785,12 @@ docker-compose -f docker-compose.prod.yml up -d
    logging.basicConfig(level=logging.DEBUG)
    ```
 
-2. **API ключи** - убедитесь, что все ключи настроены в `env`:
+2. **API ключи** - убедитесь, что все ключи настроены в Portainer (раздел "Environment variables"):
    - `TELEGRAM_BOT_TOKEN` - обязателен
    - `TWO_GIS_API_KEY` - обязателен для маршрутов
    - `YANDEX_MAPS_API_KEY` - опционален (резерв)
+   - `ENCRYPTION_KEY` - обязателен для шифрования паролей
+   - `DATABASE_URL` - обязателен для подключения к PostgreSQL
 
 3. **Версия Python** - требуется 3.11+
 

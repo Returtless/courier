@@ -149,7 +149,7 @@ class Order(BaseModel):
     id: Optional[int] = None
     customer_name: Optional[str] = None
     phone: Optional[str] = None
-    address: str
+    address: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     comment: Optional[str] = None

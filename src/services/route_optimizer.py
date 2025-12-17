@@ -36,25 +36,41 @@ class RouteOptimizer:
         for order in orders:
             if order.latitude is None or order.longitude is None:
                 # Только если координат нет - делаем геокодирование (с кэшированием)
-                lat, lon, gid = self.maps_service.geocode_address_sync(order.address)
-                order.latitude = lat
-                order.longitude = lon
-                order.gis_id = gid
+                # Проверяем, что адрес не пустой
+                if order.address and order.address.strip():
+                    lat, lon, gid = self.maps_service.geocode_address_sync(order.address)
+                    order.latitude = lat
+                    order.longitude = lon
+                    order.gis_id = gid
+                else:
+                    logger.warning(f"⚠️ Заказ {order.order_number} не может быть загеокодирован: адрес отсутствует")
             geocoded_orders.append(order)
 
         # Calculate distance/time matrix
-        locations = [start_location] + [(o.latitude, o.longitude) for o in geocoded_orders if o.latitude and o.longitude]
+        # Фильтруем заказы с координатами (без координат нельзя построить маршрут)
+        orders_with_coords = [o for o in geocoded_orders if o.latitude and o.longitude]
+        orders_without_coords = [o for o in geocoded_orders if not o.latitude or not o.longitude]
+        
+        if orders_without_coords:
+            logger.warning(f"⚠️ {len(orders_without_coords)} заказов без координат будут исключены из маршрута: {[o.order_number for o in orders_without_coords]}")
+        
+        if not orders_with_coords:
+            logger.error("❌ Нет заказов с координатами для построения маршрута")
+            return OptimizedRoute(points=[], total_distance=0, total_time=0, estimated_completion=start_time)
+        
+        locations = [start_location] + [(o.latitude, o.longitude) for o in orders_with_coords]
         distance_matrix, time_matrix = self._build_matrices(locations)
 
         # Create route optimization problem
-        route_result = self._solve_vrp(distance_matrix, time_matrix, geocoded_orders, start_time, user_id)
+        # Используем только заказы с координатами для оптимизации
+        route_result = self._solve_vrp(distance_matrix, time_matrix, orders_with_coords, start_time, user_id)
         
         if not route_result:
             logger.error("❌ Не удалось найти решение задачи маршрутизации")
             if use_fallback:
                 # Используем fallback только если пользователь явно согласился пересчитать без ручных времен
                 logger.warning("⚠️ Используем fallback: простой порядок заказов с расчетом времени")
-                return self._build_fallback_route(geocoded_orders, start_location, start_time, user_id)
+                return self._build_fallback_route(orders_with_coords, start_location, start_time, user_id)
             else:
                 # НЕ используем fallback автоматически - возвращаем пустой маршрут,
                 # чтобы пользователь мог выбрать пересчет без ручных времен
@@ -78,7 +94,7 @@ class RouteOptimizer:
             if order_idx == 0:  # depot
                 continue
 
-            order = geocoded_orders[order_idx - 1]
+            order = orders_with_coords[order_idx - 1]
             
             # Получаем время прибытия ИЗ РЕШЕНИЯ OR-Tools (а не пересчитываем)
             # order_idx - это индекс в locations (0 = depot, 1+ = заказы)

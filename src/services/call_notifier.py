@@ -109,9 +109,30 @@ class CallNotifier:
                 )
             ).all()
             
-            logger.debug(f"Звонков для отправки: {len(pending_calls)} (время <= {now.strftime('%H:%M:%S')} и >= {time_threshold.strftime('%H:%M:%S')})")
-            
+            # Фильтруем звонки для доставленных заказов
+            from src.models.order import OrderDB
+            filtered_calls = []
             for call in pending_calls:
+                order = session.query(OrderDB).filter(
+                    and_(
+                        OrderDB.user_id == call.user_id,
+                        OrderDB.order_number == call.order_number,
+                        OrderDB.order_date == call.call_date
+                    )
+                ).first()
+                
+                if order and order.status == "delivered":
+                    logger.info(f"⏭️ Пропускаем звонок для заказа {call.order_number} - заказ уже доставлен")
+                    # Помечаем звонок как неактивный
+                    call.status = "failed"
+                    call.attempts = 999
+                    session.commit()
+                else:
+                    filtered_calls.append(call)
+            
+            logger.debug(f"Звонков для отправки: {len(filtered_calls)} (время <= {now.strftime('%H:%M:%S')} и >= {time_threshold.strftime('%H:%M:%S')}, отфильтровано доставленных: {len(pending_calls) - len(filtered_calls)})")
+            
+            for call in filtered_calls:
                 logger.info(f"✅ Найден звонок для отправки: заказ {call.order_number}, время {call.call_time.strftime('%H:%M:%S')}, сейчас {now.strftime('%H:%M:%S')}")
                 self._send_call_notification(call.id, session)
     
@@ -133,7 +154,28 @@ class CallNotifier:
                 )
             ).all()
             
+            # Фильтруем звонки для доставленных заказов
+            from src.models.order import OrderDB
+            filtered_retry_calls = []
             for call in retry_calls:
+                order = session.query(OrderDB).filter(
+                    and_(
+                        OrderDB.user_id == call.user_id,
+                        OrderDB.order_number == call.order_number,
+                        OrderDB.order_date == call.call_date
+                    )
+                ).first()
+                
+                if order and order.status == "delivered":
+                    logger.info(f"⏭️ Пропускаем повторный звонок для заказа {call.order_number} - заказ уже доставлен")
+                    # Помечаем звонок как неактивный
+                    call.status = "failed"
+                    call.attempts = 999
+                    session.commit()
+                else:
+                    filtered_retry_calls.append(call)
+            
+            for call in filtered_retry_calls:
                 # Получаем настройки пользователя для проверки максимального количества попыток
                 user_settings = self.settings_service.get_settings(call.user_id)
                 
@@ -165,6 +207,24 @@ class CallNotifier:
             # Проверяем что звонок еще актуален
             if call.status not in ["pending", "rejected"]:
                 logger.warning(f"⚠️ Попытка отправить уведомление для звонка со статусом {call.status}, пропускаем")
+                return
+            
+            # ВАЖНО: Проверяем, не доставлен ли уже заказ
+            from src.models.order import OrderDB
+            order = session.query(OrderDB).filter(
+                and_(
+                    OrderDB.user_id == call.user_id,
+                    OrderDB.order_number == call.order_number,
+                    OrderDB.order_date == call.call_date
+                )
+            ).first()
+            
+            if order and order.status == "delivered":
+                logger.info(f"⏭️ Пропускаем уведомление о звонке для заказа {call.order_number} - заказ уже доставлен")
+                # Помечаем звонок как неактивный
+                call.status = "failed"
+                call.attempts = 999  # Помечаем как обработанный
+                session.commit()
                 return
             
             customer_info = call.customer_name or "Клиент"
@@ -246,6 +306,31 @@ class CallNotifier:
             call_date = date.today()
         
         with get_db_session() as session:
+            # ВАЖНО: Проверяем, не доставлен ли уже заказ
+            from src.models.order import OrderDB
+            order = session.query(OrderDB).filter(
+                and_(
+                    OrderDB.user_id == user_id,
+                    OrderDB.order_number == order_number,
+                    OrderDB.order_date == call_date
+                )
+            ).first()
+            
+            if order and order.status == "delivered":
+                logger.info(f"⏭️ Пропускаем создание записи о звонке для заказа {order_number} - заказ уже доставлен")
+                # Если запись уже существует, помечаем её как неактивную
+                existing = session.query(CallStatusDB).filter(
+                    and_(
+                        CallStatusDB.user_id == user_id,
+                        CallStatusDB.order_number == order_number,
+                        CallStatusDB.call_date == call_date
+                    )
+                ).first()
+                if existing:
+                    existing.status = "failed"
+                    existing.attempts = 999
+                    session.commit()
+                return None
             # Проверяем, нет ли уже записи для этого заказа
             existing = session.query(CallStatusDB).filter(
                 and_(

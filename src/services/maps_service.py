@@ -147,6 +147,11 @@ class MapsService:
 
     def geocode_address_sync(self, address: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
         """Синхронное геокодирование с fallback на 2GIS → Yandex → geopy. Возврат: lat, lon, gis_id"""
+        # Проверяем, что адрес не пустой
+        if not address or not address.strip():
+            logger.warning("⚠️ Попытка геокодирования пустого адреса")
+            return None, None, None
+        
         # Нормализуем адрес для кэша
         address_key = address.lower().strip()
         

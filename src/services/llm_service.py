@@ -103,8 +103,8 @@ class LLMService:
         Создай краткий скрипт звонка курьера клиенту для подтверждения доставки.
 
         Информация о заказе:
-        - Адрес: {order.address}
-        - Телефон: {order.phone}
+        - Адрес: {order.address if order.address else "не указан"}
+        - Телефон: {order.phone or "не указан"}
         - Имя клиента: {order.customer_name or "клиент"}
         - Комментарий: {order.comment or "нет"}
         - Время доставки: {estimated_delivery.strftime('%H:%M')}
@@ -130,9 +130,10 @@ class LLMService:
         customer_name = order.customer_name or "клиент"
         delivery_time = estimated_delivery.strftime('%H:%M')
 
+        address_text = order.address if order.address else "адрес будет уточнен"
         return f"""Здравствуйте, {customer_name}!
 Это курьер, звоню по поводу вашего заказа.
-Адрес доставки: {order.address}
+Адрес доставки: {address_text}
 Ориентировочное время прибытия: {delivery_time}
 Заказ готов к доставке. Вы готовы принять заказ?
 Спасибо за ожидание!"""
