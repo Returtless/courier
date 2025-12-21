@@ -15,15 +15,62 @@ class CredentialsService:
     """Сервис для шифрования и хранения учетных данных"""
     
     def __init__(self):
-        # Получаем ключ шифрования из настроек
+        # Получаем ключ шифрования из настроек (Pydantic автоматически читает из env файла и переменных окружения)
         encryption_key = settings.encryption_key
+        
+        # Дополнительная проверка через os.getenv для диагностики (но не используем как основной источник)
+        import os
+        env_key_direct = os.getenv("ENCRYPTION_KEY") or os.getenv("encryption_key")
+        
+        # Детальная диагностика - проверяем все возможные варианты имени
+        logger.info(f"🔍 Диагностика ENCRYPTION_KEY:")
+        logger.info(f"   - os.getenv('ENCRYPTION_KEY'): {os.getenv('ENCRYPTION_KEY')}")
+        logger.info(f"   - os.getenv('encryption_key'): {os.getenv('encryption_key')}")
+        logger.info(f"   - settings.encryption_key: {settings.encryption_key}")
+        
+        # Проверяем все переменные окружения, содержащие 'encryption' или 'key'
+        all_env_vars = {k: v for k, v in os.environ.items() if 'encryption' in k.lower() or (k.lower() == 'encryption_key')}
+        if all_env_vars:
+            logger.info(f"   - Найдены переменные окружения с 'encryption': {list(all_env_vars.keys())}")
+        else:
+            logger.warning(f"   - ⚠️ НЕ найдено переменных окружения с 'encryption' в имени!")
+        
+        # Дополнительная диагностика: показываем ВСЕ переменные окружения, которые начинаются с известных префиксов
+        known_prefixes = ['TELEGRAM', 'YANDEX', 'TWO_GIS', 'DATABASE', 'ENCRYPTION', 'LLM']
+        relevant_vars = {k: v[:20] + '...' if len(v) > 20 else v for k, v in os.environ.items() 
+                        if any(k.startswith(prefix) for prefix in known_prefixes)}
+        logger.info(f"🔍 Все релевантные переменные окружения в контейнере:")
+        for key, value in sorted(relevant_vars.items()):
+            logger.info(f"   - {key}: {value}")
+        
+        # Проверяем, почему settings.encryption_key пустой, если другие переменные читаются
+        if not encryption_key:
+            logger.warning(f"⚠️ settings.encryption_key пустой, но другие переменные читаются:")
+            logger.warning(f"   - settings.yandex_maps_api_key: {settings.yandex_maps_api_key[:10] if settings.yandex_maps_api_key else None}...")
+            logger.warning(f"   - settings.two_gis_api_key: {settings.two_gis_api_key[:10] if settings.two_gis_api_key else None}...")
+            logger.warning(f"   - settings.telegram_bot_token: {settings.telegram_bot_token[:10] if settings.telegram_bot_token else None}...")
+            logger.warning(f"   - Проверьте, что в Portainer переменная называется именно 'ENCRYPTION_KEY' (заглавными буквами)")
+        
+        # Если settings.encryption_key пустой, но есть в os.getenv - используем его
+        # (это может быть, если переменная установлена в Portainer, но Pydantic не подхватил)
+        if not encryption_key and env_key_direct:
+            logger.info(f"✅ ENCRYPTION_KEY найден в переменных окружения процесса, но не в settings. Используем из env.")
+            encryption_key = env_key_direct
+        elif encryption_key and env_key_direct and encryption_key != env_key_direct:
+            logger.warning(f"⚠️ ENCRYPTION_KEY из settings ({encryption_key[:10]}...) отличается от переменной окружения ({env_key_direct[:10]}...). Используем из settings.")
+        elif encryption_key:
+            logger.info(f"✅ ENCRYPTION_KEY найден в settings")
         
         # Проверяем, что ключ установлен и не является дефолтным значением
         if not encryption_key or encryption_key == "your_encryption_key_here":
             # Генерируем новый ключ
             logger.warning("⚠️ ENCRYPTION_KEY не установлен! Генерирую новый ключ...")
+            logger.warning("⚠️ Проверьте:")
+            logger.warning("   1. Файл 'env' содержит строку: ENCRYPTION_KEY=...")
+            logger.warning("   2. В docker-compose.yml используется env_file: - env")
+            logger.warning("   3. Контейнер перезапущен после добавления переменной")
             encryption_key = Fernet.generate_key().decode()
-            logger.warning(f"⚠️ ВАЖНО! Добавьте в файл 'env':\nENCRYPTION_KEY={encryption_key}")
+            logger.warning(f"⚠️ ВАЖНО! Добавьте в файл 'env' или переменные окружения:\nENCRYPTION_KEY={encryption_key}")
             logger.warning("⚠️ Без этого ключа вы не сможете расшифровать сохраненные пароли после перезапуска!")
         
         # Проверяем, что ключ в правильном формате

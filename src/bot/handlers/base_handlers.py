@@ -61,7 +61,7 @@ class BaseHandlers:
             message,
             welcome_text,
             parse_mode='HTML',
-            reply_markup=self.parent._main_menu_markup()
+            reply_markup=self.parent._main_menu_markup(message.from_user.id)
         )
     
     def handle_help(self, message):
@@ -90,20 +90,27 @@ class BaseHandlers:
             message,
             help_text,
             parse_mode='HTML',
-            reply_markup=self.parent._main_menu_markup()
+            reply_markup=self.parent._main_menu_markup(message.from_user.id)
         )
     
     def handle_orders_menu(self, message):
         """Открыть меню заказов"""
+        # Очищаем состояние при переходе в меню
+        user_id = message.from_user.id
+        self.parent.clear_user_state(user_id)
+        
         self.bot.reply_to(
             message,
             "📦 <b>Меню заказов</b>\n\nВыберите действие:",
             parse_mode='HTML',
-            reply_markup=self.parent._orders_menu_markup()
+            reply_markup=self.parent._orders_menu_markup(user_id)
         )
     
     def handle_route_menu(self, message):
         """Открыть меню маршрута"""
+        # Очищаем состояние при переходе в меню
+        self.parent.clear_user_state(message.from_user.id)
+        
         self.bot.reply_to(
             message,
             "🗺️ <b>Меню маршрута</b>\n\nВыберите действие:",
@@ -113,15 +120,21 @@ class BaseHandlers:
     
     def handle_settings_menu(self, message):
         """Открыть меню настроек"""
+        # Очищаем состояние при переходе в меню
+        self.parent.clear_user_state(message.from_user.id)
+        
         self.parent.settings.show_settings_menu(message)
     
     def handle_back_to_main(self, message):
         """Вернуться в главное меню"""
+        # Очищаем состояние при переходе в главное меню
+        self.parent.clear_user_state(message.from_user.id)
+        
         self.bot.reply_to(
             message,
             "🏠 <b>Главное меню</b>\n\nВыберите раздел:",
             parse_mode='HTML',
-            reply_markup=self.parent._main_menu_markup()
+            reply_markup=self.parent._main_menu_markup(message.from_user.id)
         )
     
     def handle_callback_query(self, call):
@@ -130,7 +143,10 @@ class BaseHandlers:
         
         try:
             # Роутинг по префиксам callback_data
-            if callback_data.startswith("order_"):
+            if (callback_data.startswith("order_") or 
+                callback_data.startswith("save_order_from_image_") or
+                callback_data.startswith("overwrite_order_from_image_") or
+                callback_data == "cancel_save_order"):
                 self.parent.orders.handle_callback(call)
             elif callback_data.startswith("call_"):
                 self.parent.calls.handle_callback(call)
@@ -140,6 +156,16 @@ class BaseHandlers:
                 self.parent.imports.handle_callback(call)
             elif callback_data.startswith("traffic_"):
                 self.parent.traffic.handle_callback(call)
+            elif (callback_data.startswith("reset_") or 
+                  callback_data.startswith("confirm_start_") or 
+                  callback_data.startswith("recalculate_without_manual") or
+                  callback_data.startswith("route_delivered_") or
+                  callback_data.startswith("route_edit_order_") or
+                  callback_data.startswith("current_order_") or
+                  callback_data == "reject_start_address" or
+                  callback_data == "route_menu"):
+                # Обработка callback'ов маршрутов (сброс дня, подтверждение точки старта, пересчет без ручных времен, навигация по заказам, отметка доставки)
+                self.parent.routes.handle_callback(call)
             elif callback_data == "view_delivered_orders":
                 self.parent.orders.handle_view_delivered(call)
             else:

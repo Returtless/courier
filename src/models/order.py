@@ -1,6 +1,6 @@
 from datetime import datetime, time, date
 from typing import Optional, List
-from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Time, Date, JSON, Index
+from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Time, Date, JSON, Index, Boolean
 from pydantic import BaseModel
 from src.database.connection import Base
 
@@ -28,14 +28,10 @@ class OrderDB(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Route optimization fields
+    # Route optimization fields (расчетные)
     estimated_delivery_time = Column(DateTime, nullable=True)  # Расчетное время прибытия
     call_time = Column(DateTime, nullable=True)  # Расчетное время звонка
     route_order = Column(Integer, nullable=True)
-    
-    # Manual time override fields (приоритет над расчетными)
-    manual_arrival_time = Column(DateTime, nullable=True)  # Ручное время прибытия
-    manual_call_time = Column(DateTime, nullable=True)  # Ручное время звонка
 
 
 class StartLocationDB(Base):
@@ -77,6 +73,11 @@ class CallStatusDB(Base):
     order_number = Column(String, nullable=False, index=True)
     call_date = Column(Date, nullable=False, index=True)
     call_time = Column(DateTime, nullable=False)  # Время когда нужно звонить
+    arrival_time = Column(DateTime, nullable=True)  # Расчетное/ручное время прибытия (для уведомлений)
+    # Новая схема ручных флагов
+    is_manual_call = Column(Boolean, default=False)      # Время звонка установлено вручную
+    is_manual_arrival = Column(Boolean, default=False)   # Время прибытия установлено вручную
+    manual_arrival_time = Column(DateTime, nullable=True)  # Ручное время прибытия (жесткое ограничение для оптимизации)
     phone = Column(String, nullable=False)
     customer_name = Column(String, nullable=True)
     status = Column(String, default="pending")  # pending, confirmed, rejected, failed (после 3 отклонений)
@@ -148,7 +149,7 @@ class Order(BaseModel):
     id: Optional[int] = None
     customer_name: Optional[str] = None
     phone: Optional[str] = None
-    address: str
+    address: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     comment: Optional[str] = None
@@ -161,8 +162,7 @@ class Order(BaseModel):
     entrance_number: Optional[str] = None  # Номер подъезда для точного адреса
     apartment_number: Optional[str] = None  # Номер квартиры
     gis_id: Optional[str] = None  # ID объекта 2ГИС (для точного открытия точки)
-    manual_arrival_time: Optional[datetime] = None  # Ручное время прибытия
-    manual_call_time: Optional[datetime] = None  # Ручное время звонка
+    manual_arrival_time: Optional[datetime] = None  # Ручное время прибытия (ограничение для оптимизации)
 
     def __init__(self, *args, **kwargs):
         # Поддержка позиционных аргументов для обратной совместимости

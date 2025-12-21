@@ -100,7 +100,7 @@ class CourierBot:
                 self.bot.reply_to(
                     message,
                     "❓ Используйте кнопки меню для навигации",
-                    reply_markup=self._main_menu_markup()
+                    reply_markup=self._main_menu_markup(message.from_user.id)
                 )
             return
         
@@ -150,7 +150,7 @@ class CourierBot:
                 self.bot.reply_to(
                     message,
                     "❓ Неизвестное состояние. Возврат в главное меню.",
-                    reply_markup=self._main_menu_markup()
+                    reply_markup=self._main_menu_markup(user_id)
                 )
                 self.clear_user_state(user_id)
         
@@ -159,7 +159,7 @@ class CourierBot:
             self.bot.reply_to(
                 message,
                 f"❌ Произошла ошибка: {str(e)}",
-                reply_markup=self._main_menu_markup()
+                reply_markup=self._main_menu_markup(user_id)
             )
             self.clear_user_state(user_id)
     
@@ -182,21 +182,45 @@ class CourierBot:
     
     # === Общие вспомогательные методы ===
     
-    @staticmethod
-    def _main_menu_markup():
-        """Разметка главного меню"""
+    def _main_menu_markup(self, user_id: int = None):
+        """Разметка главного меню
+        
+        Args:
+            user_id: ID пользователя для проверки наличия оптимизированного маршрута.
+                     Если передан и маршрут оптимизирован, добавляется кнопка "📋 Текущий заказ"
+        """
         from telebot import types
+        from datetime import date
+        
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        
+        # Добавляем кнопку "Текущий заказ" только если маршрут оптимизирован (вверху)
+        if user_id is not None:
+            today = date.today()
+            route_data = self.db_service.get_route_data(user_id, today)
+            if route_data and route_data.get('route_points_data'):
+                markup.row("📋 Текущий заказ")
+        
         markup.row("📦 Заказы", "🗺️ Маршрут")
-        markup.row("⚙️ Настройки", "🗑️ Сбросить день")
+        markup.row("⚙️ Настройки")
         return markup
     
-    @staticmethod
-    def _orders_menu_markup():
-        """Разметка меню заказов"""
+    def _orders_menu_markup(self, user_id: int = None):
+        """Разметка меню заказов
+        
+        Args:
+            user_id: ID пользователя для проверки наличия учетных данных ШефМаркет.
+                     Если передан и учетные данные есть, добавляется кнопка "📲 Импорт из ШефМаркет"
+        """
         from telebot import types
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.row("➕ Добавить заказы")
+        markup.row("📸 Загрузить из скриншота")
+        
+        # Добавляем кнопку импорта из ШефМаркет, если есть учетные данные
+        if user_id is not None and self.credentials_service.has_credentials(user_id, "chefmarket"):
+            markup.row("📲 Импорт из ШефМаркет")
+        
         markup.row("✏️ Редактирование заказов")
         markup.row("✅ Доставленные")
         markup.row("⬅️ Главное меню")
@@ -211,6 +235,15 @@ class CourierBot:
         markup.row("📍 Точка старта", "▶️ Оптимизировать")
         markup.row("📞 Звонки")
         markup.row("🚦 Мониторинг", "🛑 Стоп мониторинг")
+        markup.row("⬅️ Главное меню")
+        return markup
+    
+    @staticmethod
+    def _add_orders_menu_markup():
+        """Разметка меню добавления заказов"""
+        from telebot import types
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("✅ Готово")
         markup.row("⬅️ Главное меню")
         return markup
 

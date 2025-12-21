@@ -29,12 +29,45 @@ class DatabaseService:
     
     def _get_orders(self, user_id: int, order_date: date, session: Session) -> List[Dict]:
         """Внутренний метод получения заказов"""
-        orders = session.query(OrderDB).filter(
+        # ВАЖНО: Для каждого order_number берем ПОСЛЕДНЮЮ запись (по id)
+        # чтобы избежать проблем с дубликатами
+        from sqlalchemy import func
+        
+        # Получаем все заказы за дату
+        all_orders = session.query(OrderDB).filter(
             and_(
                 OrderDB.user_id == user_id,
                 OrderDB.order_date == order_date
             )
+        ).order_by(OrderDB.id.desc()).all()
+        
+        logger.info(f"📦 Найдено {len(all_orders)} заказов в БД для user_id={user_id}, date={order_date}")
+        
+        # Группируем по order_number в Python, беря последнюю запись для каждого
+        orders_dict = {}
+        for order in all_orders:
+            # Используем order_number как ключ, или id если order_number None
+            key = order.order_number if order.order_number else f"id_{order.id}"
+            if key not in orders_dict:
+                orders_dict[key] = order
+                logger.debug(f"   ✅ Добавлен заказ: order_number={order.order_number}, id={order.id}, address={order.address}")
+        
+        orders = list(orders_dict.values())
+        logger.info(f"📦 После дедупликации: {len(orders)} уникальных заказов")
+        
+        # Загружаем call_status для текущей даты, чтобы подтянуть ручные времена
+        from src.models.order import CallStatusDB
+        call_status_list = session.query(CallStatusDB).filter(
+            and_(
+                CallStatusDB.user_id == user_id,
+                CallStatusDB.call_date == order_date
+            )
         ).all()
+        call_status_map = {
+            cs.order_number: cs for cs in call_status_list
+        }
+        
+        logger.info(f"📦 Загружено {len(orders)} уникальных заказов для user_id={user_id}, date={order_date}")
         
         result = []
         for order_db in orders:
@@ -64,46 +97,137 @@ class DatabaseService:
                 'entrance_number': order_db.entrance_number,
                 'apartment_number': order_db.apartment_number,
                 'gis_id': order_db.gis_id,
+                # manual_arrival_time теперь хранится в call_status
+                'manual_arrival_time': None,
             }
+            
+            # Подтягиваем ручные времена из call_status
+            cs = call_status_map.get(order_db.order_number)
+            if cs and cs.is_manual_arrival and cs.manual_arrival_time:
+                order_dict['manual_arrival_time'] = cs.manual_arrival_time
+                logger.info(f"   ✅ Заказ #{order_db.order_number} (id={order_db.id}): manual_arrival_time = {cs.manual_arrival_time}")
+            
             result.append(order_dict)
         
         return result
     
-    def save_order(self, user_id: int, order: Order, order_date: date = None, session: Session = None) -> OrderDB:
-        """Сохранить заказ в БД"""
+    def save_order(self, user_id: int, order: Order, order_date: date = None, session: Session = None, partial_update: bool = False) -> OrderDB:
+        """Сохранить заказ в БД
+        
+        Args:
+            user_id: ID пользователя
+            order: Объект заказа
+            order_date: Дата заказа (по умолчанию сегодня)
+            session: Сессия БД (опционально)
+            partial_update: Если True, при обновлении существующего заказа обновляются только незаполненные поля
+        """
         if order_date is None:
             order_date = date.today()
         
         if session is None:
             with get_db_session() as session:
-                return self._save_order(user_id, order, order_date, session)
-        return self._save_order(user_id, order, order_date, session)
+                return self._save_order(user_id, order, order_date, session, partial_update)
+        return self._save_order(user_id, order, order_date, session, partial_update)
     
-    def _save_order(self, user_id: int, order: Order, order_date: date, session: Session) -> OrderDB:
+    def _save_order(self, user_id: int, order: Order, order_date: date, session: Session, partial_update: bool = False) -> OrderDB:
         """Внутренний метод сохранения заказа"""
         try:
-            order_db = OrderDB(
-                user_id=user_id,
-                order_date=order_date,
-                customer_name=order.customer_name,
-                phone=order.phone,
-                address=order.address,
-                latitude=order.latitude,
-                longitude=order.longitude,
-                comment=order.comment,
-                delivery_time_start=order.delivery_time_start,
-                delivery_time_end=order.delivery_time_end,
-                delivery_time_window=order.delivery_time_window,
-                status=order.status,
-                order_number=order.order_number,
-                entrance_number=order.entrance_number,
-                apartment_number=order.apartment_number,
-                gis_id=order.gis_id,
-            )
-            session.add(order_db)
-            session.commit()
-            session.refresh(order_db)
-            return order_db
+            # Проверяем, существует ли уже заказ с таким номером для этой даты
+            existing_order = None
+            if order.order_number:
+                existing_order = session.query(OrderDB).filter(
+                    and_(
+                        OrderDB.user_id == user_id,
+                        OrderDB.order_number == order.order_number,
+                        OrderDB.order_date == order_date
+                    )
+                ).order_by(OrderDB.id.desc()).first()
+            
+            if existing_order:
+                # Обновляем существующий заказ
+                if partial_update:
+                    logger.info(f"🔄 Частичное обновление существующего заказа: order_number={order.order_number}, user_id={user_id}, date={order_date}")
+                    # Обновляем только незаполненные поля
+                    if order.customer_name and not existing_order.customer_name:
+                        existing_order.customer_name = order.customer_name
+                        logger.debug(f"   ✅ Обновлено customer_name: {order.customer_name}")
+                    if order.phone and not existing_order.phone:
+                        existing_order.phone = order.phone
+                        logger.debug(f"   ✅ Обновлено phone: {order.phone}")
+                    if order.address and not existing_order.address:
+                        existing_order.address = order.address
+                        logger.debug(f"   ✅ Обновлено address: {order.address}")
+                    if order.latitude is not None and existing_order.latitude is None:
+                        existing_order.latitude = order.latitude
+                        logger.debug(f"   ✅ Обновлено latitude: {order.latitude}")
+                    if order.longitude is not None and existing_order.longitude is None:
+                        existing_order.longitude = order.longitude
+                        logger.debug(f"   ✅ Обновлено longitude: {order.longitude}")
+                    if order.comment and not existing_order.comment:
+                        existing_order.comment = order.comment
+                        logger.debug(f"   ✅ Обновлено comment: {order.comment}")
+                    if order.delivery_time_start is not None and existing_order.delivery_time_start is None:
+                        existing_order.delivery_time_start = order.delivery_time_start
+                        logger.debug(f"   ✅ Обновлено delivery_time_start: {order.delivery_time_start}")
+                    if order.delivery_time_end is not None and existing_order.delivery_time_end is None:
+                        existing_order.delivery_time_end = order.delivery_time_end
+                        logger.debug(f"   ✅ Обновлено delivery_time_end: {order.delivery_time_end}")
+                    if order.delivery_time_window and not existing_order.delivery_time_window:
+                        existing_order.delivery_time_window = order.delivery_time_window
+                        logger.debug(f"   ✅ Обновлено delivery_time_window: {order.delivery_time_window}")
+                    if order.entrance_number and not existing_order.entrance_number:
+                        existing_order.entrance_number = order.entrance_number
+                        logger.debug(f"   ✅ Обновлено entrance_number: {order.entrance_number}")
+                    if order.apartment_number and not existing_order.apartment_number:
+                        existing_order.apartment_number = order.apartment_number
+                        logger.debug(f"   ✅ Обновлено apartment_number: {order.apartment_number}")
+                    if order.gis_id and not existing_order.gis_id:
+                        existing_order.gis_id = order.gis_id
+                        logger.debug(f"   ✅ Обновлено gis_id: {order.gis_id}")
+                else:
+                    logger.info(f"🔄 Полное обновление существующего заказа: order_number={order.order_number}, user_id={user_id}, date={order_date}")
+                    # Полное обновление всех полей
+                    existing_order.customer_name = order.customer_name
+                    existing_order.phone = order.phone
+                    existing_order.address = order.address
+                    existing_order.latitude = order.latitude
+                    existing_order.longitude = order.longitude
+                    existing_order.comment = order.comment
+                    existing_order.delivery_time_start = order.delivery_time_start
+                    existing_order.delivery_time_end = order.delivery_time_end
+                    existing_order.delivery_time_window = order.delivery_time_window
+                    existing_order.status = order.status
+                    existing_order.entrance_number = order.entrance_number
+                    existing_order.apartment_number = order.apartment_number
+                    existing_order.gis_id = order.gis_id
+                existing_order.updated_at = datetime.utcnow()
+                session.commit()
+                session.refresh(existing_order)
+                return existing_order
+            else:
+                # Создаем новый заказ
+                order_db = OrderDB(
+                    user_id=user_id,
+                    order_date=order_date,
+                    customer_name=order.customer_name,
+                    phone=order.phone,
+                    address=order.address,
+                    latitude=order.latitude,
+                    longitude=order.longitude,
+                    comment=order.comment,
+                    delivery_time_start=order.delivery_time_start,
+                    delivery_time_end=order.delivery_time_end,
+                    delivery_time_window=order.delivery_time_window,
+                    status=order.status,
+                    order_number=order.order_number,
+                    entrance_number=order.entrance_number,
+                    apartment_number=order.apartment_number,
+                    gis_id=order.gis_id,
+                )
+                session.add(order_db)
+                session.commit()
+                session.refresh(order_db)
+                return order_db
         except Exception as e:
             session.rollback()
             logger.error(f"Ошибка сохранения заказа в БД: {e}, данные: user_id={user_id}, order_date={order_date}, address={order.address}", exc_info=True)
@@ -203,6 +327,34 @@ class DatabaseService:
         session.commit()
         session.refresh(start_location)
         return start_location
+    
+    def update_start_time(self, user_id: int, start_time: datetime, location_date: date = None, session: Session = None) -> bool:
+        """Обновить время старта"""
+        if location_date is None:
+            location_date = date.today()
+        
+        if session is None:
+            with get_db_session() as session:
+                return self._update_start_time(user_id, start_time, location_date, session)
+        return self._update_start_time(user_id, start_time, location_date, session)
+    
+    def _update_start_time(self, user_id: int, start_time: datetime, location_date: date, session: Session) -> bool:
+        """Внутренний метод обновления времени старта"""
+        start_location = session.query(StartLocationDB).filter(
+            and_(
+                StartLocationDB.user_id == user_id,
+                StartLocationDB.location_date == location_date
+            )
+        ).first()
+        
+        if not start_location:
+            logger.warning(f"Точка старта не найдена для пользователя {user_id} на дату {location_date}")
+            return False
+        
+        start_location.start_time = start_time
+        session.commit()
+        logger.info(f"Время старта обновлено для пользователя {user_id}: {start_time.strftime('%H:%M')}")
+        return True
     
     def get_start_location(self, user_id: int, location_date: date = None, session: Session = None) -> Optional[Dict]:
         """Получить точку старта пользователя за дату"""
@@ -425,4 +577,71 @@ class DatabaseService:
             }
             for call in confirmed_calls
         ]
+    
+    def get_order_by_number(self, user_id: int, order_number: str, order_date: date = None, session: Session = None) -> Optional[Dict]:
+        """Получить заказ по номеру за конкретную дату"""
+        if order_date is None:
+            order_date = date.today()
+        
+        if session is None:
+            with get_db_session() as session:
+                return self._get_order_by_number(user_id, order_number, order_date, session)
+        return self._get_order_by_number(user_id, order_number, order_date, session)
+    
+    def _get_order_by_number(self, user_id: int, order_number: str, order_date: date, session: Session) -> Optional[Dict]:
+        """Внутренний метод получения заказа по номеру"""
+        # Получаем последний заказ с таким номером за дату
+        order_db = session.query(OrderDB).filter(
+            and_(
+                OrderDB.user_id == user_id,
+                OrderDB.order_number == order_number,
+                OrderDB.order_date == order_date
+            )
+        ).order_by(OrderDB.id.desc()).first()
+        
+        if not order_db:
+            return None
+        
+        # Преобразуем в словарь (аналогично _get_orders)
+        delivery_time_start_str = None
+        if order_db.delivery_time_start:
+            delivery_time_start_str = order_db.delivery_time_start.strftime('%H:%M:%S')
+        
+        delivery_time_end_str = None
+        if order_db.delivery_time_end:
+            delivery_time_end_str = order_db.delivery_time_end.strftime('%H:%M:%S')
+        
+        order_dict = {
+            'id': order_db.id,
+            'customer_name': order_db.customer_name,
+            'phone': order_db.phone,
+            'address': order_db.address,
+            'latitude': order_db.latitude,
+            'longitude': order_db.longitude,
+            'comment': order_db.comment,
+            'delivery_time_start': delivery_time_start_str,
+            'delivery_time_end': delivery_time_end_str,
+            'delivery_time_window': order_db.delivery_time_window,
+            'status': order_db.status,
+            'order_number': order_db.order_number,
+            'entrance_number': order_db.entrance_number,
+            'apartment_number': order_db.apartment_number,
+            'gis_id': order_db.gis_id,
+            'manual_arrival_time': None,
+        }
+        
+        # Подтягиваем ручные времена из call_status
+        from src.models.order import CallStatusDB
+        cs = session.query(CallStatusDB).filter(
+            and_(
+                CallStatusDB.user_id == user_id,
+                CallStatusDB.order_number == order_number,
+                CallStatusDB.call_date == order_date
+            )
+        ).first()
+        
+        if cs and cs.is_manual_arrival and cs.manual_arrival_time:
+            order_dict['manual_arrival_time'] = cs.manual_arrival_time
+        
+        return order_dict
 

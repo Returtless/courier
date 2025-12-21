@@ -27,6 +27,8 @@ class SettingsHandlers:
             self.handle_settings_back(call)
         elif callback_data == "settings_reset":
             self.handle_settings_reset(call)
+        elif callback_data == "settings_reset_day":
+            self.handle_reset_day_from_settings(call)
         elif callback_data == "settings_chefmarket_creds":
             self.handle_chefmarket_credentials_menu(call)
         else:
@@ -72,6 +74,7 @@ class SettingsHandlers:
             types.InlineKeyboardButton("🚦 Интервал проверки пробок", callback_data="settings_traffic_interval"),
             types.InlineKeyboardButton("⚠️ Порог уведомлений о пробках", callback_data="settings_traffic_threshold"),
             types.InlineKeyboardButton("🔄 Сбросить к умолчанию", callback_data="settings_reset"),
+            types.InlineKeyboardButton("🗑️ Сбросить день", callback_data="settings_reset_day"),
             types.InlineKeyboardButton("⬅️ Назад", callback_data="settings_back")
         )
         
@@ -311,3 +314,16 @@ class SettingsHandlers:
             parse_mode='HTML',
             reply_markup=markup
         )
+    
+    def handle_reset_day_from_settings(self, call):
+        """Обработка запроса на сброс дня из настроек"""
+        # Создаем FakeMessage для вызова handle_reset_day
+        class FakeMessage:
+            def __init__(self, call):
+                self.from_user = call.from_user
+                self.chat = call.message.chat
+                self.text = "🗑️ Сбросить день"
+        
+        fake_message = FakeMessage(call)
+        # Перенаправляем в route_handlers для обработки
+        self.parent.routes.handle_reset_day(fake_message)

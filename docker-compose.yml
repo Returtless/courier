@@ -3,10 +3,20 @@ services:
     build: .
     container_name: courier_bot
     restart: unless-stopped
-    env_file:
-      - env
+    # Используем только переменные окружения из Portainer (не используем env файл)
     environment:
       - TZ=Europe/Moscow
+      # Передаем все переменные окружения из Portainer напрямую в контейнер
+      # Portainer передает переменные окружения стека в процесс Docker Compose,
+      # и они доступны через подстановку ${VARIABLE_NAME}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - YANDEX_MAPS_API_KEY=${YANDEX_MAPS_API_KEY}
+      - TWO_GIS_API_KEY=${TWO_GIS_API_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - LLM_MODEL_PATH=${LLM_MODEL_PATH:-models/gemma3-4b}
+      - LLM_DEVICE=${LLM_DEVICE:-cpu}
+      - PORTAINER_WEBHOOK_URL=${PORTAINER_WEBHOOK_URL:-}
     volumes:
       - ./data:/app/data  # Для SQLite (если используется)
     depends_on:
@@ -26,8 +36,9 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - courier_network
+    # Открываем порт только на localhost, чтобы не светить Postgres наружу
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
 
 volumes:
   postgres_data:

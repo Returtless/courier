@@ -3,9 +3,10 @@
 """
 import logging
 import asyncio
-from datetime import date
+from datetime import date, datetime
 from telebot import types
 from src.services.chefmarket_parser import ChefMarketParser
+from src.models.order import Order
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,11 @@ class ImportHandlers:
         self.bot.register_message_handler(
             self.handle_import_orders,
             commands=['import_orders']
+        )
+        # Обработчик кнопки "📲 Импорт из ШефМаркет" в меню заказов
+        self.bot.register_message_handler(
+            self.handle_import_orders,
+            func=lambda m: m.text and "Импорт из ШефМаркет" in m.text
         )
         
         logger.info("✅ Import handlers зарегистрированы")
@@ -125,8 +131,9 @@ class ImportHandlers:
                 message,
                 "❌ <b>Учетные данные не найдены</b>\n\n"
                 "Сначала сохраните логин и пароль от ШефМаркет:\n"
-                "/set_credentials логин пароль",
-                parse_mode='HTML'
+                "⚙️ Настройки → 📲 Учетные данные ШефМаркет",
+                parse_mode='HTML',
+                reply_markup=self.parent._orders_menu_markup(user_id)
             )
             return
         
@@ -148,28 +155,59 @@ class ImportHandlers:
         
         # Запускаем импорт в async контексте
         try:
-            orders = asyncio.run(self._import_orders_async(user_id, login, password, status_msg))
+            result = asyncio.run(self._import_orders_async(user_id, login, password, status_msg))
             
-            if orders:
-                self.bot.edit_message_text(
-                    f"✅ <b>Импорт завершен!</b>\n\n"
-                    f"📦 Добавлено заказов: {len(orders)}\n"
-                    f"📍 Адреса загеокодированы\n\n"
-                    f"Используйте <b>▶️ Оптимизировать</b> для построения маршрута",
+            # result может быть словарем с информацией об импорте или списком заказов (для обратной совместимости)
+            if isinstance(result, dict):
+                imported_count = result.get('imported', 0)
+                updated_count = result.get('updated', 0)
+                total_orders = result.get('total', 0)
+            else:
+                # Обратная совместимость: если вернулся список
+                orders = result
+                imported_count = len(orders)
+                updated_count = 0
+                total_orders = len(orders)
+            
+            # Удаляем старое сообщение и отправляем новое с клавиатурой
+            # (так как исходное сообщение не имело reply_markup, нельзя его добавить при редактировании)
+            try:
+                self.bot.delete_message(message.chat.id, status_msg.message_id)
+            except:
+                pass  # Игнорируем ошибку, если сообщение уже удалено
+            
+            if total_orders > 0:
+                message_text = f"✅ <b>Импорт завершен!</b>\n\n"
+                if imported_count > 0:
+                    message_text += f"📦 Добавлено новых заказов: {imported_count}\n"
+                if updated_count > 0:
+                    message_text += f"🔄 Обновлено заказов: {updated_count}\n"
+                message_text += f"📍 Адреса загеокодированы\n\n"
+                message_text += f"Используйте <b>▶️ Оптимизировать</b> для построения маршрута"
+                
+                self.bot.send_message(
                     message.chat.id,
-                    status_msg.message_id,
-                    parse_mode='HTML'
+                    message_text,
+                    parse_mode='HTML',
+                    reply_markup=self.parent._orders_menu_markup(user_id)
                 )
             else:
-                self.bot.edit_message_text(
-                    "ℹ️ Заказы не найдены или уже были импортированы",
+                self.bot.send_message(
                     message.chat.id,
-                    status_msg.message_id
+                    "ℹ️ Заказы не найдены",
+                    reply_markup=self.parent._orders_menu_markup(user_id)
                 )
         
         except Exception as e:
             logger.error(f"Ошибка импорта: {e}", exc_info=True)
-            self.bot.edit_message_text(
+            # Удаляем старое сообщение и отправляем новое с клавиатурой
+            try:
+                self.bot.delete_message(message.chat.id, status_msg.message_id)
+            except:
+                pass  # Игнорируем ошибку, если сообщение уже удалено
+            
+            self.bot.send_message(
+                message.chat.id,
                 f"❌ <b>Ошибка импорта</b>\n\n"
                 f"{str(e)}\n\n"
                 f"Возможные причины:\n"
@@ -179,9 +217,8 @@ class ImportHandlers:
                 f"Попробуйте:\n"
                 f"1. Проверить данные: /set_credentials\n"
                 f"2. Попробовать позже",
-                message.chat.id,
-                status_msg.message_id,
-                parse_mode='HTML'
+                parse_mode='HTML',
+                reply_markup=self.parent._orders_menu_markup(user_id)
             )
     
     async def _import_orders_async(self, user_id: int, login: str, password: str, status_msg):
@@ -199,6 +236,27 @@ class ImportHandlers:
         
         orders = await self.parser.import_orders(login, password, today)
         
+        # Если заказов нет и был сделан скриншот - отправляем его пользователю
+        if not orders and self.parser.last_screenshot_path:
+            import os
+            if os.path.exists(self.parser.last_screenshot_path):
+                try:
+                    with open(self.parser.last_screenshot_path, 'rb') as photo:
+                        self.bot.send_photo(
+                            status_msg.chat.id,
+                            photo,
+                            caption="📸 <b>Скриншот страницы заказов</b>\n\n"
+                                   "⚠️ Список заказов пуст.\n\n"
+                                   "Возможные причины:\n"
+                                   "• На сегодня действительно нет заказов\n"
+                                   "• Заказы на другую дату (проверьте дату в заголовке)\n"
+                                   "• Изменилась структура сайта",
+                            parse_mode='HTML'
+                        )
+                        logger.info(f"📸 Скриншот отправлен пользователю {user_id}")
+                except Exception as e:
+                    logger.error(f"Ошибка отправки скриншота: {e}", exc_info=True)
+        
         if not orders:
             return []
         
@@ -213,22 +271,50 @@ class ImportHandlers:
         )
         
         imported_count = 0
+        updated_count = 0
         for order_data in orders:
             try:
-                # Проверяем, не импортирован ли уже
+                # Проверяем, существует ли заказ уже
                 existing_orders = self.parent.db_service.get_today_orders(user_id)
-                if any(o.get('order_number') == order_data['order_number'] for o in existing_orders):
-                    logger.info(f"Заказ {order_data['order_number']} уже существует, пропускаем")
-                    continue
+                is_existing = any(o.get('order_number') == order_data['order_number'] for o in existing_orders)
                 
-                # Добавляем заказ
-                self.parent.db_service.add_order(user_id, order_data, today)
-                imported_count += 1
+                # Преобразуем delivery_time_window в delivery_time_start и delivery_time_end, если нужно
+                if order_data.get('delivery_time_window') and not order_data.get('delivery_time_start'):
+                    time_window = order_data.get('delivery_time_window')
+                    if isinstance(time_window, str) and '-' in time_window:
+                        try:
+                            start_str, end_str = time_window.split('-', 1)
+                            start_str = start_str.strip()
+                            end_str = end_str.strip()
+                            order_data['delivery_time_start'] = datetime.strptime(start_str, '%H:%M').time()
+                            order_data['delivery_time_end'] = datetime.strptime(end_str, '%H:%M').time()
+                        except Exception as e:
+                            logger.warning(f"⚠️ Не удалось распарсить временное окно '{time_window}': {e}")
+                
+                # Преобразуем словарь в объект Order и сохраняем/обновляем
+                order = Order(**order_data)
+                # save_order автоматически обновит существующий заказ, если он есть
+                self.parent.db_service.save_order(user_id, order, today, partial_update=False)
+                
+                if is_existing:
+                    updated_count += 1
+                    logger.info(f"🔄 Заказ {order_data['order_number']} обновлен актуальными данными")
+                else:
+                    imported_count += 1
+                    logger.info(f"✅ Заказ {order_data['order_number']} добавлен")
             except Exception as e:
                 logger.error(f"Ошибка сохранения заказа {order_data.get('order_number')}: {e}")
         
-        logger.info(f"Импортировано {imported_count} из {len(orders)} заказов")
-        return orders[:imported_count] if imported_count > 0 else []
+        total_processed = imported_count + updated_count
+        logger.info(f"Импортировано новых: {imported_count}, обновлено: {updated_count}, всего обработано: {total_processed} из {len(orders)} заказов")
+        
+        # Возвращаем словарь с информацией об импорте
+        return {
+            'imported': imported_count,
+            'updated': updated_count,
+            'total': total_processed,
+            'orders': orders
+        }
     
     # === Управление учетными данными через callback (из меню Настройки) ===
     
