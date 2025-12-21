@@ -1,0 +1,7 @@
+Collecting dependency-injector
+  Downloading dependency_injector-4.48.3-cp310-abi3-win_amd64.whl.metadata (14 kB)
+Requirement already satisfied: typing-extensions in c:\users\likhachev.vladislav\appdata\local\programs\python\python312\lib\site-packages (from dependency-injector) (4.15.0)
+Downloading dependency_injector-4.48.3-cp310-abi3-win_amd64.whl (1.7 MB)
+   ---------------------------------------- 1.7/1.7 MB 469.3 kB/s eta 0:00:00
+Installing collected packages: dependency-injector
+Successfully installed dependency-injector-4.48.3

@@ -32,3 +32,8 @@ pytesseract==0.3.10
 # transformers
 # torch
 # accelerate
+
+# Dependency Injection and REST API (для рефакторинга)
+dependency-injector>=4.42.0  # Поддержка Python 3.12
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
