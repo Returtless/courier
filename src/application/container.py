@@ -19,14 +19,33 @@ class ApplicationContainer(containers.DeclarativeContainer):
     
     # Services
     from src.application.services.order_service import OrderService
+    from src.application.services.route_service import RouteService
+    from src.application.services.call_service import CallService
+    from src.services.maps_service import MapsService
+    
+    # Singleton services
+    maps_service = providers.Singleton(MapsService)
+    
+    # Factory services
     order_service = providers.Factory(
         OrderService,
         order_repository=order_repository,
         call_status_repository=call_status_repository
     )
     
-    # Application Services будут добавлены на следующих этапах
-    # route_service = providers.Factory(...)
+    route_service = providers.Factory(
+        RouteService,
+        route_repository=route_repository,
+        order_service=order_service,
+        call_status_repository=call_status_repository,
+        maps_service=maps_service
+    )
+    
+    call_service = providers.Factory(
+        CallService,
+        call_status_repository=call_status_repository,
+        order_repository=order_repository
+    )
 
 
 # Глобальный контейнер

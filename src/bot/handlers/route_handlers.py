@@ -131,8 +131,9 @@ class RouteHandlers:
         user_id = message.from_user.id
         today = date.today()
         
-        # Загружаем из БД
-        start_location_data = self.parent.db_service.get_start_location(user_id, today)
+        # Загружаем через RouteService
+        start_location_dto = self.parent.route_service.get_start_location(user_id, today)
+        start_location_data = start_location_dto.dict() if start_location_dto else None
         
         start_address = None
         start_location = None
@@ -273,10 +274,14 @@ class RouteHandlers:
             lat = message.location.latitude
             lon = message.location.longitude
             
-            # Сохраняем в БД
-            self.parent.db_service.save_start_location(
-                user_id, 'geo', None, lat, lon, None, today
+            # Сохраняем через RouteService
+            from src.application.dto.route_dto import StartLocationDTO
+            location_dto = StartLocationDTO(
+                location_type='geo',
+                latitude=lat,
+                longitude=lon
             )
+            self.parent.route_service.save_start_location(user_id, location_dto, today)
             
             # Спрашиваем про время старта
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -368,16 +373,15 @@ class RouteHandlers:
             self.bot.answer_callback_query(call.id, "❌ Данные не найдены")
             return
         
-        # Сохраняем в БД (start_time=None, будет введен на следующем шаге)
-        self.parent.db_service.save_start_location(
-            user_id,
-            'address',
-            pending_location['address'],
-            pending_location['lat'],
-            pending_location['lon'],
-            None,  # start_time (не gid!)
-            today
+        # Сохраняем через RouteService
+        from src.application.dto.route_dto import StartLocationDTO
+        location_dto = StartLocationDTO(
+            location_type='address',
+            address=pending_location['address'],
+            latitude=pending_location['lat'],
+            longitude=pending_location['lon']
         )
+        self.parent.route_service.save_start_location(user_id, location_dto, today)
         
         self.bot.answer_callback_query(call.id, "✅ Адрес сохранен")
         self.bot.edit_message_text(
@@ -443,8 +447,12 @@ class RouteHandlers:
             )
             return
         
-        # Обновляем время старта в БД
-        self.parent.db_service.update_start_time(user_id, start_datetime, today)
+        # Обновляем время старта через RouteService
+        from src.application.dto.route_dto import StartLocationDTO
+        existing_location = self.parent.route_service.get_start_location(user_id, today)
+        if existing_location:
+            existing_location.start_time = start_datetime
+            self.parent.route_service.save_start_location(user_id, existing_location, today)
         
         self.bot.send_message(
             message.chat.id,
@@ -1327,14 +1335,23 @@ class RouteHandlers:
         user_id = message.from_user.id
         today = date.today()
         
-        # Загружаем из БД
-        route_data = self.parent.db_service.get_route_data(user_id, today)
-        if not route_data:
+        # Загружаем через RouteService
+        route_dto = self.parent.route_service.get_route(user_id, today)
+        if not route_dto:
             self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Используйте кнопку ▶️ Оптимизировать", reply_markup=self.parent._route_menu_markup())
             return
         
-        route_points_data = route_data.get('route_points_data', [])
-        route_order = route_data.get('route_order', [])
+        # Преобразуем RouteDTO в формат для совместимости
+        route_points_data = []
+        for point in route_dto.route_points:
+            route_points_data.append({
+                'order_number': point.order_number,
+                'estimated_arrival': point.estimated_arrival.isoformat() if point.estimated_arrival else None,
+                'call_time': point.call_time.isoformat() if point.call_time else None,
+                'distance_from_previous': point.distance_from_previous,
+                'time_from_previous': point.time_from_previous
+            })
+        route_order = route_dto.route_order
         
         if not route_points_data or not route_order:
             self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Используйте кнопку ▶️ Оптимизировать", reply_markup=self.parent._route_menu_markup())

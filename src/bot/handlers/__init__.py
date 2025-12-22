@@ -33,6 +33,8 @@ class CourierBot:
         # Application Services (из DI контейнера)
         container = get_container()
         self.order_service = container.order_service()
+        self.route_service = container.route_service()
+        self.call_service = container.call_service()
         
         # Состояния пользователей
         self.user_states = {}  # user_id -> state data
