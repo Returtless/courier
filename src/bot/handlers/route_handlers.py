@@ -600,10 +600,24 @@ class RouteHandlers:
                 logger.error(f"Ошибка создания Order из данных: {e}", exc_info=True)
                 continue
             
-            # Парсим время
+            # Парсим время (может быть строкой или datetime)
             try:
-                estimated_arrival = datetime.fromisoformat(point_data['estimated_arrival'])
-                call_time = datetime.fromisoformat(point_data['call_time'])
+                estimated_arrival = point_data['estimated_arrival']
+                if isinstance(estimated_arrival, str):
+                    estimated_arrival = datetime.fromisoformat(estimated_arrival)
+                elif not isinstance(estimated_arrival, datetime):
+                    logger.error(f"Неверный тип estimated_arrival: {type(estimated_arrival)}")
+                    continue
+                
+                call_time = point_data.get('call_time')
+                if call_time is None:
+                    logger.warning(f"call_time отсутствует для заказа {order_number}")
+                    continue
+                if isinstance(call_time, str):
+                    call_time = datetime.fromisoformat(call_time)
+                elif not isinstance(call_time, datetime):
+                    logger.error(f"Неверный тип call_time: {type(call_time)}")
+                    continue
             except Exception as e:
                 logger.error(f"Ошибка парсинга времени: {e}", exc_info=True)
                 continue

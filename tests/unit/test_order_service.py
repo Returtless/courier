@@ -189,4 +189,27 @@ class TestOrderService:
             result = order_service.parse_order_from_image(123, image_data)
             
             assert result is None
+    
+    def test_get_orders_by_date(self, order_service, mock_order_repository, mock_call_status_repository, sample_order_db):
+        """Тест получения заказов за конкретную дату"""
+        test_date = date(2025, 12, 15)
+        mock_order_repository.get_by_user_and_date.return_value = [sample_order_db]
+        mock_call_status_repository.get_by_user_and_date.return_value = []
+        
+        orders = order_service.get_orders_by_date(123, test_date)
+        
+        assert len(orders) == 1
+        assert orders[0].order_number == "12345"
+        mock_order_repository.get_by_user_and_date.assert_called_once_with(123, test_date, None)
+    
+    def test_get_orders_by_date_empty(self, order_service, mock_order_repository, mock_call_status_repository):
+        """Тест получения заказов за дату (пустой список)"""
+        test_date = date(2025, 12, 15)
+        mock_order_repository.get_by_user_and_date.return_value = []
+        mock_call_status_repository.get_by_user_and_date.return_value = []
+        
+        orders = order_service.get_orders_by_date(123, test_date)
+        
+        assert len(orders) == 0
+        mock_order_repository.get_by_user_and_date.assert_called_once_with(123, test_date, None)
 

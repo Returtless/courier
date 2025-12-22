@@ -363,4 +363,29 @@ class TestRouteService:
         # Получаем индекс (используем тот же мок)
         index = route_service.get_current_order_index(123, today)
         assert index == 1
+    
+    def test_delete_all_data_by_date(self, route_service):
+        """Тест удаления всех данных за дату"""
+        today = date.today()
+        mock_session = MagicMock()
+        mock_session.commit = MagicMock()
+        
+        # Мокаем репозиторий для возврата удаленных счетчиков
+        deleted_counts = {
+            'orders': 2,
+            'routes': 1,
+            'start_locations': 1,
+            'call_statuses': 3
+        }
+        
+        # Мокаем вызов _delete_all_data_by_date через мок сессии
+        route_service._delete_all_data_by_date = Mock(return_value=deleted_counts)
+        
+        result = route_service.delete_all_data_by_date(123, today, mock_session)
+        
+        assert result == deleted_counts
+        assert result['orders'] == 2
+        assert result['routes'] == 1
+        assert result['start_locations'] == 1
+        assert result['call_statuses'] == 3
 
