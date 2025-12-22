@@ -38,24 +38,20 @@ async def get_call_schedule(
     if call_date is None:
         call_date = date.today()
     
-    # Получаем все call_status для пользователя за дату
-    from src.repositories.call_status_repository import CallStatusRepository
-    call_status_repo: CallStatusRepository = get_container().call_status_repository()
-    
-    # Получаем все звонки через репозиторий
-    all_calls = call_status_repo.get_by_user_and_date(
-        current_user.id, call_date, db
+    # Получаем все call_status через CallService
+    all_calls_dto = call_service.get_call_statuses_by_date(
+        current_user.user_id, call_date, db
     )
     
     calls = []
-    for call_db in all_calls:
+    for call_dto in all_calls_dto:
         calls.append(CallScheduleItem(
-            order_number=call_db.order_number,
-            call_time=call_db.call_time,
-            arrival_time=call_db.arrival_time or call_db.call_time,
-            phone=call_db.phone,
-            customer_name=call_db.customer_name,
-            status=call_db.status
+            order_number=call_dto.order_number,
+            call_time=call_dto.call_time,
+            arrival_time=call_dto.arrival_time or call_dto.call_time,
+            phone=call_dto.phone,
+            customer_name=call_dto.customer_name,
+            status=call_dto.status
         ))
     
     # Сортируем по времени звонка
@@ -81,35 +77,34 @@ async def get_call_status(
     """
     call_service: CallService = get_container().call_service()
     
-    from src.repositories.call_status_repository import CallStatusRepository
-    call_status_repo: CallStatusRepository = get_container().call_status_repository()
+    # Получаем статус через CallService
+    call_status_dto = call_service.get_call_status_by_id(call_id, db)
     
-    call_status_db = call_status_repo.get_by_id(call_id, db)
-    
-    if not call_status_db:
+    if not call_status_dto:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Статус звонка не найден"
         )
     
-    if call_status_db.user_id != current_user.id:
+    # Проверяем принадлежность через DTO
+    if call_status_dto.user_id != current_user.user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Доступ запрещен"
         )
     
     return CallStatusResponse(
-        id=call_status_db.id,
-        order_number=call_status_db.order_number,
-        call_time=call_status_db.call_time,
-        arrival_time=call_status_db.arrival_time,
-        phone=call_status_db.phone,
-        customer_name=call_status_db.customer_name,
-        status=call_status_db.status,
-        attempts=call_status_db.attempts,
-        is_manual_call=call_status_db.is_manual_call,
-        is_manual_arrival=call_status_db.is_manual_arrival,
-        manual_arrival_time=call_status_db.manual_arrival_time
+        id=call_status_dto.id,
+        order_number=call_status_dto.order_number,
+        call_time=call_status_dto.call_time,
+        arrival_time=call_status_dto.arrival_time,
+        phone=call_status_dto.phone,
+        customer_name=call_status_dto.customer_name,
+        status=call_status_dto.status,
+        attempts=call_status_dto.attempts,
+        is_manual_call=call_status_dto.is_manual_call,
+        is_manual_arrival=call_status_dto.is_manual_arrival,
+        manual_arrival_time=call_status_dto.manual_arrival_time
     )
 
 
@@ -129,7 +124,7 @@ async def confirm_call(
     call_service: CallService = get_container().call_service()
     
     success = call_service.confirm_call(
-        user_id=current_user.id,
+        user_id=current_user.user_id,
         call_status_id=call_id,
         comment=request.comment,
         session=db
@@ -141,23 +136,27 @@ async def confirm_call(
             detail="Статус звонка не найден или доступ запрещен"
         )
     
-    # Получаем обновленный статус
-    from src.repositories.call_status_repository import CallStatusRepository
-    call_status_repo: CallStatusRepository = get_container().call_status_repository()
-    call_status_db = call_status_repo.get_by_id(call_id, db)
+    # Получаем обновленный статус через CallService
+    call_status_dto = call_service.get_call_status_by_id(call_id, db)
+    
+    if not call_status_dto:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Статус звонка не найден"
+        )
     
     return CallStatusResponse(
-        id=call_status_db.id,
-        order_number=call_status_db.order_number,
-        call_time=call_status_db.call_time,
-        arrival_time=call_status_db.arrival_time,
-        phone=call_status_db.phone,
-        customer_name=call_status_db.customer_name,
-        status=call_status_db.status,
-        attempts=call_status_db.attempts,
-        is_manual_call=call_status_db.is_manual_call,
-        is_manual_arrival=call_status_db.is_manual_arrival,
-        manual_arrival_time=call_status_db.manual_arrival_time
+        id=call_status_dto.id,
+        order_number=call_status_dto.order_number,
+        call_time=call_status_dto.call_time,
+        arrival_time=call_status_dto.arrival_time,
+        phone=call_status_dto.phone,
+        customer_name=call_status_dto.customer_name,
+        status=call_status_dto.status,
+        attempts=call_status_dto.attempts,
+        is_manual_call=call_status_dto.is_manual_call,
+        is_manual_arrival=call_status_dto.is_manual_arrival,
+        manual_arrival_time=call_status_dto.manual_arrival_time
     )
 
 
@@ -177,7 +176,7 @@ async def reject_call(
     call_service: CallService = get_container().call_service()
     
     success = call_service.reject_call(
-        user_id=current_user.id,
+        user_id=current_user.user_id,
         call_status_id=call_id,
         session=db
     )
@@ -188,21 +187,25 @@ async def reject_call(
             detail="Статус звонка не найден или доступ запрещен"
         )
     
-    # Получаем обновленный статус
-    from src.repositories.call_status_repository import CallStatusRepository
-    call_status_repo: CallStatusRepository = get_container().call_status_repository()
-    call_status_db = call_status_repo.get_by_id(call_id, db)
+    # Получаем обновленный статус через CallService
+    call_status_dto = call_service.get_call_status_by_id(call_id, db)
+    
+    if not call_status_dto:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Статус звонка не найден"
+        )
     
     return CallStatusResponse(
-        id=call_status_db.id,
-        order_number=call_status_db.order_number,
-        call_time=call_status_db.call_time,
-        arrival_time=call_status_db.arrival_time,
-        phone=call_status_db.phone,
-        customer_name=call_status_db.customer_name,
-        status=call_status_db.status,
-        attempts=call_status_db.attempts,
-        is_manual_call=call_status_db.is_manual_call,
-        is_manual_arrival=call_status_db.is_manual_arrival,
-        manual_arrival_time=call_status_db.manual_arrival_time
+        id=call_status_dto.id,
+        order_number=call_status_dto.order_number,
+        call_time=call_status_dto.call_time,
+        arrival_time=call_status_dto.arrival_time,
+        phone=call_status_dto.phone,
+        customer_name=call_status_dto.customer_name,
+        status=call_status_dto.status,
+        attempts=call_status_dto.attempts,
+        is_manual_call=call_status_dto.is_manual_call,
+        is_manual_arrival=call_status_dto.is_manual_arrival,
+        manual_arrival_time=call_status_dto.manual_arrival_time
     )

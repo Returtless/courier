@@ -181,6 +181,99 @@ class RouteService:
                 error_message=f"Ошибка оптимизации: {str(e)}"
             )
     
+    def set_current_order_index(
+        self,
+        user_id: int,
+        order_date: date,
+        index: int,
+        session: Session = None
+    ) -> bool:
+        """
+        Установить текущий индекс заказа в маршруте для навигации
+        
+        Args:
+            user_id: ID пользователя
+            order_date: Дата маршрута
+            index: Индекс заказа в маршруте (0-based)
+            session: Сессия БД (опционально)
+            
+        Returns:
+            True если успешно, False если маршрут не найден или индекс невалиден
+        """
+        if order_date is None:
+            order_date = date.today()
+        
+        route_db = self.route_repository.get_route(user_id, order_date, session)
+        if not route_db:
+            return False
+        
+        # Проверяем валидность индекса
+        if route_db.route_order and isinstance(route_db.route_order, list):
+            if index < 0 or index >= len(route_db.route_order):
+                return False
+        
+        # Сохраняем current_order_index в route_summary как метаданные
+        # Используем специальный ключ '_current_index' в первом элементе route_summary
+        # чтобы не нарушать существующую структуру
+        if route_db.route_summary is None:
+            route_db.route_summary = []
+        
+        # Если route_summary - список словарей, добавляем метаданные в первый элемент
+        if isinstance(route_db.route_summary, list) and len(route_db.route_summary) > 0:
+            if isinstance(route_db.route_summary[0], dict):
+                # Добавляем метаданные в первый элемент, не нарушая остальные поля
+                route_db.route_summary[0]['_current_index'] = index
+            else:
+                # Если первый элемент не словарь, создаем новый первый элемент с метаданными
+                route_db.route_summary = [{'_current_index': index}] + list(route_db.route_summary)
+        else:
+            # Если route_summary пустой, создаем структуру с метаданными
+            route_db.route_summary = [{'_current_index': index}]
+        
+        # Важно: для JSON-полей нужно явно пометить поле как измененное
+        if session:
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(route_db, 'route_summary')
+            session.commit()
+            session.refresh(route_db)  # Обновляем объект из БД
+        else:
+            from src.database.connection import get_db_session
+            with get_db_session() as sess:
+                sess.merge(route_db)
+                sess.commit()
+        
+        logger.info(f"📍 Установлен текущий индекс заказа {index} для user_id={user_id}, date={order_date}")
+        return True
+    
+    def get_current_order_index(
+        self,
+        user_id: int,
+        order_date: date,
+        session: Session = None
+    ) -> int:
+        """
+        Получить текущий индекс заказа в маршруте
+        
+        Args:
+            user_id: ID пользователя
+            order_date: Дата маршрута
+            session: Сессия БД (опционально)
+            
+        Returns:
+            Индекс заказа (по умолчанию 0)
+        """
+        route_db = self.route_repository.get_route(user_id, order_date, session)
+        if not route_db or not route_db.route_summary:
+            return 0
+        
+        # Извлекаем current_order_index из метаданных
+        if isinstance(route_db.route_summary, list) and len(route_db.route_summary) > 0:
+            first_item = route_db.route_summary[0]
+            if isinstance(first_item, dict) and '_current_index' in first_item:
+                return int(first_item['_current_index'])
+        
+        return 0
+    
     def get_route(
         self,
         user_id: int,
@@ -214,6 +307,12 @@ class RouteService:
                 if isinstance(route_db.route_summary[0], dict):
                     # Новый формат
                     for point_dict in route_db.route_summary:
+                        # Пропускаем метаданные (элементы с ключом _current_index)
+                        if '_current_index' in point_dict and len(point_dict) == 1:
+                            continue
+                        # Убеждаемся, что address присутствует (может отсутствовать в старых данных)
+                        if 'address' not in point_dict:
+                            point_dict['address'] = ""
                         route_points.append(RoutePointDTO(**point_dict))
         
         call_schedule = route_db.call_schedule or []
@@ -402,6 +501,7 @@ class RouteService:
         """Преобразовать RoutePoint в словарь"""
         return {
             "order_number": point.order.order_number,
+            "address": point.order.address or "",  # Добавляем адрес для RoutePointDTO (может быть None)
             "estimated_arrival": point.estimated_arrival.isoformat() if point.estimated_arrival else None,
             "distance_from_previous": point.distance_from_previous,
             "time_from_previous": point.time_from_previous

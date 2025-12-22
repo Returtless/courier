@@ -104,7 +104,7 @@ async def optimize_route(
     )
     
     result: RouteOptimizationResult = route_service.optimize_route(
-        user_id=current_user.id,
+        user_id=current_user.user_id,
         order_date=order_date,
         request=optimization_request,
         session=db
@@ -117,7 +117,7 @@ async def optimize_route(
         )
     
     route_response = _route_dto_to_response(
-        result.route, order_date, route_service.order_service, current_user.id, db
+        result.route, order_date, route_service.order_service, current_user.user_id, db
     )
     
     return RouteOptimizeResponse(
@@ -144,7 +144,7 @@ async def get_route(
         order_date = date.today()
     
     route_dto: Optional[RouteDTO] = route_service.get_route(
-        user_id=current_user.id,
+        user_id=current_user.user_id,
         order_date=order_date,
         session=db
     )
@@ -156,7 +156,7 @@ async def get_route(
         )
     
     return _route_dto_to_response(
-        route_dto, order_date, route_service.order_service, current_user.id, db
+        route_dto, order_date, route_service.order_service, current_user.user_id, db
     )
 
 
@@ -167,7 +167,7 @@ async def get_current_order(
     db: Session = Depends(get_db)
 ):
     """
-    Получить первый (текущий) заказ в маршруте
+    Получить текущий заказ в маршруте (по сохраненному индексу или первый)
     
     - **order_date**: Дата маршрута (по умолчанию сегодня)
     """
@@ -177,7 +177,7 @@ async def get_current_order(
         order_date = date.today()
     
     route_dto: Optional[RouteDTO] = route_service.get_route(
-        user_id=current_user.id,
+        user_id=current_user.user_id,
         order_date=order_date,
         session=db
     )
@@ -188,12 +188,95 @@ async def get_current_order(
             detail="Маршрут не найден или пуст"
         )
     
-    # Возвращаем первый заказ в маршруте
-    current_point = route_dto.route_points[0]
+    # Получаем сохраненный индекс текущего заказа (по умолчанию 0)
+    current_index = route_service.get_current_order_index(
+        current_user.user_id, order_date, db
+    )
+    
+    # Проверяем валидность индекса
+    if current_index < 0 or current_index >= len(route_dto.route_points):
+        current_index = 0
+    
+    # Возвращаем заказ по индексу
+    current_point = route_dto.route_points[current_index]
     
     # Получаем полные данные заказа для координат
     order_dto = route_service.order_service.get_order_by_number(
-        current_user.id, current_point.order_number, order_date, db
+        current_user.user_id, current_point.order_number, order_date, db
+    )
+    
+    return RoutePointResponse(
+        order_number=current_point.order_number,
+        address=current_point.address,
+        latitude=order_dto.latitude if order_dto else None,
+        longitude=order_dto.longitude if order_dto else None,
+        estimated_arrival=current_point.estimated_arrival,
+        call_time=current_point.call_time,
+        distance_from_previous=current_point.distance_from_previous or 0.0,
+        time_from_previous=current_point.time_from_previous or 0.0,
+        customer_name=current_point.customer_name,
+        phone=current_point.phone,
+        comment=current_point.comment,
+        delivery_time_window=order_dto.delivery_time_window if order_dto else None,
+        status=order_dto.status if order_dto else 'pending'
+    )
+
+
+@router.put("/current-order/{index}", response_model=RoutePointResponse)
+async def set_current_order(
+    index: int,
+    order_date: Optional[date] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Установить текущий заказ в маршруте по индексу (навигация)
+    
+    - **index**: Индекс заказа в маршруте (0-based)
+    - **order_date**: Дата маршрута (по умолчанию сегодня)
+    """
+    route_service: RouteService = get_container().route_service()
+    
+    if order_date is None:
+        order_date = date.today()
+    
+    # Проверяем существование маршрута
+    route_dto: Optional[RouteDTO] = route_service.get_route(
+        user_id=current_user.user_id,
+        order_date=order_date,
+        session=db
+    )
+    
+    if not route_dto or not route_dto.route_points:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Маршрут не найден или пуст"
+        )
+    
+    # Проверяем валидность индекса
+    if index < 0 or index >= len(route_dto.route_points):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Индекс {index} вне диапазона [0, {len(route_dto.route_points) - 1}]"
+        )
+    
+    # Устанавливаем текущий индекс
+    success = route_service.set_current_order_index(
+        current_user.user_id, order_date, index, db
+    )
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Не удалось установить текущий индекс заказа"
+        )
+    
+    # Возвращаем заказ по установленному индексу
+    current_point = route_dto.route_points[index]
+    
+    # Получаем полные данные заказа для координат
+    order_dto = route_service.order_service.get_order_by_number(
+        current_user.user_id, current_point.order_number, order_date, db
     )
     
     return RoutePointResponse(
@@ -230,7 +313,7 @@ async def get_start_location(
         order_date = date.today()
     
     start_location: Optional[StartLocationDTO] = route_service.get_start_location(
-        user_id=current_user.id,
+        user_id=current_user.user_id,
         order_date=order_date,
         session=db
     )
@@ -279,7 +362,7 @@ async def set_start_location(
     )
     
     saved_location = route_service.save_start_location(
-        user_id=current_user.id,
+        user_id=current_user.user_id,
         location_data=location_dto,
         order_date=order_date,
         session=db

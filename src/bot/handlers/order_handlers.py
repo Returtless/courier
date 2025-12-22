@@ -26,15 +26,6 @@ class OrderHandlers:
     def __init__(self, bot_instance):
         self.bot = bot_instance.bot
         self.parent = bot_instance
-        
-        # Инициализируем парсер изображений один раз
-        try:
-            from src.services.image_parser import ImageOrderParser
-            self.image_parser = ImageOrderParser()
-            logger.info("✅ Парсер изображений инициализирован")
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось инициализировать парсер изображений: {e}")
-            self.image_parser = None
     
     def register(self):
         """Регистрация обработчиков заказов"""
@@ -466,23 +457,11 @@ class OrderHandlers:
             image_data = self.bot.download_file(file_info.file_path)
             logger.info(f"✅ Изображение загружено: {len(image_data)} байт")
             
-            # Парсим изображение
-            logger.info(f"🔍 Начало парсинга изображения для user_id={user_id}")
-            
-            if not self.image_parser:
-                logger.error("❌ Парсер изображений не инициализирован")
-                self.bot.edit_message_text(
-                    "❌ <b>Парсер изображений недоступен</b>\n\n"
-                    "Парсер изображений не был инициализирован при запуске бота.\n"
-                    "Проверьте, что Tesseract OCR установлен и доступен.",
-                    message.chat.id,
-                    status_msg.message_id,
-                    parse_mode='HTML'
-                )
-                return
-            
-            order_data = self.image_parser.parse_order_from_image(image_data)
-            
+            # Парсим изображение через OrderService (интеграция с ImageOrderParser внутри сервиса)
+            logger.info(f"🔍 Начало парсинга изображения для user_id={user_id} через OrderService")
+            order_dto = self.parent.order_service.parse_order_from_image(user_id, image_data)
+            order_data = order_dto.dict() if order_dto else None
+
             if not order_data:
                 logger.warning(f"⚠️ Не удалось извлечь данные из изображения user_id={user_id}")
                 self.bot.edit_message_text(

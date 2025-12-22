@@ -232,28 +232,9 @@ class CallService:
         Returns:
             True если успешно
         """
-        from src.database.connection import get_db_session
-        from src.models.order import CallStatusDB
-        
-        if session:
-            call_status = session.query(CallStatusDB).filter_by(id=call_status_id).first()
-            if call_status and call_status.user_id == user_id:
-                call_status.status = "confirmed"
-                call_status.confirmation_comment = comment
-                session.commit()
-                logger.info(f"✅ Звонок {call_status_id} подтвержден")
-                return True
-        else:
-            with get_db_session() as session:
-                call_status = session.query(CallStatusDB).filter_by(id=call_status_id).first()
-                if call_status and call_status.user_id == user_id:
-                    call_status.status = "confirmed"
-                    call_status.confirmation_comment = comment
-                    session.commit()
-                    logger.info(f"✅ Звонок {call_status_id} подтвержден")
-                    return True
-        
-        return False
+        return self.call_status_repository.confirm_call_status(
+            call_status_id, user_id, comment, session
+        )
     
     def reject_call(
         self,
@@ -272,48 +253,15 @@ class CallService:
         Returns:
             True если успешно
         """
-        from src.database.connection import get_db_session
-        from src.models.order import CallStatusDB
+        # Получаем настройки пользователя для расчета времени следующей попытки
+        user_settings = self.settings_service.get_settings(user_id)
+        next_attempt_time = datetime.now() + timedelta(
+            minutes=user_settings.call_retry_interval_minutes
+        )
         
-        if session:
-            call_status = session.query(CallStatusDB).filter_by(id=call_status_id).first()
-            if call_status and call_status.user_id == user_id:
-                call_status.status = "rejected"
-                call_status.attempts += 1
-                
-                # Устанавливаем время следующей попытки
-                user_settings = self.settings_service.get_settings(user_id)
-                call_status.next_attempt_time = datetime.now() + timedelta(
-                    minutes=user_settings.call_retry_interval_minutes
-                )
-                
-                # Если превышен лимит попыток
-                if call_status.attempts >= user_settings.call_max_attempts:
-                    call_status.status = "failed"
-                
-                session.commit()
-                logger.info(f"❌ Звонок {call_status_id} отклонен (попытка {call_status.attempts})")
-                return True
-        else:
-            with get_db_session() as session:
-                call_status = session.query(CallStatusDB).filter_by(id=call_status_id).first()
-                if call_status and call_status.user_id == user_id:
-                    call_status.status = "rejected"
-                    call_status.attempts += 1
-                    
-                    user_settings = self.settings_service.get_settings(user_id)
-                    call_status.next_attempt_time = datetime.now() + timedelta(
-                        minutes=user_settings.call_retry_interval_minutes
-                    )
-                    
-                    if call_status.attempts >= user_settings.call_max_attempts:
-                        call_status.status = "failed"
-                    
-                    session.commit()
-                    logger.info(f"❌ Звонок {call_status_id} отклонен (попытка {call_status.attempts})")
-                    return True
-        
-        return False
+        return self.call_status_repository.reject_call_status(
+            call_status_id, user_id, next_attempt_time, user_settings.call_max_attempts, session
+        )
     
     def create_call_status(
         self,
@@ -406,6 +354,32 @@ class CallService:
         
         return self._call_status_db_to_dto(call_status_db)
     
+    def get_call_statuses_by_date(
+        self,
+        user_id: int,
+        call_date: date = None,
+        session: Session = None
+    ) -> List[CallStatusDTO]:
+        """
+        Получить все статусы звонков пользователя за дату
+        
+        Args:
+            user_id: ID пользователя
+            call_date: Дата звонков (по умолчанию сегодня)
+            session: Сессия БД (опционально)
+            
+        Returns:
+            Список статусов звонков в формате DTO
+        """
+        if call_date is None:
+            call_date = date.today()
+        
+        call_statuses_db = self.call_status_repository.get_call_statuses_by_date(
+            user_id, call_date, session
+        )
+        
+        return [self._call_status_db_to_dto(cs) for cs in call_statuses_db]
+    
     def _build_notification_message(
         self,
         call: CallStatusDB,
@@ -434,6 +408,7 @@ class CallService:
         """Преобразовать CallStatusDB в CallStatusDTO"""
         return CallStatusDTO(
             id=call_status_db.id,
+            user_id=call_status_db.user_id,
             order_number=call_status_db.order_number,
             call_time=call_status_db.call_time,
             arrival_time=call_status_db.arrival_time,

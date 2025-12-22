@@ -13,6 +13,7 @@ from src.repositories.call_status_repository import CallStatusRepository
 from src.application.services.order_service import OrderService
 from src.services.maps_service import MapsService
 from src.models.order import RouteDataDB, StartLocationDB, OptimizedRoute, RoutePoint, Order
+from src.application.dto.route_dto import RoutePointDTO
 
 
 @pytest.fixture
@@ -67,6 +68,52 @@ def sample_start_location_db():
     location.longitude = 37.6173
     location.start_time = datetime.combine(date.today(), time(9, 0))
     return location
+
+
+@pytest.fixture
+def sample_route_db():
+    """Пример маршрута из БД с route_summary"""
+    route = RouteDataDB()
+    route.id = 1
+    route.user_id = 123
+    route.route_date = date.today()
+    route.route_order = ["ORDER1", "ORDER2", "ORDER3"]
+    route.route_summary = [
+        {
+            "order_number": "ORDER1",
+            "address": "Москва, ул. Ленина, д. 1",
+            "estimated_arrival": datetime.combine(date.today(), time(10, 0)),
+            "call_time": datetime.combine(date.today(), time(9, 20)),
+            "distance_from_previous": 0.0,
+            "time_from_previous": 0.0,
+            "customer_name": "Иван Иванов",
+            "phone": "+79111234567"
+        },
+        {
+            "order_number": "ORDER2",
+            "address": "Москва, ул. Пушкина, д. 2",
+            "estimated_arrival": datetime.combine(date.today(), time(10, 30)),
+            "call_time": datetime.combine(date.today(), time(9, 50)),
+            "distance_from_previous": 5.0,
+            "time_from_previous": 10.0,
+            "customer_name": "Мария Петрова",
+            "phone": "+79117654321"
+        },
+        {
+            "order_number": "ORDER3",
+            "address": "Москва, ул. Гагарина, д. 3",
+            "estimated_arrival": datetime.combine(date.today(), time(11, 0)),
+            "call_time": datetime.combine(date.today(), time(10, 20)),
+            "distance_from_previous": 8.0,
+            "time_from_previous": 15.0,
+            "customer_name": "Петр Сидоров",
+            "phone": "+79119876543"
+        }
+    ]
+    route.total_distance = 13.0
+    route.total_time = 25.0
+    route.estimated_completion = datetime.combine(date.today(), time(11, 0))
+    return route
 
 
 class TestRouteService:
@@ -167,4 +214,153 @@ class TestRouteService:
         
         assert result.success is False
         assert "Точка старта не установлена" in result.error_message
+    
+    def test_set_current_order_index_success(
+        self,
+        route_service,
+        mock_route_repository,
+        sample_route_db
+    ):
+        """Тест успешной установки текущего индекса заказа"""
+        today = date.today()
+        mock_route_repository.get_route.return_value = sample_route_db
+        
+        # Мокаем commit через session
+        mock_session = MagicMock()
+        mock_session.commit = MagicMock()
+        # Устанавливаем, что объект уже в сессии
+        if hasattr(sample_route_db, '_sa_instance_state'):
+            sample_route_db._sa_instance_state = MagicMock()
+        
+        result = route_service.set_current_order_index(123, today, 1, mock_session)
+        
+        assert result is True
+        # Проверяем, что индекс установлен в route_summary
+        assert sample_route_db.route_summary[0].get('_current_index') == 1
+        mock_session.commit.assert_called_once()
+    
+    def test_set_current_order_index_route_not_found(
+        self,
+        route_service,
+        mock_route_repository
+    ):
+        """Тест установки индекса для несуществующего маршрута"""
+        today = date.today()
+        mock_route_repository.get_route.return_value = None
+        
+        result = route_service.set_current_order_index(123, today, 1)
+        
+        assert result is False
+    
+    def test_set_current_order_index_invalid_index_negative(
+        self,
+        route_service,
+        mock_route_repository,
+        sample_route_db
+    ):
+        """Тест установки отрицательного индекса"""
+        today = date.today()
+        mock_route_repository.get_route.return_value = sample_route_db
+        
+        result = route_service.set_current_order_index(123, today, -1)
+        
+        assert result is False
+    
+    def test_set_current_order_index_invalid_index_too_large(
+        self,
+        route_service,
+        mock_route_repository,
+        sample_route_db
+    ):
+        """Тест установки индекса больше размера маршрута"""
+        today = date.today()
+        mock_route_repository.get_route.return_value = sample_route_db
+        
+        result = route_service.set_current_order_index(123, today, 10)
+        
+        assert result is False
+    
+    def test_get_current_order_index_success(
+        self,
+        route_service,
+        mock_route_repository,
+        sample_route_db
+    ):
+        """Тест получения сохраненного индекса"""
+        today = date.today()
+        # Устанавливаем индекс в route_summary
+        sample_route_db.route_summary[0]['_current_index'] = 2
+        mock_route_repository.get_route.return_value = sample_route_db
+        
+        index = route_service.get_current_order_index(123, today)
+        
+        assert index == 2
+    
+    def test_get_current_order_index_default(
+        self,
+        route_service,
+        mock_route_repository,
+        sample_route_db
+    ):
+        """Тест получения индекса по умолчанию (0) когда индекс не установлен"""
+        today = date.today()
+        # Убираем _current_index из route_summary
+        if '_current_index' in sample_route_db.route_summary[0]:
+            del sample_route_db.route_summary[0]['_current_index']
+        mock_route_repository.get_route.return_value = sample_route_db
+        
+        index = route_service.get_current_order_index(123, today)
+        
+        assert index == 0
+    
+    def test_get_current_order_index_route_not_found(
+        self,
+        route_service,
+        mock_route_repository
+    ):
+        """Тест получения индекса для несуществующего маршрута"""
+        today = date.today()
+        mock_route_repository.get_route.return_value = None
+        
+        index = route_service.get_current_order_index(123, today)
+        
+        assert index == 0
+    
+    def test_get_current_order_index_empty_route_summary(
+        self,
+        route_service,
+        mock_route_repository,
+        sample_route_db
+    ):
+        """Тест получения индекса для маршрута с пустым route_summary"""
+        today = date.today()
+        sample_route_db.route_summary = []
+        mock_route_repository.get_route.return_value = sample_route_db
+        
+        index = route_service.get_current_order_index(123, today)
+        
+        assert index == 0
+    
+    def test_set_and_get_current_order_index_cycle(
+        self,
+        route_service,
+        mock_route_repository,
+        sample_route_db
+    ):
+        """Тест полного цикла: установка индекса и его получение"""
+        today = date.today()
+        mock_route_repository.get_route.return_value = sample_route_db
+        
+        # Устанавливаем индекс
+        mock_session = MagicMock()
+        mock_session.commit = MagicMock()
+        if hasattr(sample_route_db, '_sa_instance_state'):
+            sample_route_db._sa_instance_state = MagicMock()
+        
+        set_result = route_service.set_current_order_index(123, today, 1, mock_session)
+        assert set_result is True
+        
+        # Получаем индекс (используем тот же мок)
+        index = route_service.get_current_order_index(123, today)
+        assert index == 1
 

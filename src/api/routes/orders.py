@@ -64,6 +64,8 @@ async def get_orders(
         orders = []
         for order_dto in orders_dto:
             order_dict = order_dto.model_dump()
+            # Добавляем order_date (требуется для OrderResponse)
+            order_dict['order_date'] = order_date
             # Преобразуем time в строку
             if order_dto.delivery_time_start:
                 order_dict['delivery_time_start'] = order_dto.delivery_time_start.strftime('%H:%M')
@@ -115,6 +117,8 @@ async def get_order(
             raise HTTPException(status_code=404, detail="Заказ не найден")
         
         order_dict = order_dto.model_dump()
+        # Добавляем order_date (требуется для OrderResponse)
+        order_dict['order_date'] = order_date
         # Преобразуем time в строку
         if order_dto.delivery_time_start:
             order_dict['delivery_time_start'] = order_dto.delivery_time_start.strftime('%H:%M')
@@ -161,11 +165,14 @@ async def create_order(
             apartment_number=order_data.apartment_number
         )
         
+        create_order_date = order_data.order_date or date.today()
         order_dto = order_service.create_order(
-            current_user.user_id, create_dto, order_data.order_date, db
+            current_user.user_id, create_dto, create_order_date, db
         )
         
         order_dict = order_dto.model_dump()
+        # Добавляем order_date (требуется для OrderResponse)
+        order_dict['order_date'] = create_order_date
         # Преобразуем time в строку
         if order_dto.delivery_time_start:
             order_dict['delivery_time_start'] = order_dto.delivery_time_start.strftime('%H:%M')
@@ -220,6 +227,8 @@ async def update_order(
         )
         
         order_dict = order_dto.model_dump()
+        # Добавляем order_date (требуется для OrderResponse)
+        order_dict['order_date'] = order_date
         # Преобразуем time в строку
         if order_dto.delivery_time_start:
             order_dict['delivery_time_start'] = order_dto.delivery_time_start.strftime('%H:%M')
@@ -268,6 +277,8 @@ async def mark_order_delivered(
             raise HTTPException(status_code=404, detail="Заказ не найден")
         
         order_dict = order_dto.model_dump()
+        # Добавляем order_date (требуется для OrderResponse)
+        order_dict['order_date'] = order_date
         # Преобразуем time в строку
         if order_dto.delivery_time_start:
             order_dict['delivery_time_start'] = order_dto.delivery_time_start.strftime('%H:%M')

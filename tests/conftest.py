@@ -6,7 +6,12 @@ from datetime import datetime, date, time
 from unittest.mock import Mock, MagicMock
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
-from src.models.order import Base
+# Импортируем все модели для создания таблиц в тестовой БД
+from src.models.order import (
+    Base, OrderDB, StartLocationDB, RouteDataDB, 
+    CallStatusDB, UserSettingsDB, UserCredentialsDB
+)
+from src.models.geocache import GeocodeCacheDB
 
 
 @pytest.fixture(scope="function")

@@ -46,14 +46,10 @@ class CallHandlers:
                 self.bot.answer_callback_query(call.id, "❌ Запись о звонке не найдена", show_alert=True)
                 return
             
-            # Проверяем, что звонок принадлежит этому пользователю
-            # Получаем user_id из репозитория напрямую (CallStatusDTO не содержит user_id)
-            from src.models.order import CallStatusDB
-            with get_db_session() as session:
-                call_status_db = session.query(CallStatusDB).filter_by(id=call_status_id).first()
-                if not call_status_db or call_status_db.user_id != user_id:
-                    self.bot.answer_callback_query(call.id, "❌ Запись о звонке не найдена", show_alert=True)
-                    return
+            # Проверяем, что звонок принадлежит этому пользователю (через DTO)
+            if call_status_dto.user_id != user_id:
+                self.bot.answer_callback_query(call.id, "❌ Запись о звонке не найдена", show_alert=True)
+                return
             
             # Подтверждаем звонок через CallService (без комментария пока)
             with get_db_session() as session:
@@ -118,32 +114,35 @@ class CallHandlers:
                 self.bot.answer_callback_query(call.id, "❌ Запись о звонке не найдена", show_alert=True)
                 return
             
-            # Проверяем, что звонок принадлежит этому пользователю
-            from src.models.order import CallStatusDB
+            # Проверяем, что звонок принадлежит этому пользователю (через DTO)
+            if call_status_dto.user_id != user_id:
+                self.bot.answer_callback_query(call.id, "❌ Запись о звонке не найдена", show_alert=True)
+                return
+            
+            # Получаем настройки пользователя
+            user_settings = self.parent.settings_service.get_settings(user_id)
+            
+            customer_info = call_status_dto.customer_name or "Клиент"
+            order_info = f"Заказ №{call_status_dto.order_number}" if call_status_dto.order_number else "Заказ"
+            
+            # Отклоняем звонок через CallService
             with get_db_session() as session:
-                call_status_db = session.query(CallStatusDB).filter_by(id=call_status_id).first()
-                if not call_status_db or call_status_db.user_id != user_id:
-                    self.bot.answer_callback_query(call.id, "❌ Запись о звонке не найдена", show_alert=True)
-                    return
-                
-                # Получаем настройки пользователя
-                user_settings = self.parent.settings_service.get_settings(user_id)
-                
-                customer_info = call_status_dto.customer_name or "Клиент"
-                order_info = f"Заказ №{call_status_dto.order_number}" if call_status_dto.order_number else "Заказ"
-                
-                # Отклоняем звонок через CallService
                 success = self.parent.call_service.reject_call(user_id, call_status_id, session)
-                
-                if not success:
-                    self.bot.answer_callback_query(call.id, "❌ Ошибка отклонения звонка", show_alert=True)
-                    return
-                
-                # Обновляем данные из БД после изменения
-                session.refresh(call_status_db)
-                
-                # Проверяем количество попыток после отклонения
-                if call_status_db.attempts >= user_settings.call_max_attempts:
+            
+            if not success:
+                self.bot.answer_callback_query(call.id, "❌ Ошибка отклонения звонка", show_alert=True)
+                return
+            
+            # Получаем обновленный статус для проверки количества попыток
+            with get_db_session() as session:
+                updated_call_status_dto = self.parent.call_service.get_call_status_by_id(call_status_id, session)
+            
+            if not updated_call_status_dto:
+                self.bot.answer_callback_query(call.id, "❌ Ошибка получения обновленного статуса", show_alert=True)
+                return
+            
+            # Проверяем количество попыток после отклонения
+            if updated_call_status_dto.attempts >= user_settings.call_max_attempts:
                     # Превышено максимальное количество попыток
                     updated_text = (
                         f"📞 <b>Время звонка!</b>\n\n"
@@ -179,7 +178,7 @@ class CallHandlers:
                         f"📦 {order_info}\n"
                         f"📱 {call_status_dto.phone}\n"
                         f"🕐 Время: {call_status_dto.call_time.strftime('%H:%M')}\n\n"
-                        f"❌ <b>Отклонено</b>\nПовтор через {user_settings.call_retry_interval_minutes} мин (попытка {call_status_db.attempts}/{user_settings.call_max_attempts})"
+                        f"❌ <b>Отклонено</b>\nПовтор через {user_settings.call_retry_interval_minutes} мин (попытка {updated_call_status_dto.attempts}/{user_settings.call_max_attempts})"
                     )
                     
                     try:
@@ -192,10 +191,10 @@ class CallHandlers:
                     except Exception as edit_error:
                         logger.warning(f"Ошибка обновления сообщения: {edit_error}")
                     
-                    self.bot.answer_callback_query(call.id, f"❌ Отклонено. Повтор через {user_settings.call_retry_interval_minutes} мин (попытка {call_status_db.attempts}/{user_settings.call_max_attempts})")
+                    self.bot.answer_callback_query(call.id, f"❌ Отклонено. Повтор через {user_settings.call_retry_interval_minutes} мин (попытка {updated_call_status_dto.attempts}/{user_settings.call_max_attempts})")
                     self.bot.send_message(
                         call.message.chat.id,
-                        f"⏰ <b>Повторный звонок запланирован</b>\n\nЗаказ №{call_status_dto.order_number}\nПовтор через {user_settings.call_retry_interval_minutes} мин (попытка {call_status_db.attempts}/{user_settings.call_max_attempts})",
+                        f"⏰ <b>Повторный звонок запланирован</b>\n\nЗаказ №{call_status_dto.order_number}\nПовтор через {user_settings.call_retry_interval_minutes} мин (попытка {updated_call_status_dto.attempts}/{user_settings.call_max_attempts})",
                         parse_mode='HTML',
                         reply_markup=self.parent._route_menu_markup()
                     )

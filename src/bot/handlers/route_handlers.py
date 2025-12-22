@@ -466,264 +466,68 @@ class RouteHandlers:
     
     def handle_optimize_route(self, message):
         """Handle /optimize_route command"""
+        user_id = message.from_user.id
+        today = date.today()
+
+        logger.debug(f"Начало оптимизации для user_id={user_id}")
+
+        # Проверяем наличие точки старта и времени старта
+        start_location = self.parent.route_service.get_start_location(user_id, today)
+        if not start_location:
+            self.bot.reply_to(
+                message,
+                "❌ Не установлена точка старта. Используйте кнопку 📍 Точка старта",
+                reply_markup=self.parent._route_menu_markup()
+            )
+            return
+
+        if not start_location.start_time:
+            self.bot.reply_to(
+                message,
+                "❌ Не установлено время старта. Используйте кнопку 📍 Точка старта",
+                reply_markup=self.parent._route_menu_markup()
+            )
+            return
+
+        status_msg = self.bot.reply_to(
+            message,
+            "🔄 <b>Начинаю оптимизацию маршрута...</b>\n\n⏳ Загружаю данные...",
+            parse_mode='HTML'
+        )
+
         try:
-            user_id = message.from_user.id
-            today = date.today()
-            
-            logger.debug(f"Начало оптимизации для user_id={user_id}")
-            
-            # Загружаем заказы через OrderService
-            try:
-                orders_data = self.parent.get_today_orders_dict(user_id, today)
-                logger.debug(f"Загружено заказов: {len(orders_data) if orders_data else 0}")
-            except Exception as e:
-                logger.error(f"Ошибка загрузки заказов: {e}", exc_info=True)
-                self.bot.reply_to(message, f"❌ Ошибка загрузки заказов: {str(e)}", reply_markup=self.parent._route_menu_markup())
-                return
-            
-            if not orders_data:
-                user_id = message.from_user.id
-                self.bot.reply_to(message, "❌ Нет добавленных заказов. Добавьте их через кнопку ➕ Добавить заказы", reply_markup=self.parent._orders_menu_markup(user_id))
-                return
+            result = self.parent.route_service.optimize_route(user_id, today)
+        except Exception as e:
+            logger.error(f"Ошибка оптимизации маршрута: {e}", exc_info=True)
+            self.bot.edit_message_text(
+                f"❌ Ошибка оптимизации маршрута: {str(e)}",
+                message.chat.id,
+                status_msg.message_id,
+                parse_mode='HTML'
+            )
+            return
 
-            # Фильтруем доставленные заказы
-            active_orders_data = [od for od in orders_data if od.get('status', 'pending') != 'delivered']
-            
-            if not active_orders_data:
-                user_id = message.from_user.id
-                self.bot.reply_to(message, "❌ Нет активных заказов для оптимизации. Все заказы доставлены.", reply_markup=self.parent._orders_menu_markup(user_id))
-                return
-            
-            # Загружаем подтвержденные звонки через CallService
-            try:
-                from src.database.connection import get_db_session
-                with get_db_session() as session:
-                    call_statuses = self.parent.call_service.get_call_statuses_by_date(user_id, today, session)
-                    confirmed_calls = [cs for cs in call_statuses if cs.status == 'confirmed']
-                    confirmed_order_numbers = set(cs.order_number for cs in confirmed_calls)
-                    logger.info(f"Найдено {len(confirmed_calls)} подтвержденных звонков: {confirmed_order_numbers}")
-            except Exception as e:
-                logger.error(f"Ошибка загрузки подтвержденных звонков: {e}", exc_info=True)
-                confirmed_calls = []
-                confirmed_order_numbers = set()
+        if not result or not result.success or not result.route:
+            error_text = result.error_message if result and result.error_message else "Не удалось оптимизировать маршрут"
+            self.bot.edit_message_text(
+                f"❌ <b>Не удалось оптимизировать маршрут</b>\n\n{error_text}",
+                message.chat.id,
+                status_msg.message_id,
+                parse_mode='HTML',
+                reply_markup=self.parent._route_menu_markup()
+            )
+            return
 
-            # Загружаем точку старта через RouteService
-            try:
-                start_location_data = self.parent.get_start_location_dict(user_id, today)
-                logger.debug(f"Данные точки старта: {start_location_data}")
-            except Exception as e:
-                logger.error(f"Ошибка загрузки точки старта: {e}", exc_info=True)
-                self.bot.reply_to(message, f"❌ Ошибка загрузки точки старта: {str(e)}", reply_markup=self.parent._route_menu_markup())
-                return
-            
-            if not start_location_data:
-                self.bot.reply_to(message, "❌ Не установлена точка старта. Используйте кнопку 📍 Точка старта", reply_markup=self.parent._route_menu_markup())
-                return
-            
-            start_address = start_location_data.get('address')
-            start_lat = start_location_data.get('latitude')
-            start_lon = start_location_data.get('longitude')
-            start_time_str = start_location_data.get('start_time')
-            location_type = start_location_data.get('location_type')
-            
-            if not start_time_str:
-                self.bot.reply_to(message, "❌ Не установлено время старта. Используйте кнопку 📍 Точка старта", reply_markup=self.parent._route_menu_markup())
-                return
-
-            # Convert data back to Order objects
-            # Разделяем на подтвержденные (confirmed calls) и неподтвержденные заказы
-            confirmed_orders = []  # Заказы с подтвержденными звонками (сохраняем порядок из предыдущего маршрута)
-            unconfirmed_orders = []  # Заказы для новой оптимизации
-            
-            for order_data in active_orders_data:
-                try:
-                    # Преобразуем строки времени обратно в time объекты
-                    order_dict = order_data.copy()
-                    if order_dict.get('delivery_time_start'):
-                        if isinstance(order_dict['delivery_time_start'], str):
-                            parts = order_dict['delivery_time_start'].split(':')
-                            if len(parts) >= 2:
-                                order_dict['delivery_time_start'] = time(int(parts[0]), int(parts[1]))
-                            else:
-                                order_dict['delivery_time_start'] = None
-                    if order_dict.get('delivery_time_end'):
-                        if isinstance(order_dict['delivery_time_end'], str):
-                            parts = order_dict['delivery_time_end'].split(':')
-                            if len(parts) >= 2:
-                                order_dict['delivery_time_end'] = time(int(parts[0]), int(parts[1]))
-                            else:
-                                order_dict['delivery_time_end'] = None
-                    
-                    order = Order(**order_dict)
-                    
-                    # DEBUG: Логируем manual_arrival_time СРАЗУ после создания Order
-                    logger.info(f"📦 DEBUG: Заказ #{order.order_number} создан из БД, manual_arrival_time = {order.manual_arrival_time} (тип: {type(order.manual_arrival_time)})")
-                    
-                    # Разделяем по признаку подтвержденного звонка
-                    if order.order_number and order.order_number in confirmed_order_numbers:
-                        confirmed_orders.append(order)
-                    else:
-                        unconfirmed_orders.append(order)
-                except Exception as e:
-                    logger.error(f"Ошибка создания Order из данных: {e}, данные: {order_data}", exc_info=True)
-                    continue
-            
-            # Для оптимизации используем только неподтвержденные заказы
-            orders = unconfirmed_orders
-            
-            if not orders and not confirmed_orders:
-                self.bot.reply_to(message, "❌ Не удалось обработать заказы. Проверьте данные.", reply_markup=self.parent._route_menu_markup())
-                return
-            
-            if not orders and confirmed_orders:
-                # Все заказы уже подтверждены - повторная оптимизация не нужна
-                self.bot.reply_to(message, "✅ Все заказы уже подтверждены. Маршрут не требует оптимизации.", reply_markup=self.parent._route_menu_markup())
-                return
-            
-            try:
-                start_datetime = datetime.fromisoformat(start_time_str) if isinstance(start_time_str, str) else start_time_str
-            except Exception as e:
-                logger.error(f"Ошибка парсинга времени старта: {e}, start_time_str: {start_time_str}", exc_info=True)
-                self.bot.reply_to(message, f"❌ Ошибка обработки времени старта: {str(e)}", reply_markup=self.parent._route_menu_markup())
-                return
-            
-            # Если есть подтвержденные заказы - начинаем маршрут с последнего подтвержденного
-            # Загружаем предыдущий маршрут из БД
-            actual_start_from_confirmed = None
-            if confirmed_orders:
-                try:
-                    route_data = self.parent.get_route_data_dict(user_id, today)
-                    if route_data:
-                        route_points_data = route_data.get('route_points_data', [])
-                        route_order = route_data.get('route_order', [])
-                        
-                        # Находим последний подтвержденный заказ в маршруте
-                        last_confirmed_index = -1
-                        last_confirmed_order_number = None
-                        for i, order_num in enumerate(route_order):
-                            if order_num in confirmed_order_numbers:
-                                last_confirmed_index = i
-                                last_confirmed_order_number = order_num
-                        
-                        if last_confirmed_index >= 0 and last_confirmed_index < len(route_points_data):
-                            last_point_data = route_points_data[last_confirmed_index]
-                            # Находим соответствующий Order объект для получения координат
-                            last_confirmed_order = next(
-                                (o for o in confirmed_orders if o.order_number == last_confirmed_order_number),
-                                None
-                            )
-                            
-                            if last_confirmed_order and last_confirmed_order.latitude and last_confirmed_order.longitude:
-                                # Получаем настройки пользователя для времени на точке
-                                user_settings = self.parent.settings_service.get_settings(user_id)
-                                
-                                # Время прибытия + время на точке = новая точка старта
-                                arrival_time = datetime.fromisoformat(last_point_data['estimated_arrival'])
-                                new_start_time = arrival_time + timedelta(minutes=user_settings.service_time_minutes)
-                                
-                                actual_start_from_confirmed = {
-                                    'lat': last_confirmed_order.latitude,
-                                    'lon': last_confirmed_order.longitude,
-                                    'time': new_start_time,
-                                    'order_number': last_confirmed_order_number
-                                }
-                                
-                                logger.info(f"🎯 Начинаем оптимизацию от последнего подтвержденного заказа {last_confirmed_order_number}: координаты ({last_confirmed_order.latitude}, {last_confirmed_order.longitude}), время {new_start_time.strftime('%H:%M')}")
-                except Exception as e:
-                    logger.error(f"Ошибка определения точки старта от подтвержденного заказа: {e}", exc_info=True)
-                    # Продолжаем с обычной точкой старта
-            
-            # Определяем координаты старта - используем сохраненные координаты из БД
-            # Или координаты последнего подтвержденного заказа
-            if actual_start_from_confirmed:
-                # Начинаем от последнего подтвержденного заказа
-                start_location = {'lat': actual_start_from_confirmed['lat'], 'lon': actual_start_from_confirmed['lon']}
-                start_location_coords = (actual_start_from_confirmed['lat'], actual_start_from_confirmed['lon'])
-                start_datetime = actual_start_from_confirmed['time']
-                location_description = f"последнего подтвержденного заказа {actual_start_from_confirmed['order_number']}"
-            elif start_lat and start_lon:
-                # Координаты уже есть в БД (были сохранены при подтверждении адреса или при отправке геопозиции)
-                start_location = {'lat': start_lat, 'lon': start_lon}
-                start_location_coords = (start_lat, start_lon)
-                location_description = f"{'геопозиции' if location_type == 'geo' else 'адреса'} ({start_lat:.6f}, {start_lon:.6f})"
-            elif start_address:
-                # Координат нет, но есть адрес (старые данные) - нужно загеокодировать
-                start_location = None
-                start_location_coords = None
-            else:
-                start_location = None
-                start_location_coords = None
-            
-            logger.debug(f"Начало оптимизации: {len(orders)} заказов, точка старта: {start_location or start_address}")
-
-            # Отправляем начальное сообщение и включаем typing indicator
-            status_msg = self.bot.reply_to(message, "🔄 <b>Начинаю оптимизацию маршрута...</b>\n\n⏳ Загружаю данные...", parse_mode='HTML')
-            self.bot.send_chat_action(message.chat.id, 'typing')
-
-            # Initialize services
-            maps_service = MapsService()
-
-            # Get start location coordinates - используем сохраненные координаты из БД
-            if start_location_coords:
-                # Координаты уже есть в БД (были сохранены при подтверждении адреса или при отправке геопозиции)
-                self.bot.edit_message_text(
-                    "🔄 <b>Оптимизация маршрута</b>\n\n✅ Точка старта определена (координаты из БД)\n⏳ Геокодирую адреса заказов...",
-                    message.chat.id,
-                    status_msg.message_id,
-                    parse_mode='HTML'
-                )
-            elif start_address:
-                # Координат нет в БД, но есть адрес (старые данные или не подтвержденный адрес) - нужно загеокодировать
-                self.bot.edit_message_text(
-                    "🔄 <b>Оптимизация маршрута</b>\n\n⏳ Определяю координаты точки старта...",
-                    message.chat.id,
-                    status_msg.message_id,
-                    parse_mode='HTML'
-                )
-                self.bot.send_chat_action(message.chat.id, 'typing')
-                
-                start_lat, start_lon, gid = maps_service.geocode_address_sync(start_address)
-                if not start_lat or not start_lon:
-                    self.bot.edit_message_text(
-                        f"❌ Не удалось определить координаты точки старта: {start_address}",
-                        message.chat.id,
-                        status_msg.message_id,
-                        parse_mode='HTML'
-                    )
-                    return
-                start_location_coords = (start_lat, start_lon)
-                location_description = f"адреса: {start_address}"
-                
-                # Сохраняем координаты через RouteService
-                from src.application.dto.route_dto import StartLocationDTO
-                from src.database.connection import get_db_session
-                start_location_dto = StartLocationDTO(
-                    location_type='address',
-                    address=start_address,
-                    latitude=start_lat,
-                    longitude=start_lon,
-                    start_time=None
-                )
-                with get_db_session() as session:
-                    self.parent.route_service.save_start_location(user_id, start_location_dto, today, session)
-                
-                self.bot.edit_message_text(
-                    "🔄 <b>Оптимизация маршрута</b>\n\n✅ Точка старта определена\n⏳ Геокодирую адреса заказов...",
-                    message.chat.id,
-                    status_msg.message_id,
-                    parse_mode='HTML'
-                )
-            else:
-                self.bot.edit_message_text(
-                    "❌ Не удалось получить координаты точки старта",
-                    message.chat.id,
-                    status_msg.message_id,
-                    parse_mode='HTML'
-                )
-                return
-
-            # Геокодирование адресов заказов (только для тех, у кого нет координат)
-            self.bot.send_chat_action(message.chat.id, 'typing')
+        # Успешная оптимизация – показываем маршрут через существующий механизм
+        from types import SimpleNamespace
+        self.bot.edit_message_text(
+            "✅ <b>Маршрут оптимизирован</b>\n\n📋 Показываю маршрут...",
+            message.chat.id,
+            status_msg.message_id,
+            parse_mode='HTML'
+        )
+        fake_message = SimpleNamespace(from_user=message.from_user, chat=message.chat)
+        self.handle_show_route(fake_message)
             orders_to_geocode = [o for o in orders if not o.latitude or not o.longitude]
             if orders_to_geocode:
                 total_to_geocode = len(orders_to_geocode)

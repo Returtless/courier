@@ -9,6 +9,7 @@ from pydantic import BaseModel
 class CallStatusDTO(BaseModel):
     """DTO для статуса звонка"""
     id: Optional[int] = None
+    user_id: Optional[int] = None  # ID пользователя для проверки принадлежности
     order_number: str
     call_time: datetime
     arrival_time: Optional[datetime] = None

@@ -99,8 +99,26 @@ class RouteRepository:
         existing_route = self._get_route(user_id, route_date, session)
         
         if existing_route:
+            # Сохраняем метаданные _current_index перед обновлением
+            saved_current_index = None
+            if existing_route.route_summary and isinstance(existing_route.route_summary, list):
+                if len(existing_route.route_summary) > 0 and isinstance(existing_route.route_summary[0], dict):
+                    saved_current_index = existing_route.route_summary[0].get('_current_index')
+            
             # Обновляем существующий маршрут
-            existing_route.route_summary = route_data.get('route_summary')
+            new_route_summary = route_data.get('route_summary')
+            
+            # Восстанавливаем метаданные _current_index, если они были
+            if saved_current_index is not None and new_route_summary:
+                if isinstance(new_route_summary, list) and len(new_route_summary) > 0:
+                    if isinstance(new_route_summary[0], dict):
+                        # Добавляем _current_index в первый элемент нового route_summary
+                        new_route_summary[0]['_current_index'] = saved_current_index
+                    else:
+                        # Если первый элемент не словарь, добавляем метаданные в начало
+                        new_route_summary = [{'_current_index': saved_current_index}] + list(new_route_summary)
+            
+            existing_route.route_summary = new_route_summary
             existing_route.call_schedule = route_data.get('call_schedule')
             existing_route.route_order = route_data.get('route_order')
             existing_route.total_distance = route_data.get('total_distance')

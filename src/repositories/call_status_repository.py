@@ -445,4 +445,114 @@ class CallStatusRepository(BaseRepository[CallStatusDB]):
             logger.debug(f"✅ Помечен как отправленный: call_status_id={call_status_id}, попытка={call_status.attempts}")
             return True
         return False
+    
+    def confirm_call_status(
+        self,
+        call_status_id: int,
+        user_id: int,
+        comment: Optional[str] = None,
+        session: Session = None
+    ) -> bool:
+        """
+        Подтвердить звонок
+        
+        Args:
+            call_status_id: ID статуса звонка
+            user_id: ID пользователя (для проверки принадлежности)
+            comment: Комментарий (опционально)
+            session: Сессия БД (опционально)
+            
+        Returns:
+            True если успешно
+        """
+        if session is None:
+            with get_db_session() as session:
+                return self._confirm_call_status(call_status_id, user_id, comment, session)
+        return self._confirm_call_status(call_status_id, user_id, comment, session)
+    
+    def _confirm_call_status(
+        self,
+        call_status_id: int,
+        user_id: int,
+        comment: Optional[str],
+        session: Session
+    ) -> bool:
+        """Внутренний метод подтверждения звонка"""
+        call_status = session.query(CallStatusDB).filter_by(id=call_status_id).first()
+        if call_status and call_status.user_id == user_id:
+            call_status.status = "confirmed"
+            call_status.confirmation_comment = comment
+            session.commit()
+            logger.info(f"✅ Звонок {call_status_id} подтвержден")
+            return True
+        return False
+    
+    def reject_call_status(
+        self,
+        call_status_id: int,
+        user_id: int,
+        next_attempt_time: datetime,
+        max_attempts: int,
+        session: Session = None
+    ) -> bool:
+        """
+        Отклонить звонок (повторная попытка)
+        
+        Args:
+            call_status_id: ID статуса звонка
+            user_id: ID пользователя (для проверки принадлежности)
+            next_attempt_time: Время следующей попытки
+            max_attempts: Максимальное количество попыток
+            session: Сессия БД (опционально)
+            
+        Returns:
+            True если успешно
+        """
+        if session is None:
+            with get_db_session() as session:
+                return self._reject_call_status(call_status_id, user_id, next_attempt_time, max_attempts, session)
+        return self._reject_call_status(call_status_id, user_id, next_attempt_time, max_attempts, session)
+    
+    def _reject_call_status(
+        self,
+        call_status_id: int,
+        user_id: int,
+        next_attempt_time: datetime,
+        max_attempts: int,
+        session: Session
+    ) -> bool:
+        """Внутренний метод отклонения звонка"""
+        call_status = session.query(CallStatusDB).filter_by(id=call_status_id).first()
+        if call_status and call_status.user_id == user_id:
+            call_status.status = "rejected"
+            call_status.attempts += 1
+            call_status.next_attempt_time = next_attempt_time
+            
+            # Если превышен лимит попыток
+            if call_status.attempts >= max_attempts:
+                call_status.status = "failed"
+            
+            session.commit()
+            logger.info(f"❌ Звонок {call_status_id} отклонен (попытка {call_status.attempts})")
+            return True
+        return False
+    
+    def get_call_statuses_by_date(
+        self,
+        user_id: int,
+        call_date: date,
+        session: Session = None
+    ) -> List[CallStatusDB]:
+        """
+        Получить все статусы звонков пользователя за дату (алиас для get_by_user_and_date)
+        
+        Args:
+            user_id: ID пользователя
+            call_date: Дата звонков
+            session: Сессия БД (опционально)
+            
+        Returns:
+            Список статусов звонков
+        """
+        return self.get_by_user_and_date(user_id, call_date, session)
 
