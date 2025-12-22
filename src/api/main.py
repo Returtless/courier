@@ -114,9 +114,11 @@ from src.api.routes import orders
 from src.api.routes import routes as routes_module
 from src.api.routes import calls as calls_module
 from src.api.routes import settings as settings_module
+from src.api.routes import import_routes as import_module
 
 app.include_router(orders.router, prefix="/api/orders", tags=["Orders"])
 app.include_router(routes_module.router, prefix="/api/routes", tags=["Routes"])
 app.include_router(calls_module.router, prefix="/api/calls", tags=["Calls"])
 app.include_router(settings_module.router, prefix="/api/settings", tags=["Settings"])
+app.include_router(import_module.router, prefix="/api/import", tags=["Import"])
 
