@@ -27,6 +27,11 @@ def get_db():
         db.close()
 
 
+def get_db_session():
+    """Dependency для FastAPI (alias для get_db)"""
+    return get_db()
+
+
 @contextmanager
 def get_db_session():
     """Контекстный менеджер для работы с БД"""
