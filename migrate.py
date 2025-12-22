@@ -28,7 +28,8 @@ def run_migrations():
         db_url = os.getenv("DATABASE_URL")
         if not db_url:
             logger.error("DATABASE_URL environment variable is not set")
-            sys.exit(1)
+            logger.error("Установите DATABASE_URL в файле env или переменных окружения")
+            return False
         
         logger.info("🔄 Starting database migrations...")
         logger.info(f"📊 Database: {db_url.split('@')[1] if '@' in db_url else 'local'}")
@@ -39,7 +40,6 @@ def run_migrations():
         alembic_cfg.set_main_option("sqlalchemy.url", db_url)
         
         # Настраиваем логирование Alembic на stdout
-        import sys
         import logging as alembic_logging
         alembic_logger = alembic_logging.getLogger('alembic')
         alembic_logger.setLevel(logging.INFO)
