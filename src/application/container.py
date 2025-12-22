@@ -17,8 +17,15 @@ class ApplicationContainer(containers.DeclarativeContainer):
     route_repository = providers.Singleton(RouteRepository)
     call_status_repository = providers.Singleton(CallStatusRepository)
     
+    # Services
+    from src.application.services.order_service import OrderService
+    order_service = providers.Factory(
+        OrderService,
+        order_repository=order_repository,
+        call_status_repository=call_status_repository
+    )
+    
     # Application Services будут добавлены на следующих этапах
-    # order_service = providers.Factory(...)
     # route_service = providers.Factory(...)
 
 

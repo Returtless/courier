@@ -159,10 +159,11 @@ class OrderHandlers:
                         except Exception as e:
                             logger.warning(f"⚠️ Не удалось распарсить временное окно '{time_window}': {e}")
                 
-                # Преобразуем словарь в объект Order
-                order = Order(**order_data)
-                logger.info(f"💾 Вызов db_service.save_order для user_id={user_id}, order_number={order.order_number}, partial_update={is_overwrite}")
-                self.parent.db_service.save_order(user_id, order, today, partial_update=is_overwrite)
+                # Используем OrderService для сохранения заказа
+                from src.application.dto.order_dto import CreateOrderDTO
+                create_dto = CreateOrderDTO(**order_data)
+                logger.info(f"💾 Вызов order_service.create_order для user_id={user_id}, order_number={create_dto.order_number}")
+                self.parent.order_service.create_order(user_id, create_dto, today)
                 action_result = "перезаписан" if is_overwrite else "сохранен"
                 logger.info(f"✅ Заказ успешно {action_result} в БД: order_number={order.order_number}, user_id={user_id}")
                 
@@ -410,7 +411,16 @@ class OrderHandlers:
             order_number = message.text.strip()
             user_id = message.from_user.id
             
-            order = self.parent.db_service.get_order_by_number(user_id, order_number)
+            order_dto = self.parent.order_service.get_order_by_number(user_id, order_number)
+            if not order_dto:
+                self.bot.reply_to(
+                    message,
+                    f"❌ Заказ №{order_number} не найден",
+                    reply_markup=self.parent._orders_menu_markup(user_id)
+                )
+                return
+            # Преобразуем DTO в словарь для совместимости
+            order = order_dto.dict()
             if order:
                 self.parent.update_user_state(user_id, 'searching_order_by_number', {})
                 self.process_search_order_by_number(message)
@@ -498,7 +508,8 @@ class OrderHandlers:
             order_exists = False
             if order_data.get('order_number'):
                 today = date.today()
-                existing_order = self.parent.db_service.get_order_by_number(user_id, order_data['order_number'], today)
+                existing_order_dto = self.parent.order_service.get_order_by_number(user_id, order_data['order_number'], today)
+                existing_order = existing_order_dto.dict() if existing_order_dto else None
                 if existing_order:
                     order_exists = True
                     logger.info(f"⚠️ Заказ {order_data['order_number']} уже существует в БД для user_id={user_id}, date={today}")
@@ -1076,24 +1087,16 @@ class OrderHandlers:
         """Показать детали заказа с кнопкой Доставлен"""
         today = date.today()
         
-        # Загружаем из БД
+        # Загружаем заказ через OrderService
         try:
-            orders_data = self.parent.db_service.get_today_orders(user_id)
+            order_dto = self.parent.order_service.get_order_by_number(user_id, order_number, today)
+            if not order_dto:
+                self.bot.send_message(chat_id, f"❌ Заказ №{order_number} не найден", reply_markup=self.parent._main_menu_markup())
+                return
+            order_data = order_dto.dict()
         except Exception as e:
-            logger.error(f"Ошибка загрузки заказов из БД: {e}", exc_info=True)
+            logger.error(f"Ошибка загрузки заказа из БД: {e}", exc_info=True)
             self.bot.send_message(chat_id, f"❌ Ошибка загрузки данных: {str(e)}", reply_markup=self.parent._main_menu_markup())
-            return
-        
-        order_found = False
-        order_data = None
-        for od in orders_data:
-            if od.get('order_number') == order_number:
-                order_found = True
-                order_data = od
-                break
-        
-        if not order_found:
-            self.bot.send_message(chat_id, f"❌ Заказ №{order_number} не найден", reply_markup=self.parent._main_menu_markup())
             return
         
         # Преобразуем строки времени обратно в time объекты
@@ -1245,10 +1248,8 @@ class OrderHandlers:
         """Пометить заказ как доставленный"""
         today = date.today()
         
-        # Обновляем в БД
-        updated = self.parent.db_service.update_order(
-            user_id, order_number, {'status': 'delivered'}, today
-        )
+        # Обновляем статус через OrderService
+        updated = self.parent.order_service.mark_delivered(user_id, order_number, today)
         
         if updated:
             # Очищаем маршрут из state (но оставляем в БД)
@@ -1932,9 +1933,11 @@ class OrderHandlers:
             # Удаляем из updates, чтобы не пытаться обновить в БД
             return
         
-            # Обновляем в БД
+            # Обновляем через OrderService
         try:
-            self.parent.db_service.update_order(user_id, order_number, updates, today)
+            from src.application.dto.order_dto import UpdateOrderDTO
+            update_dto = UpdateOrderDTO(**updates)
+            self.parent.order_service.update_order(user_id, order_number, update_dto, today)
             
             # Обновляем call_status актуальными данными из OrderDB
             # Это нужно для того, чтобы напоминания о звонках использовали актуальные данные

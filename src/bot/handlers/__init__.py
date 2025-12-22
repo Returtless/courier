@@ -10,6 +10,7 @@ from src.services.db_service import DatabaseService
 from src.services.call_notifier import CallNotifier
 from src.services.user_settings_service import UserSettingsService
 from src.services.credentials_service import CredentialsService
+from src.application.container import get_container
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,10 @@ class CourierBot:
         self.call_notifier = CallNotifier(bot, self)
         self.settings_service = UserSettingsService()
         self.credentials_service = CredentialsService()
+        
+        # Application Services (из DI контейнера)
+        container = get_container()
+        self.order_service = container.order_service()
         
         # Состояния пользователей
         self.user_states = {}  # user_id -> state data

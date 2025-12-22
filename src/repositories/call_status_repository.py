@@ -280,4 +280,40 @@ class CallStatusRepository(BaseRepository[CallStatusDB]):
             logger.debug(f"✅ Обновлен телефон в call_status для заказа {order_number}")
             return True
         return False
+    
+    def get_by_user_and_date(
+        self, 
+        user_id: int, 
+        call_date: date, 
+        session: Session = None
+    ) -> List[CallStatusDB]:
+        """
+        Получить все статусы звонков пользователя за дату
+        
+        Args:
+            user_id: ID пользователя
+            call_date: Дата звонков
+            session: Сессия БД (опционально)
+            
+        Returns:
+            Список статусов звонков
+        """
+        if session is None:
+            with get_db_session() as session:
+                return self._get_by_user_and_date(user_id, call_date, session)
+        return self._get_by_user_and_date(user_id, call_date, session)
+    
+    def _get_by_user_and_date(
+        self, 
+        user_id: int, 
+        call_date: date, 
+        session: Session
+    ) -> List[CallStatusDB]:
+        """Внутренний метод получения статусов по пользователю и дате"""
+        return session.query(CallStatusDB).filter(
+            and_(
+                CallStatusDB.user_id == user_id,
+                CallStatusDB.call_date == call_date
+            )
+        ).all()
 
