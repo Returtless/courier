@@ -8,6 +8,7 @@ from telebot import types
 
 from src.application.interfaces.notifier import AbstractNotifier
 from src.application.dto.call_dto import CallNotificationDTO
+from src.utils.formatters import CallFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -38,18 +39,15 @@ class TelegramNotifier(AbstractNotifier):
             True если успешно отправлено, False в случае ошибки
         """
         try:
-            # Формируем текст уведомления
-            if is_retry:
-                text = (
-                    f"📞 <b>Повторное уведомление!</b>\n\n"
-                    f"👤 {notification.customer_name or 'Клиент'}\n"
-                    f"📦 Заказ №{notification.order_number}\n"
-                    f"📱 {notification.phone}\n"
-                    f"🕐 Время: {notification.call_time.strftime('%H:%M')}\n"
-                    f"🔄 Попытка: {notification.attempts + 1 if hasattr(notification, 'attempts') else 1}"
-                )
-            else:
-                text = notification.message
+            # Используем форматтер для создания текста уведомления
+            text = CallFormatter.format_call_notification(
+                order_number=notification.order_number,
+                customer_name=notification.customer_name,
+                phone=notification.phone,
+                call_time=notification.call_time,
+                is_retry=is_retry,
+                attempts=notification.attempts
+            )
             
             # Создаем inline клавиатуру с кнопками
             markup = types.InlineKeyboardMarkup()
