@@ -1,100 +1,157 @@
 """
-Unit-тесты для CallNotifier (сервис уведомлений о звонках)
+Тесты для CallNotifier
 """
 import pytest
-from datetime import datetime, date, timedelta
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, MagicMock
+from datetime import date, datetime
 from src.services.call_notifier import CallNotifier
-from src.models.order import CallStatusDB
+from src.application.services.call_service import CallService
+from src.bot.services.telegram_notifier import TelegramNotifier
+from src.application.dto.call_dto import CallNotificationDTO
 
 
-@pytest.mark.unit
-class TestCallNotifierCreation:
-    """Тесты создания записей о звонках"""
+@pytest.fixture
+def mock_call_service():
+    """Мок CallService"""
+    return Mock(spec=CallService)
+
+
+@pytest.fixture
+def mock_notifier():
+    """Мок Notifier"""
+    return Mock(spec=TelegramNotifier)
+
+
+@pytest.fixture
+def call_notifier(mock_call_service, mock_notifier):
+    """CallNotifier с моками"""
+    return CallNotifier(mock_call_service, mock_notifier)
+
+
+@pytest.fixture
+def sample_notification():
+    """Пример уведомления"""
+    return CallNotificationDTO(
+        call_status_id=1,
+        user_id=123,
+        order_number="12345",
+        call_time=datetime.now(),
+        phone="+79111234567",
+        customer_name="Иван Иванов",
+        message="Тестовое уведомление",
+        attempts=0
+    )
+
+
+class TestCallNotifier:
+    """Тесты для CallNotifier"""
     
-    @patch('src.services.call_notifier.get_db_session')
-    def test_create_new_call_status(self, mock_session, mock_telegram_bot):
-        """Создание новой записи о звонке"""
-        session = MagicMock()
-        mock_session.return_value.__enter__.return_value = session
-        session.query.return_value.filter.return_value.first.return_value = None
+    def test_start(self, call_notifier):
+        """Тест запуска CallNotifier"""
+        assert not call_notifier.running
+        call_notifier.start()
+        assert call_notifier.running
+        assert call_notifier.thread is not None
+        call_notifier.stop()
+    
+    def test_stop(self, call_notifier):
+        """Тест остановки CallNotifier"""
+        call_notifier.start()
+        assert call_notifier.running
+        call_notifier.stop()
+        assert not call_notifier.running
+    
+    def test_check_pending_calls(
+        self,
+        call_notifier,
+        mock_call_service,
+        mock_notifier,
+        sample_notification
+    ):
+        """Тест проверки pending звонков"""
+        today = date.today()
+        mock_call_service.check_pending_calls.return_value = [sample_notification]
+        mock_notifier.send_call_notification.return_value = True
         
-        call_notifier = CallNotifier(mock_telegram_bot, Mock())
+        call_notifier._check_pending_calls()
         
-        call_time = datetime(2025, 12, 15, 12, 50)
+        mock_call_service.check_pending_calls.assert_called_once_with(
+            user_id=None,
+            call_date=today
+        )
+        mock_notifier.send_call_notification.assert_called_once_with(
+            sample_notification,
+            is_retry=False
+        )
+        mock_call_service.mark_notification_sent.assert_called_once_with(
+            sample_notification.call_status_id,
+            is_retry=False
+        )
+    
+    def test_check_retry_calls(
+        self,
+        call_notifier,
+        mock_call_service,
+        mock_notifier,
+        sample_notification
+    ):
+        """Тест проверки retry звонков"""
+        today = date.today()
+        mock_call_service.check_retry_calls.return_value = [sample_notification]
+        mock_notifier.send_call_notification.return_value = True
         
-        call_notifier.create_call_status(
-            user_id=123,
-            order_number="12345",
+        call_notifier._check_retry_calls()
+        
+        mock_call_service.check_retry_calls.assert_called_once_with(
+            user_id=None,
+            call_date=today
+        )
+        mock_notifier.send_call_notification.assert_called_once_with(
+            sample_notification,
+            is_retry=True
+        )
+        mock_call_service.mark_notification_sent.assert_called_once_with(
+            sample_notification.call_status_id,
+            is_retry=True
+        )
+    
+    def test_create_call_status(
+        self,
+        call_notifier,
+        mock_call_service
+    ):
+        """Тест создания статуса звонка"""
+        from src.application.dto.call_dto import CreateCallStatusDTO, CallStatusDTO
+        
+        user_id = 123
+        order_number = "12345"
+        call_time = datetime.now()
+        phone = "+79111234567"
+        customer_name = "Иван Иванов"
+        call_date = date.today()
+        
+        expected_dto = CallStatusDTO(
+            id=1,
+            order_number=order_number,
             call_time=call_time,
-            phone="+79991234567",
-            customer_name="Иван Иванов"
+            phone=phone,
+            customer_name=customer_name,
+            status="pending"
+        )
+        mock_call_service.create_call_status.return_value = expected_dto
+        
+        result = call_notifier.create_call_status(
+            user_id=user_id,
+            order_number=order_number,
+            call_time=call_time,
+            phone=phone,
+            customer_name=customer_name,
+            call_date=call_date
         )
         
-        # Проверяем создание
-        assert session.add.called
-        assert session.commit.called
-        
-        # Проверяем параметры
-        added_status = session.add.call_args[0][0]
-        assert added_status.user_id == 123
-        assert added_status.order_number == "12345"
-        assert added_status.call_time == call_time
-        assert added_status.phone == "+79991234567"
-        assert added_status.customer_name == "Иван Иванов"
-        assert added_status.status == "pending"
-        assert added_status.attempts == 0
-    
-    @patch('src.services.call_notifier.get_db_session')
-    def test_update_existing_automatic_call_status(self, mock_session, mock_telegram_bot):
-        """Обновление существующей автоматической записи"""
-        session = MagicMock()
-        mock_session.return_value.__enter__.return_value = session
-        
-        existing = Mock(spec=CallStatusDB)
-        existing.is_manual = False
-        existing.status = "pending"
-        session.query.return_value.filter.return_value.first.return_value = existing
-        
-        call_notifier = CallNotifier(mock_telegram_bot, Mock())
-        
-        new_call_time = datetime(2025, 12, 15, 13, 0)
-        
-        call_notifier.create_call_status(
-            user_id=123,
-            order_number="12345",
-            call_time=new_call_time,
-            phone="+79999999999",
-            is_manual=False
-        )
-        
-        # Проверяем обновление
-        assert existing.call_time == new_call_time
-        assert existing.phone == "+79999999999"
-        assert session.commit.called
-
-
-@pytest.mark.unit
-class TestCallNotifierEdgeCases:
-    """Тесты граничных случаев"""
-    
-    @patch('src.services.call_notifier.get_db_session')
-    def test_create_call_status_without_phone(self, mock_session, mock_telegram_bot):
-        """Создание call_status без телефона (допустимо)"""
-        session = MagicMock()
-        mock_session.return_value.__enter__.return_value = session
-        session.query.return_value.filter.return_value.first.return_value = None
-        
-        call_notifier = CallNotifier(mock_telegram_bot, Mock())
-        
-        # Создаем без телефона
-        call_notifier.create_call_status(
-            user_id=123,
-            order_number="12345",
-            call_time=datetime(2025, 12, 15, 12, 50),
-            phone="Не указан"  # Или None
-        )
-        
-        # Проверяем, что запись создана
-        assert session.add.called
-        assert session.commit.called
+        assert result == expected_dto
+        mock_call_service.create_call_status.assert_called_once()
+        call_args = mock_call_service.create_call_status.call_args
+        assert call_args[0][0] == user_id
+        assert isinstance(call_args[0][1], CreateCallStatusDTO)
+        assert call_args[0][2] == call_date

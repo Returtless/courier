@@ -88,13 +88,33 @@ class CallStatusRepository(BaseRepository[CallStatusDB]):
         session: Session
     ) -> List[CallStatusDB]:
         """Внутренний метод получения pending звонков"""
-        return session.query(CallStatusDB).filter(
-            and_(
-                CallStatusDB.user_id == user_id,
-                CallStatusDB.call_date == call_date,
-                CallStatusDB.status == "pending"
-            )
-        ).all()
+        filters = [
+            CallStatusDB.call_date == call_date,
+            CallStatusDB.status == "pending"
+        ]
+        if user_id is not None:
+            filters.append(CallStatusDB.user_id == user_id)
+        return session.query(CallStatusDB).filter(and_(*filters)).all()
+    
+    def get_all_pending_calls(
+        self,
+        call_date: date,
+        session: Session = None
+    ) -> List[CallStatusDB]:
+        """
+        Получить все pending звонки за дату (для всех пользователей)
+        
+        Args:
+            call_date: Дата звонков
+            session: Сессия БД (опционально)
+            
+        Returns:
+            Список pending звонков
+        """
+        if session is None:
+            with get_db_session() as session:
+                return self._get_pending_calls(None, call_date, session)
+        return self._get_pending_calls(None, call_date, session)
     
     def get_confirmed_calls(
         self, 
@@ -316,4 +336,113 @@ class CallStatusRepository(BaseRepository[CallStatusDB]):
                 CallStatusDB.call_date == call_date
             )
         ).all()
+    
+    def get_retry_calls(
+        self,
+        user_id: int,
+        call_date: date,
+        max_time: datetime,
+        max_attempts: int,
+        session: Session = None
+    ) -> List[CallStatusDB]:
+        """
+        Получить звонки для повторной попытки
+        
+        Args:
+            user_id: ID пользователя (None для всех пользователей)
+            call_date: Дата звонков
+            max_time: Максимальное время (сейчас)
+            max_attempts: Максимальное количество попыток
+            session: Сессия БД (опционально)
+            
+        Returns:
+            Список звонков для повторной попытки
+        """
+        if session is None:
+            with get_db_session() as session:
+                return self._get_retry_calls(user_id, call_date, max_time, max_attempts, session)
+        return self._get_retry_calls(user_id, call_date, max_time, max_attempts, session)
+    
+    def _get_retry_calls(
+        self,
+        user_id: int,
+        call_date: date,
+        max_time: datetime,
+        max_attempts: int,
+        session: Session
+    ) -> List[CallStatusDB]:
+        """Внутренний метод получения звонков для повторной попытки"""
+        filters = [
+            CallStatusDB.call_date == call_date,
+            CallStatusDB.status == "rejected",
+            CallStatusDB.next_attempt_time <= max_time,
+            CallStatusDB.attempts < max_attempts
+        ]
+        if user_id is not None:
+            filters.append(CallStatusDB.user_id == user_id)
+        return session.query(CallStatusDB).filter(and_(*filters)).all()
+    
+    def get_all_retry_calls(
+        self,
+        call_date: date,
+        max_time: datetime,
+        max_attempts: int,
+        session: Session = None
+    ) -> List[CallStatusDB]:
+        """
+        Получить все звонки для повторной попытки (для всех пользователей)
+        
+        Args:
+            call_date: Дата звонков
+            max_time: Максимальное время (сейчас)
+            max_attempts: Максимальное количество попыток
+            session: Сессия БД (опционально)
+            
+        Returns:
+            Список звонков для повторной попытки
+        """
+        if session is None:
+            with get_db_session() as session:
+                return self._get_retry_calls(None, call_date, max_time, max_attempts, session)
+        return self._get_retry_calls(None, call_date, max_time, max_attempts, session)
+    
+    def mark_as_sent(
+        self,
+        call_status_id: int,
+        is_retry: bool = False,
+        session: Session = None
+    ) -> bool:
+        """
+        Пометить звонок как отправленный
+        
+        Args:
+            call_status_id: ID статуса звонка
+            is_retry: True если это повторная попытка
+            session: Сессия БД (опционально)
+            
+        Returns:
+            True если успешно
+        """
+        if session is None:
+            with get_db_session() as session:
+                return self._mark_as_sent(call_status_id, is_retry, session)
+        return self._mark_as_sent(call_status_id, is_retry, session)
+    
+    def _mark_as_sent(
+        self,
+        call_status_id: int,
+        is_retry: bool,
+        session: Session
+    ) -> bool:
+        """Внутренний метод пометки как отправленного"""
+        call_status = session.query(CallStatusDB).filter_by(id=call_status_id).first()
+        if call_status:
+            call_status.attempts += 1
+            call_status.status = "sent"
+            if is_retry:
+                call_status.next_attempt_time = None
+            session.commit()
+            logger.debug(f"✅ Помечен как отправленный: call_status_id={call_status_id}, попытка={call_status.attempts}")
+            return True
+        return False
 

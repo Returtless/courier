@@ -52,7 +52,7 @@ class CallService:
     
     def check_pending_calls(
         self,
-        user_id: int,
+        user_id: Optional[int] = None,
         call_date: date = None,
         session: Session = None
     ) -> List[CallNotificationDTO]:
@@ -76,9 +76,13 @@ class CallService:
             now = now.replace(tzinfo=None)
         
         # Получаем pending звонки
-        pending_calls = self.call_status_repository.get_pending_calls(
-            user_id, call_date, session
-        )
+        if user_id is None:
+            # Для всех пользователей
+            pending_calls = self.call_status_repository.get_all_pending_calls(call_date, session)
+        else:
+            pending_calls = self.call_status_repository.get_pending_calls(
+                user_id, call_date, session
+            )
         
         # Фильтруем звонки, время которых наступило (в пределах последних 10 минут)
         time_threshold = now - timedelta(minutes=10)
@@ -89,7 +93,7 @@ class CallService:
             if call.call_time <= now and call.call_time >= time_threshold:
                 # Проверяем, что заказ не доставлен
                 order = self.order_repository.get_by_number(
-                    user_id, call.order_number, call_date, session
+                    call.user_id, call.order_number, call_date, session
                 )
                 
                 if order and order.status == "delivered":
@@ -111,19 +115,21 @@ class CallService:
                 message = self._build_notification_message(call, order)
                 notifications.append(CallNotificationDTO(
                     call_status_id=call.id,
+                    user_id=call.user_id,
                     order_number=call.order_number,
                     call_time=call.call_time,
                     phone=call.phone,
                     customer_name=call.customer_name,
                     arrival_time=call.arrival_time,
-                    message=message
+                    message=message,
+                    attempts=call.attempts
                 ))
         
         return notifications
     
     def check_retry_calls(
         self,
-        user_id: int,
+        user_id: Optional[int] = None,
         call_date: date = None,
         session: Session = None
     ) -> List[CallNotificationDTO]:
@@ -145,39 +151,29 @@ class CallService:
         if now.tzinfo is not None:
             now = now.replace(tzinfo=None)
         
-        # Получаем rejected звонки
-        # TODO: Добавить метод get_rejected_calls в CallStatusRepository
-        # Пока используем прямой запрос
-        from src.database.connection import get_db_session
-        from src.models.order import CallStatusDB
-        from sqlalchemy import and_
-        
-        if session:
-            retry_calls = session.query(CallStatusDB).filter(
-                and_(
-                    CallStatusDB.user_id == user_id,
-                    CallStatusDB.call_date == call_date,
-                    CallStatusDB.status == "rejected",
-                    CallStatusDB.next_attempt_time <= now,
-                    CallStatusDB.attempts < 3
-                )
-            ).all()
+        # Получаем rejected звонки через репозиторий
+        if user_id is None:
+            # Для всех пользователей - используем максимальное значение попыток по умолчанию
+            max_attempts = 3  # Значение по умолчанию
+            retry_calls = self.call_status_repository.get_all_retry_calls(
+                call_date, now, max_attempts, session
+            )
         else:
-            with get_db_session() as session:
-                retry_calls = session.query(CallStatusDB).filter(
-                    and_(
-                        CallStatusDB.user_id == user_id,
-                        CallStatusDB.call_date == call_date,
-                        CallStatusDB.status == "rejected",
-                        CallStatusDB.next_attempt_time <= now,
-                        CallStatusDB.attempts < 3
-                    )
-                ).all()
+            # Получаем настройки пользователя
+            user_settings = self.settings_service.get_settings(user_id)
+            retry_calls = self.call_status_repository.get_retry_calls(
+                user_id, call_date, now, user_settings.call_max_attempts, session
+            )
         
         notifications = []
         for call in retry_calls:
+            # Получаем настройки пользователя для проверки максимального количества попыток
+            call_user_settings = self.settings_service.get_settings(call.user_id)
+            if call.attempts >= call_user_settings.call_max_attempts:
+                continue
+            
             order = self.order_repository.get_by_number(
-                user_id, call.order_number, call_date, session
+                call.user_id, call.order_number, call_date, session
             )
             
             if order and order.status == "delivered":
@@ -186,15 +182,36 @@ class CallService:
             message = self._build_notification_message(call, order, is_retry=True)
             notifications.append(CallNotificationDTO(
                 call_status_id=call.id,
+                user_id=call.user_id,
                 order_number=call.order_number,
                 call_time=call.call_time,
                 phone=call.phone,
                 customer_name=call.customer_name,
                 arrival_time=call.arrival_time,
-                message=message
+                message=message,
+                attempts=call.attempts
             ))
         
         return notifications
+    
+    def mark_notification_sent(
+        self,
+        call_status_id: int,
+        is_retry: bool = False,
+        session: Session = None
+    ) -> bool:
+        """
+        Пометить уведомление как отправленное
+        
+        Args:
+            call_status_id: ID статуса звонка
+            is_retry: True если это повторная попытка
+            session: Сессия БД (опционально)
+            
+        Returns:
+            True если успешно
+        """
+        return self.call_status_repository.mark_as_sent(call_status_id, is_retry, session)
     
     def confirm_call(
         self,

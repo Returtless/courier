@@ -26,7 +26,6 @@ class CourierBot:
         self.maps_service = MapsService()
         self.traffic_monitor = TrafficMonitor(self.maps_service)
         self.db_service = DatabaseService()
-        self.call_notifier = CallNotifier(bot, self)
         self.settings_service = UserSettingsService()
         self.credentials_service = CredentialsService()
         
@@ -35,6 +34,11 @@ class CourierBot:
         self.order_service = container.order_service()
         self.route_service = container.route_service()
         self.call_service = container.call_service()
+        
+        # Bot services (требуют bot, создаются после инициализации)
+        from src.bot.services.telegram_notifier import TelegramNotifier
+        telegram_notifier = TelegramNotifier(bot)
+        self.call_notifier = CallNotifier(self.call_service, telegram_notifier)
         
         # Состояния пользователей
         self.user_states = {}  # user_id -> state data

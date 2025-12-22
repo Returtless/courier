@@ -46,6 +46,9 @@ class ApplicationContainer(containers.DeclarativeContainer):
         call_status_repository=call_status_repository,
         order_repository=order_repository
     )
+    
+    # Bot services (требуют bot, поэтому создаются через Factory с bot)
+    # TelegramNotifier и CallNotifier будут созданы в CourierBot после инициализации bot
 
 
 # Глобальный контейнер

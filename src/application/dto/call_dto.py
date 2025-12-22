@@ -28,12 +28,14 @@ class CallStatusDTO(BaseModel):
 class CallNotificationDTO(BaseModel):
     """DTO для уведомления о звонке"""
     call_status_id: int
+    user_id: int
     order_number: str
     call_time: datetime
     phone: str
     customer_name: Optional[str] = None
     arrival_time: Optional[datetime] = None
     message: str  # Текст уведомления
+    attempts: int = 0
 
 
 class CreateCallStatusDTO(BaseModel):
