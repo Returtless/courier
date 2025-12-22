@@ -1,15 +1,27 @@
 """
-Скрипт для тестирования основных функций бота после рефакторинга
+Скрипт для локального тестирования с SQLite (без Docker)
+Использует SQLite вместо PostgreSQL для быстрого тестирования
 """
 import sys
 import os
 import logging
 from datetime import date, datetime, time
 from dotenv import load_dotenv
-from src.database.connection import get_db_session
 
-# Загружаем переменные окружения из файла env
-load_dotenv()
+# Принудительно используем SQLite для локального тестирования
+os.environ['DATABASE_URL'] = 'sqlite:///./test_courier_bot.db'
+
+# Загружаем остальные переменные окружения из файла env (если есть)
+if os.path.exists('env'):
+    load_dotenv('env')
+    # Переопределяем DATABASE_URL на SQLite
+    os.environ['DATABASE_URL'] = 'sqlite:///./test_courier_bot.db'
+else:
+    # Если файла env нет, создаем минимальную конфигурацию
+    os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test_token')
+    os.environ.setdefault('DATABASE_URL', 'sqlite:///./test_courier_bot.db')
+
+from src.database.connection import get_db_session
 
 # Настройка логирования
 logging.basicConfig(
@@ -17,6 +29,26 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def setup_database():
+    """Настройка БД - применение миграций"""
+    logger.info("=" * 60)
+    logger.info("Настройка БД: применение миграций (SQLite)")
+    logger.info("=" * 60)
+    
+    try:
+        from migrate import run_migrations
+        logger.info("📝 Применение миграций...")
+        result = run_migrations()
+        if result:
+            logger.info("✅ Миграции применены успешно")
+            return True
+        else:
+            logger.warning("⚠️ Миграции не применены (возможно, уже применены)")
+            return True  # Не критично, если миграции уже применены
+    except Exception as e:
+        logger.error(f"❌ Ошибка применения миграций: {e}", exc_info=True)
+        return False
 
 def test_services_initialization():
     """Тест 1: Проверка инициализации сервисов"""
@@ -87,7 +119,7 @@ def test_order_service():
             orders = order_service.get_orders_by_date(test_user_id, test_date, session)
             logger.info(f"✅ Получено заказов за дату: {len(orders)}")
             
-            # Удаляем тестовый заказ (через прямой запрос, так как метод delete_order может отсутствовать)
+            # Удаляем тестовый заказ (через прямой запрос)
             from src.models.order import OrderDB
             test_order = session.query(OrderDB).filter(
                 OrderDB.user_id == test_user_id,
@@ -208,7 +240,7 @@ def test_call_service():
                     logger.error("❌ Статус звонка не найден по ID")
                     return False
             
-            # Удаляем статус звонка (через прямой запрос, так как метод delete_by_order может отсутствовать)
+            # Удаляем статус звонка (через прямой запрос)
             from src.models.order import CallStatusDB
             call_status_db = session.query(CallStatusDB).filter(
                 CallStatusDB.user_id == test_user_id,
@@ -261,29 +293,19 @@ def test_bot_initialization():
         logger.error(f"❌ Ошибка инициализации CourierBot: {e}", exc_info=True)
         return False
 
-def setup_database():
-    """Настройка БД - применение миграций"""
-    logger.info("=" * 60)
-    logger.info("Настройка БД: применение миграций")
-    logger.info("=" * 60)
-    
+def cleanup_test_db():
+    """Очистка тестовой БД"""
     try:
-        from migrate import run_migrations
-        logger.info("📝 Применение миграций...")
-        result = run_migrations()
-        if result:
-            logger.info("✅ Миграции применены успешно")
-            return True
-        else:
-            logger.warning("⚠️ Миграции не применены (возможно, уже применены)")
-            return True  # Не критично, если миграции уже применены
+        test_db_path = './test_courier_bot.db'
+        if os.path.exists(test_db_path):
+            os.remove(test_db_path)
+            logger.info(f"✅ Тестовая БД удалена: {test_db_path}")
     except Exception as e:
-        logger.error(f"❌ Ошибка применения миграций: {e}", exc_info=True)
-        return False
+        logger.warning(f"⚠️ Не удалось удалить тестовую БД: {e}")
 
 def main():
     """Запуск всех тестов"""
-    logger.info("🚀 Начало тестирования после рефакторинга")
+    logger.info("🚀 Начало локального тестирования (SQLite)")
     logger.info("")
     
     # Сначала применяем миграции
@@ -322,6 +344,9 @@ def main():
     logger.info(f"Всего тестов: {len(results)}")
     logger.info(f"Пройдено: {passed}")
     logger.info(f"Провалено: {failed}")
+    
+    # Опционально: удаляем тестовую БД
+    # cleanup_test_db()
     
     if failed == 0:
         logger.info("")

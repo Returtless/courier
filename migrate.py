@@ -47,26 +47,35 @@ def run_migrations():
         handler.setFormatter(logging.Formatter('%(levelname)-5.5s [%(name)s] %(message)s'))
         alembic_logger.addHandler(handler)
         
-        # Проверяем текущую версию через прямой SQL запрос
+        # Проверяем текущую версию через прямой SQL запрос (если таблица существует)
+        current_version = None
         try:
-            from sqlalchemy import create_engine, text
+            from sqlalchemy import create_engine, text, inspect
             engine = create_engine(db_url)
-            with engine.begin() as conn:  # Используем begin() для автоматического коммита
-                result = conn.execute(text("SELECT version_num FROM alembic_version LIMIT 1"))
-                current_version = result.scalar()
-                if current_version:
-                    logger.info(f"📌 Текущая версия миграций в БД: {current_version}")
-                    
-                    # Если версия 002 (старая удаленная миграция), обновляем на 000
-                    if current_version == '002':
-                        logger.warning("⚠️ Обнаружена версия '002' (старая удаленная миграция)")
-                        logger.info("🔄 Обновление версии в БД на '000'...")
-                        conn.execute(text("UPDATE alembic_version SET version_num = '000'"))
-                        logger.info("✅ Версия обновлена на '000'")
-                else:
-                    logger.info("📌 Таблица alembic_version пуста - миграции не применялись")
+            inspector = inspect(engine)
+            
+            # Проверяем, существует ли таблица alembic_version
+            if inspector.has_table('alembic_version'):
+                with engine.begin() as conn:
+                    result = conn.execute(text("SELECT version_num FROM alembic_version LIMIT 1"))
+                    current_version = result.scalar()
+                    if current_version:
+                        logger.info(f"📌 Текущая версия миграций в БД: {current_version}")
+                        
+                        # Если версия 002 (старая удаленная миграция), обновляем на 000
+                        if current_version == '002':
+                            logger.warning("⚠️ Обнаружена версия '002' (старая удаленная миграция)")
+                            logger.info("🔄 Обновление версии в БД на '000'...")
+                            conn.execute(text("UPDATE alembic_version SET version_num = '000'"))
+                            logger.info("✅ Версия обновлена на '000'")
+                            current_version = '000'
+                    else:
+                        logger.info("📌 Таблица alembic_version пуста - миграции не применялись")
+            else:
+                logger.info("📌 Таблица alembic_version не существует - применяем миграции с нуля")
         except Exception as e:
             logger.warning(f"⚠️ Не удалось проверить версию миграций: {e}")
+            logger.info("🔄 Продолжаем применение миграций...")
         
         # Проверяем, нужны ли миграции
         logger.info("🔄 Проверка необходимости миграций...")
@@ -74,20 +83,28 @@ def run_migrations():
         script = ScriptDirectory.from_config(alembic_cfg)
         head_rev = script.get_current_head()
         
-        # Получаем текущую версию из БД
-        from sqlalchemy import create_engine, text
-        engine = create_engine(db_url)
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT version_num FROM alembic_version LIMIT 1"))
-            current_rev = result.scalar()
-        
-        logger.info(f"📌 Текущая версия в БД: {current_rev}")
+        logger.info(f"📌 Текущая версия в БД: {current_version or 'нет (таблицы не существует)'}")
         logger.info(f"📌 Head версия: {head_rev}")
         
-        if current_rev == head_rev:
+        # Если таблицы нет или версия не совпадает - применяем миграции
+        if current_version is None:
+            logger.info("🔄 Таблица alembic_version не существует - применяем все миграции с нуля...")
+            try:
+                command.upgrade(alembic_cfg, "head")
+                logger.info("✅ Миграции применены успешно")
+            except SystemExit as se:
+                if se.code is None or se.code == 0:
+                    logger.info("✅ Миграции применены (Alembic завершился с кодом 0)")
+                else:
+                    logger.error(f"❌ SystemExit с ненулевым кодом {se.code}")
+                    raise
+            except Exception as upgrade_error:
+                logger.error(f"❌ Ошибка при применении миграций: {upgrade_error}", exc_info=True)
+                raise
+        elif current_version == head_rev:
             logger.info("✅ База данных уже на актуальной версии, миграции не требуются")
         else:
-            logger.info(f"🔄 Применение миграций от {current_rev} до {head_rev}...")
+            logger.info(f"🔄 Применение миграций от {current_version} до {head_rev}...")
             try:
                 command.upgrade(alembic_cfg, "head")
                 logger.info("✅ Миграции применены успешно")
