@@ -143,61 +143,61 @@ class CallHandlers:
             
             # Проверяем количество попыток после отклонения
             if updated_call_status_dto.attempts >= user_settings.call_max_attempts:
-                    # Превышено максимальное количество попыток
-                    updated_text = (
-                        f"📞 <b>Время звонка!</b>\n\n"
-                        f"👤 {customer_info}\n"
-                        f"📦 {order_info}\n"
-                        f"📱 {call_status_dto.phone}\n"
-                        f"🕐 Время: {call_status_dto.call_time.strftime('%H:%M')}\n\n"
-                        f"❌ <b>Недозвон</b>\nПревышено количество попыток ({user_settings.call_max_attempts})"
-                    )
-                    
-                    try:
-                        self.bot.edit_message_text(
-                            updated_text,
-                            call.message.chat.id,
-                            call.message.message_id,
-                            parse_mode='HTML'
-                        )
-                    except Exception as edit_error:
-                        logger.warning(f"Ошибка обновления сообщения: {edit_error}")
-                    
-                    self.bot.answer_callback_query(call.id, f"❌ Превышено количество попыток ({user_settings.call_max_attempts})")
-                    self.bot.send_message(
+                # Превышено максимальное количество попыток
+                updated_text = (
+                    f"📞 <b>Время звонка!</b>\n\n"
+                    f"👤 {customer_info}\n"
+                    f"📦 {order_info}\n"
+                    f"📱 {call_status_dto.phone}\n"
+                    f"🕐 Время: {call_status_dto.call_time.strftime('%H:%M')}\n\n"
+                    f"❌ <b>Недозвон</b>\nПревышено количество попыток ({user_settings.call_max_attempts})"
+                )
+                
+                try:
+                    self.bot.edit_message_text(
+                        updated_text,
                         call.message.chat.id,
-                        f"❌ <b>Недозвон</b>\n\nЗаказ №{call_status_dto.order_number}\nПревышено количество попыток звонка ({user_settings.call_max_attempts})",
-                        parse_mode='HTML',
-                        reply_markup=self.parent._route_menu_markup()
+                        call.message.message_id,
+                        parse_mode='HTML'
                     )
-                else:
-                    # Планируем повторную попытку
-                    updated_text = (
-                        f"📞 <b>Время звонка!</b>\n\n"
-                        f"👤 {customer_info}\n"
-                        f"📦 {order_info}\n"
-                        f"📱 {call_status_dto.phone}\n"
-                        f"🕐 Время: {call_status_dto.call_time.strftime('%H:%M')}\n\n"
-                        f"❌ <b>Отклонено</b>\nПовтор через {user_settings.call_retry_interval_minutes} мин (попытка {updated_call_status_dto.attempts}/{user_settings.call_max_attempts})"
-                    )
-                    
-                    try:
-                        self.bot.edit_message_text(
-                            updated_text,
-                            call.message.chat.id,
-                            call.message.message_id,
-                            parse_mode='HTML'
-                        )
-                    except Exception as edit_error:
-                        logger.warning(f"Ошибка обновления сообщения: {edit_error}")
-                    
-                    self.bot.answer_callback_query(call.id, f"❌ Отклонено. Повтор через {user_settings.call_retry_interval_minutes} мин (попытка {updated_call_status_dto.attempts}/{user_settings.call_max_attempts})")
-                    self.bot.send_message(
+                except Exception as edit_error:
+                    logger.warning(f"Ошибка обновления сообщения: {edit_error}")
+                
+                self.bot.answer_callback_query(call.id, f"❌ Превышено количество попыток ({user_settings.call_max_attempts})")
+                self.bot.send_message(
+                    call.message.chat.id,
+                    f"❌ <b>Недозвон</b>\n\nЗаказ №{call_status_dto.order_number}\nПревышено количество попыток звонка ({user_settings.call_max_attempts})",
+                    parse_mode='HTML',
+                    reply_markup=self.parent._route_menu_markup()
+                )
+            else:
+                # Планируем повторную попытку
+                updated_text = (
+                    f"📞 <b>Время звонка!</b>\n\n"
+                    f"👤 {customer_info}\n"
+                    f"📦 {order_info}\n"
+                    f"📱 {call_status_dto.phone}\n"
+                    f"🕐 Время: {call_status_dto.call_time.strftime('%H:%M')}\n\n"
+                    f"❌ <b>Отклонено</b>\nПовтор через {user_settings.call_retry_interval_minutes} мин (попытка {updated_call_status_dto.attempts}/{user_settings.call_max_attempts})"
+                )
+                
+                try:
+                    self.bot.edit_message_text(
+                        updated_text,
                         call.message.chat.id,
-                        f"⏰ <b>Повторный звонок запланирован</b>\n\nЗаказ №{call_status_dto.order_number}\nПовтор через {user_settings.call_retry_interval_minutes} мин (попытка {updated_call_status_dto.attempts}/{user_settings.call_max_attempts})",
-                        parse_mode='HTML',
-                        reply_markup=self.parent._route_menu_markup()
+                        call.message.message_id,
+                        parse_mode='HTML'
                     )
+                except Exception as edit_error:
+                    logger.warning(f"Ошибка обновления сообщения: {edit_error}")
+                
+                self.bot.answer_callback_query(call.id, f"❌ Отклонено. Повтор через {user_settings.call_retry_interval_minutes} мин (попытка {updated_call_status_dto.attempts}/{user_settings.call_max_attempts})")
+                self.bot.send_message(
+                    call.message.chat.id,
+                    f"⏰ <b>Повторный звонок запланирован</b>\n\nЗаказ №{call_status_dto.order_number}\nПовтор через {user_settings.call_retry_interval_minutes} мин (попытка {updated_call_status_dto.attempts}/{user_settings.call_max_attempts})",
+                    parse_mode='HTML',
+                    reply_markup=self.parent._route_menu_markup()
+                )
         except Exception as e:
             logger.error(f"Ошибка при отклонении звонка: {e}", exc_info=True)
             self.bot.answer_callback_query(call.id, f"❌ Ошибка: {str(e)}", show_alert=True)
