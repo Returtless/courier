@@ -274,9 +274,9 @@ class ImportHandlers:
         updated_count = 0
         for order_data in orders:
             try:
-                # Проверяем, существует ли заказ уже
-                existing_orders = self.parent.db_service.get_today_orders(user_id)
-                is_existing = any(o.get('order_number') == order_data['order_number'] for o in existing_orders)
+                # Проверяем, существует ли заказ уже через OrderService
+                existing_order_dto = self.parent.order_service.get_order_by_number(user_id, order_data['order_number'], today)
+                is_existing = existing_order_dto is not None
                 
                 # Преобразуем delivery_time_window в delivery_time_start и delivery_time_end, если нужно
                 if order_data.get('delivery_time_window') and not order_data.get('delivery_time_start'):
@@ -291,10 +291,18 @@ class ImportHandlers:
                         except Exception as e:
                             logger.warning(f"⚠️ Не удалось распарсить временное окно '{time_window}': {e}")
                 
-                # Преобразуем словарь в объект Order и сохраняем/обновляем
-                order = Order(**order_data)
-                # save_order автоматически обновит существующий заказ, если он есть
-                self.parent.db_service.save_order(user_id, order, today, partial_update=False)
+                # Сохраняем/обновляем через OrderService
+                from src.application.dto.order_dto import CreateOrderDTO, UpdateOrderDTO
+                from src.database.connection import get_db_session
+                with get_db_session() as session:
+                    if is_existing:
+                        # Обновляем существующий заказ
+                        update_dto = UpdateOrderDTO(**order_data)
+                        order_dto = self.parent.order_service.update_order(user_id, order_data['order_number'], update_dto, today, session)
+                    else:
+                        # Создаем новый заказ
+                        create_dto = CreateOrderDTO(**order_data)
+                        order_dto = self.parent.order_service.create_order(user_id, create_dto, today, session)
                 
                 if is_existing:
                     updated_count += 1

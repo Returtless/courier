@@ -451,4 +451,84 @@ class RouteService:
                         manual_arrival_time=None,
                         session=session
                     )
+    
+    def delete_all_data_by_date(
+        self,
+        user_id: int,
+        order_date: date = None,
+        session: Session = None
+    ) -> Dict[str, int]:
+        """
+        Удалить все данные пользователя за указанную дату
+        
+        Args:
+            user_id: ID пользователя
+            order_date: Дата (по умолчанию сегодня)
+            session: Сессия БД (опционально)
+            
+        Returns:
+            Словарь с количеством удаленных записей по типам
+        """
+        if order_date is None:
+            order_date = date.today()
+        
+        if session is None:
+            from src.database.connection import get_db_session
+            with get_db_session() as session:
+                return self._delete_all_data_by_date(user_id, order_date, session)
+        return self._delete_all_data_by_date(user_id, order_date, session)
+    
+    def _delete_all_data_by_date(
+        self,
+        user_id: int,
+        order_date: date,
+        session: Session
+    ) -> Dict[str, int]:
+        """Внутренний метод удаления всех данных"""
+        from sqlalchemy import and_
+        from src.models.order import OrderDB, RouteDataDB, StartLocationDB, CallStatusDB
+        
+        deleted_counts = {
+            'orders': 0,
+            'routes': 0,
+            'start_locations': 0,
+            'call_statuses': 0
+        }
+        
+        # Удаляем заказы
+        orders = session.query(OrderDB).filter(
+            and_(OrderDB.user_id == user_id, OrderDB.order_date == order_date)
+        ).all()
+        deleted_counts['orders'] = len(orders)
+        for order in orders:
+            session.delete(order)
+        
+        # Удаляем маршруты
+        routes = session.query(RouteDataDB).filter(
+            and_(RouteDataDB.user_id == user_id, RouteDataDB.route_date == order_date)
+        ).all()
+        deleted_counts['routes'] = len(routes)
+        for route in routes:
+            session.delete(route)
+        
+        # Удаляем точки старта
+        start_locations = session.query(StartLocationDB).filter(
+            and_(StartLocationDB.user_id == user_id, StartLocationDB.location_date == order_date)
+        ).all()
+        deleted_counts['start_locations'] = len(start_locations)
+        for location in start_locations:
+            session.delete(location)
+        
+        # Удаляем статусы звонков
+        call_statuses = session.query(CallStatusDB).filter(
+            and_(CallStatusDB.user_id == user_id, CallStatusDB.call_date == order_date)
+        ).all()
+        deleted_counts['call_statuses'] = len(call_statuses)
+        for call_status in call_statuses:
+            session.delete(call_status)
+        
+        session.commit()
+        logger.info(f"🗑️ Удалены все данные для user_id={user_id}, date={order_date}: {deleted_counts}")
+        
+        return deleted_counts
 

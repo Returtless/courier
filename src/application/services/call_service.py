@@ -384,6 +384,28 @@ class CallService:
         
         return self._call_status_db_to_dto(call_status_db)
     
+    def get_call_status_by_id(
+        self,
+        call_status_id: int,
+        session: Session = None
+    ) -> Optional[CallStatusDTO]:
+        """
+        Получить статус звонка по ID
+        
+        Args:
+            call_status_id: ID статуса звонка
+            session: Сессия БД (опционально)
+            
+        Returns:
+            Статус звонка в формате DTO или None
+        """
+        call_status_db = self.call_status_repository.get(call_status_id, session)
+        
+        if not call_status_db:
+            return None
+        
+        return self._call_status_db_to_dto(call_status_db)
+    
     def _build_notification_message(
         self,
         call: CallStatusDB,

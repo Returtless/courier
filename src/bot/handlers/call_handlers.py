@@ -3,11 +3,9 @@
 """
 import logging
 from datetime import datetime, timedelta
-from sqlalchemy import and_
 from telebot import types
 from src.database.connection import get_db_session
-from src.models.order import CallStatusDB
-from src.services.call_notifier import get_local_now
+from src.application.services.call_service import get_local_now
 
 logger = logging.getLogger(__name__)
 
@@ -40,60 +38,69 @@ class CallHandlers:
         user_id = call.from_user.id
         
         try:
+            # Получаем статус звонка через CallService
             with get_db_session() as session:
-                # Проверяем, что звонок принадлежит этому пользователю
-                call_status = session.query(CallStatusDB).filter(
-                    and_(
-                        CallStatusDB.id == call_status_id,
-                        CallStatusDB.user_id == user_id
-                    )
-                ).first()
-                if not call_status:
+                call_status_dto = self.parent.call_service.get_call_status_by_id(call_status_id, session)
+            
+            if not call_status_dto:
+                self.bot.answer_callback_query(call.id, "❌ Запись о звонке не найдена", show_alert=True)
+                return
+            
+            # Проверяем, что звонок принадлежит этому пользователю
+            # Получаем user_id из репозитория напрямую (CallStatusDTO не содержит user_id)
+            from src.models.order import CallStatusDB
+            with get_db_session() as session:
+                call_status_db = session.query(CallStatusDB).filter_by(id=call_status_id).first()
+                if not call_status_db or call_status_db.user_id != user_id:
                     self.bot.answer_callback_query(call.id, "❌ Запись о звонке не найдена", show_alert=True)
                     return
-                
-                # Обновляем статус на confirmed
-                call_status.status = "confirmed"
-                session.commit()
-                
-                # Обновляем сообщение, убирая кнопки
-                customer_info = call_status.customer_name or "Клиент"
-                order_info = f"Заказ №{call_status.order_number}" if call_status.order_number else "Заказ"
-                
-                updated_text = (
-                    f"📞 <b>Время звонка!</b>\n\n"
-                    f"👤 {customer_info}\n"
-                    f"📦 {order_info}\n"
-                    f"📱 {call_status.phone}\n"
-                    f"🕐 Время: {call_status.call_time.strftime('%H:%M')}\n\n"
-                    f"✅ <b>Подтверждено</b>"
-                )
-                
-                try:
-                    self.bot.edit_message_text(
-                        updated_text,
-                        call.message.chat.id,
-                        call.message.message_id,
-                        parse_mode='HTML'
-                    )
-                except Exception as edit_error:
-                    logger.warning(f"Ошибка обновления сообщения: {edit_error}")
-                
-                # Запрашиваем комментарий
-                self.bot.answer_callback_query(call.id, "✅ Звонок подтвержден")
-                self.parent.update_user_state(user_id, 'state', 'waiting_for_call_comment')
-                self.parent.update_user_state(user_id, 'pending_call_status_id', call_status_id)
-                
-                markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-                markup.row("⏭️ Пропустить комментарий")
-                markup.row("⬅️ Главное меню")
-                
-                self.bot.send_message(
+            
+            # Подтверждаем звонок через CallService (без комментария пока)
+            with get_db_session() as session:
+                success = self.parent.call_service.confirm_call(user_id, call_status_id, None, session)
+            
+            if not success:
+                self.bot.answer_callback_query(call.id, "❌ Ошибка подтверждения звонка", show_alert=True)
+                return
+            
+            # Обновляем сообщение, убирая кнопки
+            customer_info = call_status_dto.customer_name or "Клиент"
+            order_info = f"Заказ №{call_status_dto.order_number}" if call_status_dto.order_number else "Заказ"
+            
+            updated_text = (
+                f"📞 <b>Время звонка!</b>\n\n"
+                f"👤 {customer_info}\n"
+                f"📦 {order_info}\n"
+                f"📱 {call_status_dto.phone}\n"
+                f"🕐 Время: {call_status_dto.call_time.strftime('%H:%M')}\n\n"
+                f"✅ <b>Подтверждено</b>"
+            )
+            
+            try:
+                self.bot.edit_message_text(
+                    updated_text,
                     call.message.chat.id,
-                    "💬 <b>Введите комментарий к звонку</b> (или нажмите кнопку чтобы пропустить):",
-                    parse_mode='HTML',
-                    reply_markup=markup
+                    call.message.message_id,
+                    parse_mode='HTML'
                 )
+            except Exception as edit_error:
+                logger.warning(f"Ошибка обновления сообщения: {edit_error}")
+            
+            # Запрашиваем комментарий
+            self.bot.answer_callback_query(call.id, "✅ Звонок подтвержден")
+            self.parent.update_user_state(user_id, 'state', 'waiting_for_call_comment')
+            self.parent.update_user_state(user_id, 'pending_call_status_id', call_status_id)
+            
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+            markup.row("⏭️ Пропустить комментарий")
+            markup.row("⬅️ Главное меню")
+            
+            self.bot.send_message(
+                call.message.chat.id,
+                "💬 <b>Введите комментарий к звонку</b> (или нажмите кнопку чтобы пропустить):",
+                parse_mode='HTML',
+                reply_markup=markup
+            )
         except Exception as e:
             logger.error(f"Ошибка при подтверждении звонка: {e}", exc_info=True)
             self.bot.answer_callback_query(call.id, f"❌ Ошибка: {str(e)}", show_alert=True)
@@ -103,37 +110,47 @@ class CallHandlers:
         user_id = call.from_user.id
         
         try:
+            # Получаем статус звонка через CallService
             with get_db_session() as session:
-                # Проверяем, что звонок принадлежит этому пользователю
-                call_status = session.query(CallStatusDB).filter(
-                    and_(
-                        CallStatusDB.id == call_status_id,
-                        CallStatusDB.user_id == user_id
-                    )
-                ).first()
-                if not call_status:
+                call_status_dto = self.parent.call_service.get_call_status_by_id(call_status_id, session)
+            
+            if not call_status_dto:
+                self.bot.answer_callback_query(call.id, "❌ Запись о звонке не найдена", show_alert=True)
+                return
+            
+            # Проверяем, что звонок принадлежит этому пользователю
+            from src.models.order import CallStatusDB
+            with get_db_session() as session:
+                call_status_db = session.query(CallStatusDB).filter_by(id=call_status_id).first()
+                if not call_status_db or call_status_db.user_id != user_id:
                     self.bot.answer_callback_query(call.id, "❌ Запись о звонке не найдена", show_alert=True)
                     return
                 
                 # Получаем настройки пользователя
                 user_settings = self.parent.settings_service.get_settings(user_id)
                 
-                customer_info = call_status.customer_name or "Клиент"
-                order_info = f"Заказ №{call_status.order_number}" if call_status.order_number else "Заказ"
+                customer_info = call_status_dto.customer_name or "Клиент"
+                order_info = f"Заказ №{call_status_dto.order_number}" if call_status_dto.order_number else "Заказ"
                 
-                # Проверяем количество попыток
-                if call_status.attempts >= user_settings.call_max_attempts:
+                # Отклоняем звонок через CallService
+                success = self.parent.call_service.reject_call(user_id, call_status_id, session)
+                
+                if not success:
+                    self.bot.answer_callback_query(call.id, "❌ Ошибка отклонения звонка", show_alert=True)
+                    return
+                
+                # Обновляем данные из БД после изменения
+                session.refresh(call_status_db)
+                
+                # Проверяем количество попыток после отклонения
+                if call_status_db.attempts >= user_settings.call_max_attempts:
                     # Превышено максимальное количество попыток
-                    call_status.status = "failed"
-                    call_status.next_attempt_time = None
-                    session.commit()
-                    
                     updated_text = (
                         f"📞 <b>Время звонка!</b>\n\n"
                         f"👤 {customer_info}\n"
                         f"📦 {order_info}\n"
-                        f"📱 {call_status.phone}\n"
-                        f"🕐 Время: {call_status.call_time.strftime('%H:%M')}\n\n"
+                        f"📱 {call_status_dto.phone}\n"
+                        f"🕐 Время: {call_status_dto.call_time.strftime('%H:%M')}\n\n"
                         f"❌ <b>Недозвон</b>\nПревышено количество попыток ({user_settings.call_max_attempts})"
                     )
                     
@@ -150,26 +167,19 @@ class CallHandlers:
                     self.bot.answer_callback_query(call.id, f"❌ Превышено количество попыток ({user_settings.call_max_attempts})")
                     self.bot.send_message(
                         call.message.chat.id,
-                        f"❌ <b>Недозвон</b>\n\nЗаказ №{call_status.order_number}\nПревышено количество попыток звонка ({user_settings.call_max_attempts})",
+                        f"❌ <b>Недозвон</b>\n\nЗаказ №{call_status_dto.order_number}\nПревышено количество попыток звонка ({user_settings.call_max_attempts})",
                         parse_mode='HTML',
                         reply_markup=self.parent._route_menu_markup()
                     )
                 else:
                     # Планируем повторную попытку
-                    now = get_local_now()
-                    if now.tzinfo is not None:
-                        now = now.replace(tzinfo=None)
-                    call_status.status = "rejected"
-                    call_status.next_attempt_time = now + timedelta(minutes=user_settings.call_retry_interval_minutes)
-                    session.commit()
-                    
                     updated_text = (
                         f"📞 <b>Время звонка!</b>\n\n"
                         f"👤 {customer_info}\n"
                         f"📦 {order_info}\n"
-                        f"📱 {call_status.phone}\n"
-                        f"🕐 Время: {call_status.call_time.strftime('%H:%M')}\n\n"
-                        f"❌ <b>Отклонено</b>\nПовтор через {user_settings.call_retry_interval_minutes} мин (попытка {call_status.attempts}/{user_settings.call_max_attempts})"
+                        f"📱 {call_status_dto.phone}\n"
+                        f"🕐 Время: {call_status_dto.call_time.strftime('%H:%M')}\n\n"
+                        f"❌ <b>Отклонено</b>\nПовтор через {user_settings.call_retry_interval_minutes} мин (попытка {call_status_db.attempts}/{user_settings.call_max_attempts})"
                     )
                     
                     try:
@@ -182,10 +192,10 @@ class CallHandlers:
                     except Exception as edit_error:
                         logger.warning(f"Ошибка обновления сообщения: {edit_error}")
                     
-                    self.bot.answer_callback_query(call.id, f"❌ Отклонено. Повтор через {user_settings.call_retry_interval_minutes} мин (попытка {call_status.attempts}/{user_settings.call_max_attempts})")
+                    self.bot.answer_callback_query(call.id, f"❌ Отклонено. Повтор через {user_settings.call_retry_interval_minutes} мин (попытка {call_status_db.attempts}/{user_settings.call_max_attempts})")
                     self.bot.send_message(
                         call.message.chat.id,
-                        f"⏰ <b>Повторный звонок запланирован</b>\n\nЗаказ №{call_status.order_number}\nПовтор через {user_settings.call_retry_interval_minutes} мин (попытка {call_status.attempts}/{user_settings.call_max_attempts})",
+                        f"⏰ <b>Повторный звонок запланирован</b>\n\nЗаказ №{call_status_dto.order_number}\nПовтор через {user_settings.call_retry_interval_minutes} мин (попытка {call_status_db.attempts}/{user_settings.call_max_attempts})",
                         parse_mode='HTML',
                         reply_markup=self.parent._route_menu_markup()
                     )
@@ -210,20 +220,19 @@ class CallHandlers:
             return
         
         try:
+            # Сохраняем комментарий через CallService
             with get_db_session() as session:
-                call_status = session.query(CallStatusDB).filter(CallStatusDB.id == call_status_id).first()
-                if call_status:
-                    call_status.confirmation_comment = text
-                    session.commit()
-                    
-                    self.bot.reply_to(
-                        message,
-                        f"✅ <b>Комментарий сохранен</b>\n\n💬 {text}",
-                        parse_mode='HTML',
-                        reply_markup=self.parent._main_menu_markup()
-                    )
-                else:
-                    self.bot.reply_to(message, "❌ Запись о звонке не найдена", reply_markup=self.parent._main_menu_markup())
+                success = self.parent.call_service.confirm_call(user_id, call_status_id, text, session)
+            
+            if success:
+                self.bot.reply_to(
+                    message,
+                    f"✅ <b>Комментарий сохранен</b>\n\n💬 {text}",
+                    parse_mode='HTML',
+                    reply_markup=self.parent._main_menu_markup()
+                )
+            else:
+                self.bot.reply_to(message, "❌ Запись о звонке не найдена", reply_markup=self.parent._main_menu_markup())
         except Exception as e:
             logger.error(f"Ошибка при сохранении комментария: {e}", exc_info=True)
             self.bot.reply_to(message, f"❌ Ошибка: {str(e)}", reply_markup=self.parent._main_menu_markup())

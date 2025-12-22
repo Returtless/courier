@@ -472,9 +472,9 @@ class RouteHandlers:
             
             logger.debug(f"Начало оптимизации для user_id={user_id}")
             
-            # Загружаем заказы из БД
+            # Загружаем заказы через OrderService
             try:
-                orders_data = self.parent.db_service.get_today_orders(user_id)
+                orders_data = self.parent.get_today_orders_dict(user_id, today)
                 logger.debug(f"Загружено заказов: {len(orders_data) if orders_data else 0}")
             except Exception as e:
                 logger.error(f"Ошибка загрузки заказов: {e}", exc_info=True)
@@ -494,19 +494,22 @@ class RouteHandlers:
                 self.bot.reply_to(message, "❌ Нет активных заказов для оптимизации. Все заказы доставлены.", reply_markup=self.parent._orders_menu_markup(user_id))
                 return
             
-            # Загружаем подтвержденные звонки для сохранения их при повторной оптимизации
+            # Загружаем подтвержденные звонки через CallService
             try:
-                confirmed_calls = self.parent.db_service.get_confirmed_calls(user_id, today)
-                confirmed_order_numbers = set(call['order_number'] for call in confirmed_calls)
-                logger.info(f"Найдено {len(confirmed_calls)} подтвержденных звонков: {confirmed_order_numbers}")
+                from src.database.connection import get_db_session
+                with get_db_session() as session:
+                    call_statuses = self.parent.call_service.get_call_statuses_by_date(user_id, today, session)
+                    confirmed_calls = [cs for cs in call_statuses if cs.status == 'confirmed']
+                    confirmed_order_numbers = set(cs.order_number for cs in confirmed_calls)
+                    logger.info(f"Найдено {len(confirmed_calls)} подтвержденных звонков: {confirmed_order_numbers}")
             except Exception as e:
                 logger.error(f"Ошибка загрузки подтвержденных звонков: {e}", exc_info=True)
                 confirmed_calls = []
                 confirmed_order_numbers = set()
 
-            # Загружаем точку старта из БД
+            # Загружаем точку старта через RouteService
             try:
-                start_location_data = self.parent.db_service.get_start_location(user_id, today)
+                start_location_data = self.parent.get_start_location_dict(user_id, today)
                 logger.debug(f"Данные точки старта: {start_location_data}")
             except Exception as e:
                 logger.error(f"Ошибка загрузки точки старта: {e}", exc_info=True)
@@ -589,7 +592,7 @@ class RouteHandlers:
             actual_start_from_confirmed = None
             if confirmed_orders:
                 try:
-                    route_data = self.parent.db_service.get_route_data(user_id, today)
+                    route_data = self.parent.get_route_data_dict(user_id, today)
                     if route_data:
                         route_points_data = route_data.get('route_points_data', [])
                         route_order = route_data.get('route_order', [])
@@ -691,10 +694,18 @@ class RouteHandlers:
                 start_location_coords = (start_lat, start_lon)
                 location_description = f"адреса: {start_address}"
                 
-                # Сохраняем координаты в БД для будущего использования
-                self.parent.db_service.save_start_location(
-                    user_id, 'address', start_address, start_lat, start_lon, None, today
+                # Сохраняем координаты через RouteService
+                from src.application.dto.route_dto import StartLocationDTO
+                from src.database.connection import get_db_session
+                start_location_dto = StartLocationDTO(
+                    location_type='address',
+                    address=start_address,
+                    latitude=start_lat,
+                    longitude=start_lon,
+                    start_time=None
                 )
+                with get_db_session() as session:
+                    self.parent.route_service.save_start_location(user_id, start_location_dto, today, session)
                 
                 self.bot.edit_message_text(
                     "🔄 <b>Оптимизация маршрута</b>\n\n✅ Точка старта определена\n⏳ Геокодирую адреса заказов...",
@@ -813,7 +824,7 @@ class RouteHandlers:
                     has_manual_times = len(manual_calls) > 0
                 
                 # Загружаем предыдущий маршрут, если он есть
-                previous_route_data = self.parent.db_service.get_route_data(user_id, today)
+                previous_route_data = self.parent.get_route_data_dict(user_id, today)
                 if previous_route_data:
                     error_text = (
                         "❌ <b>Не удалось оптимизировать маршрут</b>\n\n"
@@ -902,7 +913,7 @@ class RouteHandlers:
             if actual_start_from_confirmed and confirmed_orders:
                 try:
                     # Загружаем данные предыдущего маршрута
-                    previous_route_data = self.parent.db_service.get_route_data(user_id, today)
+                    previous_route_data = self.parent.get_route_data_dict(user_id, today)
                     if previous_route_data:
                         previous_route_points = previous_route_data.get('route_points_data', [])
                         previous_route_order = previous_route_data.get('route_order', [])
@@ -1040,21 +1051,30 @@ class RouteHandlers:
                     if order.gis_id:
                         updates['gis_id'] = order.gis_id
                     try:
-                        self.parent.db_service.update_order(user_id, order.order_number, updates, today)
+                        from src.application.dto.order_dto import UpdateOrderDTO
+                        from src.database.connection import get_db_session
+                        update_dto = UpdateOrderDTO(**updates)
+                        with get_db_session() as session:
+                            self.parent.order_service.update_order(user_id, order.order_number, update_dto, today, session)
                     except Exception as e:
                         logger.warning(f"Не удалось обновить координаты заказа {order.order_number}: {e}")
             
-            # Сохраняем структурированные данные маршрута в БД
-            self.parent.db_service.save_route_data(
-                user_id,
-                route_points_data,  # Структурированные данные вместо готового текста
-                call_schedule,
-                route_order,
-                optimized_route.total_distance,
-                optimized_route.total_time,
-                optimized_route.estimated_completion,
-                today
-            )
+            # Сохраняем структурированные данные маршрута через RouteRepository
+            from src.database.connection import get_db_session
+            from src.repositories.route_repository import RouteRepository
+            
+            route_data_dict = {
+                'route_summary': route_points_data,  # Структурированные данные
+                'call_schedule': call_schedule,
+                'route_order': route_order,
+                'total_distance': optimized_route.total_distance,
+                'total_time': optimized_route.total_time,
+                'estimated_completion': optimized_route.estimated_completion
+            }
+            
+            with get_db_session() as session:
+                route_repo = RouteRepository()
+                route_repo.save_route(user_id, today, route_data_dict, session)
             
             # Также сохраняем в state для обратной совместимости
             self.parent.update_user_state(user_id, 'route_points_data', route_points_data)
@@ -1077,9 +1097,9 @@ class RouteHandlers:
                 self.parent.update_user_state(user_id, 'start_time', start_time.isoformat() if isinstance(start_time, datetime) else start_time)
 
             # Формируем итоговое сообщение (форматируем маршрут для отображения)
-            orders_data = self.parent.db_service.get_today_orders(user_id)
+            orders_data = self.parent.get_today_orders_dict(user_id, today)
             orders_dict = {od.get('order_number'): od for od in orders_data if od.get('order_number')}
-            start_location_data = self.parent.db_service.get_start_location(user_id, today) or {}
+            start_location_data = self.parent.get_start_location_dict(user_id, today) or {}
             formatted_route = self._format_route_summary(user_id, route_points_data, orders_dict, start_location_data, maps_service)
             
             summary_text = (
@@ -1357,8 +1377,8 @@ class RouteHandlers:
             self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Используйте кнопку ▶️ Оптимизировать", reply_markup=self.parent._route_menu_markup())
             return
         
-        # Загружаем заказы из БД
-        orders_data = self.parent.db_service.get_today_orders(user_id)
+        # Загружаем заказы через OrderService
+        orders_data = self.parent.get_today_orders_dict(user_id, today)
         
         # Фильтруем только активные (не доставленные) заказы
         active_orders_data = [od for od in orders_data if od.get('status', 'pending') != 'delivered']
@@ -1372,8 +1392,8 @@ class RouteHandlers:
             self.bot.reply_to(message, "✅ Все заказы доставлены", reply_markup=self.parent._route_menu_markup())
             return
         
-        # Загружаем точку старта
-        start_location_data = self.parent.db_service.get_start_location(user_id, today) or {}
+        # Загружаем точку старта через RouteService
+        start_location_data = self.parent.get_start_location_dict(user_id, today) or {}
         
         # Форматируем маршрут только для активных заказов
         maps_service = MapsService()
@@ -1400,8 +1420,8 @@ class RouteHandlers:
         user_id = message.from_user.id
         today = date.today()
         
-        # Загружаем из БД
-        route_data = self.parent.db_service.get_route_data(user_id, today)
+        # Загружаем через RouteService
+        route_data = self.parent.get_route_data_dict(user_id, today)
         if not route_data:
             self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Используйте кнопку ▶️ Оптимизировать", reply_markup=self.parent._route_menu_markup())
             return
@@ -1696,8 +1716,10 @@ class RouteHandlers:
         today = date.today()
         
         try:
-            # Удаляем все данные за сегодня
-            self.parent.db_service.delete_all_data_by_date(user_id, today)
+            # Удаляем все данные за сегодня через RouteService
+            from src.database.connection import get_db_session
+            with get_db_session() as session:
+                self.parent.route_service.delete_all_data_by_date(user_id, today, session)
             
             # Очищаем состояние пользователя
             self.parent.clear_user_state(user_id)
@@ -1732,8 +1754,8 @@ class RouteHandlers:
         user_id = message.from_user.id
         today = date.today()
         
-        # Загружаем маршрут из БД
-        route_data = self.parent.db_service.get_route_data(user_id, today)
+        # Загружаем маршрут через RouteService
+        route_data = self.parent.get_route_data_dict(user_id, today)
         if not route_data:
             self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Используйте кнопку ▶️ Оптимизировать", reply_markup=self.parent._route_menu_markup())
             return
@@ -1754,7 +1776,7 @@ class RouteHandlers:
             sorted_points = route_points_data
         
         # Фильтруем только активные (не доставленные) заказы
-        orders_data = self.parent.db_service.get_today_orders(user_id)
+        orders_data = self.parent.get_today_orders_dict(user_id, today)
         active_order_numbers = {od.get('order_number') for od in orders_data if od.get('status', 'pending') != 'delivered'}
         
         active_points = [p for p in sorted_points if p.get('order_number') in active_order_numbers]
@@ -1771,8 +1793,8 @@ class RouteHandlers:
         user_id = call.from_user.id
         today = date.today()
         
-        # Загружаем маршрут из БД
-        route_data = self.parent.db_service.get_route_data(user_id, today)
+        # Загружаем маршрут через RouteService
+        route_data = self.parent.get_route_data_dict(user_id, today)
         if not route_data:
             self.bot.answer_callback_query(call.id, "❌ Маршрут не найден")
             return
@@ -1792,7 +1814,7 @@ class RouteHandlers:
             logger.error(f"Ошибка сортировки точек маршрута: {e}", exc_info=True)
             sorted_points = route_points_data
         
-        orders_data = self.parent.db_service.get_today_orders(user_id)
+        orders_data = self.parent.get_today_orders_dict(user_id, today)
         active_order_numbers = {od.get('order_number') for od in orders_data if od.get('status', 'pending') != 'delivered'}
         active_points = [p for p in sorted_points if p.get('order_number') in active_order_numbers]
         
@@ -1822,7 +1844,7 @@ class RouteHandlers:
             return
         
         # Загружаем данные заказа
-        orders_data = self.parent.db_service.get_today_orders(user_id)
+        orders_data = self.parent.get_today_orders_dict(user_id, today)
         orders_dict = {od.get('order_number'): od for od in orders_data if od.get('order_number')}
         order_data = orders_dict.get(order_number)
         
@@ -1846,7 +1868,7 @@ class RouteHandlers:
         
         # Если предыдущего заказа нет, используем стартовую точку
         if prev_latlon is None:
-            start_location_data = self.parent.db_service.get_start_location(user_id, today) or {}
+            start_location_data = self.parent.get_start_location_dict(user_id, today) or {}
             if start_location_data:
                 if start_location_data.get('location_type') == 'geo':
                     prev_latlon = (start_location_data.get('latitude'), start_location_data.get('longitude'))
@@ -1941,15 +1963,15 @@ class RouteHandlers:
                 return
 
             # Загружаем маршрут ДО обновления статуса, чтобы найти индекс текущего заказа
-            route_data = self.parent.db_service.get_route_data(user_id, today)
+            route_data = self.parent.get_route_data_dict(user_id, today)
             if not route_data:
                 # Если маршрута нет, просто обновляем статус
-                updated = self.parent.db_service.update_order(
-                    user_id,
-                    order_number,
-                    {"status": "delivered"},
-                    today,
-                )
+                from src.application.dto.order_dto import UpdateOrderDTO
+                from src.database.connection import get_db_session
+                update_dto = UpdateOrderDTO(status="delivered")
+                with get_db_session() as session:
+                    updated_order = self.parent.order_service.update_order(user_id, order_number, update_dto, today, session)
+                updated = updated_order is not None
                 if updated:
                     self.bot.answer_callback_query(call.id, f"✅ Заказ №{order_number} отмечен доставленным")
                 else:
@@ -1966,18 +1988,18 @@ class RouteHandlers:
                 sorted_points = route_points_data
             
             # Находим индекс текущего заказа ДО обновления статуса
-            orders_data_before = self.parent.db_service.get_today_orders(user_id)
+            orders_data_before = self.parent.get_today_orders_dict(user_id, today)
             active_order_numbers_before = {od.get('order_number') for od in orders_data_before if od.get('status', 'pending') != 'delivered'}
             active_points_before = [p for p in sorted_points if p.get('order_number') in active_order_numbers_before]
             current_index = next((i for i, p in enumerate(active_points_before) if p.get('order_number') == order_number), None)
             
-            # Обновляем статус заказа в БД
-            updated = self.parent.db_service.update_order(
-                user_id,
-                order_number,
-                {"status": "delivered"},
-                today,
-            )
+            # Обновляем статус заказа через OrderService
+            from src.application.dto.order_dto import UpdateOrderDTO
+            from src.database.connection import get_db_session
+            update_dto = UpdateOrderDTO(status="delivered")
+            with get_db_session() as session:
+                updated_order = self.parent.order_service.update_order(user_id, order_number, update_dto, today, session)
+            updated = updated_order is not None
 
             if not updated:
                 self.bot.answer_callback_query(
@@ -1991,7 +2013,7 @@ class RouteHandlers:
             self.bot.answer_callback_query(call.id, f"✅ Заказ №{order_number} отмечен доставленным")
             
             # Загружаем активные заказы ПОСЛЕ обновления статуса
-            orders_data_after = self.parent.db_service.get_today_orders(user_id)
+            orders_data_after = self.parent.get_today_orders_dict(user_id, today)
             active_order_numbers_after = {od.get('order_number') for od in orders_data_after if od.get('status', 'pending') != 'delivered'}
             active_points_after = [p for p in sorted_points if p.get('order_number') in active_order_numbers_after]
             

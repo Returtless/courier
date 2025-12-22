@@ -3,10 +3,10 @@
 """
 import telebot
 import logging
+from datetime import date
 from src.services.maps_service import MapsService
 from src.services.route_optimizer import RouteOptimizer
 from src.services.traffic_monitor import TrafficMonitor
-from src.services.db_service import DatabaseService
 from src.services.call_notifier import CallNotifier
 from src.services.user_settings_service import UserSettingsService
 from src.services.credentials_service import CredentialsService
@@ -22,18 +22,19 @@ class CourierBot:
         self.bot = bot
         self.llm_service = llm_service
         
-        # Инициализация сервисов
-        self.maps_service = MapsService()
-        self.traffic_monitor = TrafficMonitor(self.maps_service)
-        self.db_service = DatabaseService()
-        self.settings_service = UserSettingsService()
-        self.credentials_service = CredentialsService()
-        
-        # Application Services (из DI контейнера)
+        # Получаем все сервисы через DI контейнер
         container = get_container()
+        
+        # Application Services
         self.order_service = container.order_service()
         self.route_service = container.route_service()
         self.call_service = container.call_service()
+        self.maps_service = container.maps_service()
+        
+        # Infrastructure Services (пока создаем напрямую, в будущем можно добавить в DI)
+        self.traffic_monitor = TrafficMonitor(self.maps_service)
+        self.settings_service = UserSettingsService()
+        self.credentials_service = CredentialsService()
         
         # Bot services (требуют bot, создаются после инициализации)
         from src.bot.services.telegram_notifier import TelegramNotifier
@@ -191,6 +192,94 @@ class CourierBot:
         if user_id in self.user_states:
             del self.user_states[user_id]
     
+    # === Вспомогательные методы для обратной совместимости ===
+    
+    def get_today_orders_dict(self, user_id: int, order_date: date = None):
+        """
+        Получить заказы за сегодня в формате словарей (для обратной совместимости)
+        
+        Args:
+            user_id: ID пользователя
+            order_date: Дата (по умолчанию сегодня)
+            
+        Returns:
+            Список словарей с данными заказов
+        """
+        from datetime import date as date_type
+        if order_date is None:
+            order_date = date_type.today()
+        
+        orders_dto = self.order_service.get_orders_by_date(user_id, order_date)
+        # Преобразуем DTO в словари
+        return [order_dto.model_dump() for order_dto in orders_dto]
+    
+    def get_route_data_dict(self, user_id: int, route_date: date = None):
+        """
+        Получить данные маршрута в формате словаря (для обратной совместимости)
+        
+        Args:
+            user_id: ID пользователя
+            route_date: Дата (по умолчанию сегодня)
+            
+        Returns:
+            Словарь с данными маршрута или None
+        """
+        from datetime import date as date_type
+        if route_date is None:
+            route_date = date_type.today()
+        
+        route_dto = self.route_service.get_route(user_id, route_date)
+        if not route_dto:
+            return None
+        
+        # Преобразуем RouteDTO в формат словаря, который ожидают handlers
+        route_points_data = []
+        for point in route_dto.route_points:
+            route_points_data.append({
+                'order_number': point.order_number,
+                'estimated_arrival': point.estimated_arrival.isoformat() if point.estimated_arrival else None,
+                'call_time': point.call_time.isoformat() if point.call_time else None,
+                'distance_from_previous': point.distance_from_previous,
+                'time_from_previous': point.time_from_previous
+            })
+        
+        return {
+            'route_order': route_dto.route_order,
+            'route_points_data': route_points_data,
+            'route_summary': route_points_data,  # Для обратной совместимости
+            'call_schedule': route_dto.call_schedule,
+            'total_distance': route_dto.total_distance,
+            'total_time': route_dto.total_time,
+            'estimated_completion': route_dto.estimated_completion
+        }
+    
+    def get_start_location_dict(self, user_id: int, location_date: date = None):
+        """
+        Получить точку старта в формате словаря (для обратной совместимости)
+        
+        Args:
+            user_id: ID пользователя
+            location_date: Дата (по умолчанию сегодня)
+            
+        Returns:
+            Словарь с данными точки старта или None
+        """
+        from datetime import date as date_type
+        if location_date is None:
+            location_date = date_type.today()
+        
+        start_location_dto = self.route_service.get_start_location(user_id, location_date)
+        if not start_location_dto:
+            return None
+        
+        return {
+            'location_type': start_location_dto.location_type,
+            'address': start_location_dto.address,
+            'latitude': start_location_dto.latitude,
+            'longitude': start_location_dto.longitude,
+            'start_time': start_location_dto.start_time
+        }
+    
     # === Общие вспомогательные методы ===
     
     def _main_menu_markup(self, user_id: int = None):
@@ -208,8 +297,8 @@ class CourierBot:
         # Добавляем кнопку "Текущий заказ" только если маршрут оптимизирован (вверху)
         if user_id is not None:
             today = date.today()
-            route_data = self.db_service.get_route_data(user_id, today)
-            if route_data and route_data.get('route_points_data'):
+            route_dto = self.route_service.get_route(user_id, today)
+            if route_dto and route_dto.route_points:
                 markup.row("📋 Текущий заказ")
         
         markup.row("📦 Заказы", "🗺️ Маршрут")

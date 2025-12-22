@@ -656,8 +656,10 @@ class OrderHandlers:
                         except Exception:
                             order_dict['delivery_time_end'] = None
                     
-                    order = Order(**order_dict)
-                    self.parent.db_service.save_order(user_id, order, today)
+                    # Сохраняем через OrderService
+                    from src.application.dto.order_dto import CreateOrderDTO
+                    create_dto = CreateOrderDTO(**order_dict)
+                    self.parent.order_service.create_order(user_id, create_dto, today)
                     saved_count += 1
                 except Exception as e:
                     error_msg = f"Заказ {i+1}: {str(e)}"
@@ -866,8 +868,8 @@ class OrderHandlers:
         """Показать список доставленных заказов"""
         today = date.today()
         
-        # Загружаем из БД
-        orders_data = self.parent.db_service.get_today_orders(user_id)
+        # Загружаем через OrderService
+        orders_data = self.parent.get_today_orders_dict(user_id, today)
         
         delivered_orders = [od for od in orders_data if od.get('status', 'pending') == 'delivered']
         
@@ -895,8 +897,8 @@ class OrderHandlers:
         user_id = message.from_user.id
         today = date.today()
         
-        # Загружаем из БД
-        orders_data = self.parent.db_service.get_today_orders(user_id)
+        # Загружаем через OrderService
+        orders_data = self.parent.get_today_orders_dict(user_id, today)
         
         if not orders_data:
             user_id = message.from_user.id
@@ -923,7 +925,7 @@ class OrderHandlers:
         
         # Сортируем по порядку в маршруте (если есть), иначе по номеру заказа
         try:
-            route_data = self.parent.db_service.get_route_data(user_id, today)
+            route_data = self.parent.get_route_data_dict(user_id, today)
             if route_data and route_data.get('route_order'):
                 route_order = route_data['route_order']
                 # Сортируем заказы по их позиции в маршруте
@@ -1266,7 +1268,7 @@ class OrderHandlers:
             
             # Ищем следующий заказ в маршруте
             try:
-                route_data = self.parent.db_service.get_route_data(user_id, today)
+                route_data = self.parent.get_route_data_dict(user_id, today)
                 if route_data and route_data.get('route_order'):
                     route_order = route_data['route_order']
                     route_points_data = route_data.get('route_points_data', [])
@@ -1282,7 +1284,7 @@ class OrderHandlers:
                         for i in range(current_index + 1, len(route_order)):
                             next_order_num = route_order[i]
                             # Проверяем, что следующий заказ не доставлен
-                            orders_data = self.parent.db_service.get_today_orders(user_id)
+                            orders_data = self.parent.get_today_orders_dict(user_id, today)
                             next_order_data = next((od for od in orders_data if od.get('order_number') == next_order_num), None)
                             
                             if next_order_data and next_order_data.get('status', 'pending') != 'delivered':
@@ -1634,19 +1636,16 @@ class OrderHandlers:
             )
             return
         
-        # Ищем заказ
+        # Ищем заказ через OrderService
         try:
-            orders_data = self.parent.db_service.get_today_orders(user_id)
-            order_found = False
-            for od in orders_data:
-                if od.get('order_number') == text:
-                    order_found = True
-                    # Открываем детали заказа
-                    self.show_order_details(user_id, text, message.chat.id)
-                    self.parent.update_user_state(user_id, 'state', None)
-                    break
+            today = date.today()
+            order_dto = self.parent.order_service.get_order_by_number(user_id, text, today)
             
-            if not order_found:
+            if order_dto:
+                # Открываем детали заказа
+                self.show_order_details(user_id, text, message.chat.id)
+                self.parent.update_user_state(user_id, 'state', None)
+            else:
                 self.bot.reply_to(
                     message,
                     f"❌ Заказ №{text} не найден. Попробуйте еще раз или вернитесь в главное меню:",
@@ -1672,16 +1671,13 @@ class OrderHandlers:
         from src.database.connection import get_db_session
         from src.models.order import CallStatusDB
         
-        orders_data = self.parent.db_service.get_today_orders(user_id)
-        order_data = None
-        for od in orders_data:
-            if od.get('order_number') == order_number:
-                order_data = od
-                break
-        
-        if not order_data:
+        # Получаем заказ через OrderService
+        order_dto = self.parent.order_service.get_order_by_number(user_id, order_number, today)
+        if not order_dto:
             logger.error(f"Заказ {order_number} не найден при установке времени звонка")
             return
+        
+        order_data = order_dto.model_dump()
         
         # Проверяем наличие телефона
         if not order_data.get('phone'):
@@ -1774,16 +1770,13 @@ class OrderHandlers:
         from src.database.connection import get_db_session
         from src.models.order import CallStatusDB
         
-        orders_data = self.parent.db_service.get_today_orders(user_id)
-        order_data = None
-        for od in orders_data:
-            if od.get('order_number') == order_number:
-                order_data = od
-                break
-        
-        if not order_data:
+        # Получаем заказ через OrderService
+        order_dto = self.parent.order_service.get_order_by_number(user_id, order_number, today)
+        if not order_dto:
             logger.error(f"Заказ {order_number} не найден при установке времени прибытия")
             return
+        
+        order_data = order_dto.model_dump()
         
         # Проверяем наличие телефона
         if not order_data.get('phone'):
@@ -1882,20 +1875,13 @@ class OrderHandlers:
         """Обновить конкретное поле заказа"""
         today = date.today()
         
-        # Загружаем заказ из БД
-        orders_data = self.parent.db_service.get_today_orders(user_id)
-        
-        order_found = False
-        order_data = None
-        for od in orders_data:
-            if od.get('order_number') == order_number:
-                order_found = True
-                order_data = od.copy()
-                break
-        
-        if not order_found:
+        # Загружаем заказ через OrderService
+        order_dto = self.parent.order_service.get_order_by_number(user_id, order_number, today)
+        if not order_dto:
             self.bot.reply_to(message, f"❌ Заказ №{order_number} не найден", reply_markup=self.parent._main_menu_markup())
             return
+        
+        order_data = order_dto.model_dump()
         
         # Обновляем поле
         updates = {field_name: field_value}
@@ -1951,18 +1937,12 @@ class OrderHandlers:
                 ).first()
                 
                 if call_status:
-                    # Обновляем поля в call_status актуальными данными из OrderDB
-                    updated_order_data = self.parent.db_service.get_today_orders(user_id)
-                    updated_order = None
-                    for od in updated_order_data:
-                        if od.get('order_number') == order_number:
-                            updated_order = od
-                            break
-                    
-                    if updated_order:
+                    # Получаем обновленный заказ через OrderService
+                    updated_order_dto = self.parent.order_service.get_order_by_number(user_id, order_number, today)
+                    if updated_order_dto:
                         # Обновляем телефон, если он изменился
-                        if field_name == 'phone' or (updated_order.get('phone') and call_status.phone != updated_order.get('phone')):
-                            call_status.phone = updated_order.get('phone') or call_status.phone
+                        if field_name == 'phone' or (updated_order_dto.phone and call_status.phone != updated_order_dto.phone):
+                            call_status.phone = updated_order_dto.phone or call_status.phone
                             # Если статус был "sent" (уведомление уже отправлено), сбрасываем на pending для повторной отправки
                             if call_status.status == "sent":
                                 call_status.status = "pending"
@@ -1970,15 +1950,15 @@ class OrderHandlers:
                             logger.debug(f"Обновлен телефон в call_status для заказа {order_number}: {call_status.phone}")
                         
                         # Обновляем имя клиента, если оно изменилось
-                        if field_name == 'customer_name' or (updated_order.get('customer_name') and call_status.customer_name != updated_order.get('customer_name')):
-                            call_status.customer_name = updated_order.get('customer_name') or call_status.customer_name
+                        if field_name == 'customer_name' or (updated_order_dto.customer_name and call_status.customer_name != updated_order_dto.customer_name):
+                            call_status.customer_name = updated_order_dto.customer_name or call_status.customer_name
                             logger.debug(f"Обновлено имя в call_status для заказа {order_number}: {call_status.customer_name}")
                         
                         session.commit()
                         logger.info(f"✅ Обновлен call_status для заказа {order_number} актуальными данными из OrderDB")
                 else:
                     # Если записи нет, создаем ее (если есть маршрут)
-                    route_data_check = self.parent.db_service.get_route_data(user_id, today)
+                    route_data_check = self.parent.get_route_data_dict(user_id, today)
                     if route_data_check and route_data_check.get('route_points_data'):
                         # Находим время звонка из route_points_data
                         route_points_data_check = route_data_check.get('route_points_data', [])
@@ -1992,22 +1972,17 @@ class OrderHandlers:
                                 if call_time_str:
                                     call_time = datetime.fromisoformat(call_time_str)
                                     arrival_time = datetime.fromisoformat(arrival_time_str) if arrival_time_str else None
-                                    # Загружаем актуальные данные заказа
-                                    updated_order_data = self.parent.db_service.get_today_orders(user_id)
-                                    updated_order = None
-                                    for od in updated_order_data:
-                                        if od.get('order_number') == order_number:
-                                            updated_order = od
-                                            break
+                                    # Загружаем актуальные данные заказа через OrderService
+                                    updated_order_dto = self.parent.order_service.get_order_by_number(user_id, order_number, today)
                                     
-                                    if updated_order:
+                                    if updated_order_dto:
                                         # Создаем запись о звонке (автоматическое время)
                                         self.parent.call_notifier.create_call_status(
                                             user_id,
                                             order_number,
                                             call_time,
-                                            updated_order.get('phone') or "Не указан",
-                                            updated_order.get('customer_name'),
+                                            updated_order_dto.phone or "Не указан",
+                                            updated_order_dto.customer_name,
                                             today,
                                             is_manual_call=False,
                                             is_manual_arrival=False,
@@ -2019,52 +1994,26 @@ class OrderHandlers:
                             logger.warning(f"Не удалось создать call_status при обновлении заказа: {e}")
             
             # Обновляем маршрут если он существует
-            route_data = self.parent.db_service.get_route_data(user_id, today)
+            route_data = self.parent.get_route_data_dict(user_id, today)
             if route_data and (route_data.get('route_summary') or route_data.get('route_points_data')):
-                # Загружаем обновленный заказ
-                updated_orders_data = self.parent.db_service.get_today_orders(user_id)
-                updated_order_data = None
-                for od in updated_orders_data:
-                    if od.get('order_number') == order_number:
-                        updated_order_data = od.copy()
-                        break
+                # Загружаем обновленный заказ через OrderService
+                updated_order_dto = self.parent.order_service.get_order_by_number(user_id, order_number, today)
                 
-                if updated_order_data:
+                if updated_order_dto:
                     # Если обновлены поля, влияющие на маршрут - пересчитываем маршрут
                     if field_name in ['address', 'entrance_number', 'apartment_number', 'delivery_time_window']:
-                        # Преобразуем время
-                        if updated_order_data.get('delivery_time_start'):
-                            if isinstance(updated_order_data['delivery_time_start'], str):
-                                parts = updated_order_data['delivery_time_start'].split(':')
-                                if len(parts) >= 2:
-                                    updated_order_data['delivery_time_start'] = time(int(parts[0]), int(parts[1]))
-                        if updated_order_data.get('delivery_time_end'):
-                            if isinstance(updated_order_data['delivery_time_end'], str):
-                                parts = updated_order_data['delivery_time_end'].split(':')
-                                if len(parts) >= 2:
-                                    updated_order_data['delivery_time_end'] = time(int(parts[0]), int(parts[1]))
+                        # Пересчитываем маршрут через RouteService
+                        from src.application.dto.route_dto import RouteOptimizationRequest
+                        optimization_request = RouteOptimizationRequest(recalculate_without_manual=False)
+                        result = self.parent.route_service.optimize_route(user_id, today, optimization_request)
                         
-                        try:
-                            updated_order = Order(**updated_order_data)
-                            
-                            # Загружаем точку старта из БД
-                            start_location_data = self.parent.db_service.get_start_location(user_id, today)
-                            from src.services.maps import MapsService
-                            state_data = {
-                                'route_summary': route_data.get('route_summary', []),
-                                'call_schedule': route_data.get('call_schedule', []),
-                                'route_order': route_data.get('route_order', []),
-                                'orders': updated_orders_data,  # Все заказы для контекста
-                                'start_location': {'lat': start_location_data.get('latitude'), 'lon': start_location_data.get('longitude')} if start_location_data and start_location_data.get('location_type') == 'geo' else None,
-                                'start_address': start_location_data.get('address') if start_location_data and start_location_data.get('location_type') == 'address' else None,
-                                'start_time': start_location_data.get('start_time') if start_location_data else None
-                            }
-                            # Вызываем метод из route_handlers
-                            # ПРИМЕЧАНИЕ: Здесь нужно передать обновление маршрута в route_handlers
-                            # Но для упрощения пропустим эту часть, так как она требует доступа к route_handlers
-                            logger.info(f"Обновление маршрута для заказа {order_number} (требует route_handlers)")
-                        except Exception as e:
-                            logger.error(f"Ошибка обновления маршрута: {e}", exc_info=True)
+                        if result.success:
+                            logger.info(f"✅ Маршрут пересчитан после обновления заказа {order_number}")
+                        else:
+                            logger.warning(f"⚠️ Не удалось пересчитать маршрут: {result.error_message}")
+                        
+                        # Маршрут пересчитан через RouteService
+                        logger.info(f"✅ Маршрут пересчитан после обновления заказа {order_number}")
                     
                     # Телефон, имя, комментарий не влияют на маршрут и call_schedule
                     # call_schedule теперь формируется динамически при запросе из актуальных данных БД
