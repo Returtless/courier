@@ -6,13 +6,13 @@
 
 **Windows (PowerShell):**
 ```powershell
-.\test_in_docker.ps1
+.\scripts\test_in_docker.ps1
 ```
 
 **Linux/Mac:**
 ```bash
-chmod +x test_in_docker.sh
-./test_in_docker.sh
+chmod +x scripts/test_in_docker.sh
+./scripts/test_in_docker.sh
 ```
 
 ### Вариант 2: Внутри контейнера (если вы уже внутри)
@@ -21,13 +21,13 @@ chmod +x test_in_docker.sh
 
 ```bash
 # Просто запустите тесты напрямую
-python test_bot_functions.py
+python scripts/test_bot_functions.py
 ```
 
 Или для локального тестирования с SQLite:
 
 ```bash
-python test_local_sqlite.py
+python scripts/test_local_sqlite.py
 ```
 
 ## Текущая ситуация
@@ -41,10 +41,10 @@ python test_local_sqlite.py
 
 ```bash
 # Вариант 1: Тесты с реальной БД (PostgreSQL)
-python test_bot_functions.py
+python scripts/test_bot_functions.py
 
 # Вариант 2: Тесты с SQLite (быстрее, не требует PostgreSQL)
-python test_local_sqlite.py
+python scripts/test_local_sqlite.py
 ```
 
 ## Если контейнер не запущен
@@ -53,11 +53,11 @@ python test_local_sqlite.py
 
 **Windows:**
 ```powershell
-docker exec courier_bot python test_bot_functions.py
+docker exec courier_bot python scripts/test_bot_functions.py
 ```
 
 **Linux/Mac:**
 ```bash
-docker exec courier_bot python test_bot_functions.py
+docker exec courier_bot python scripts/test_bot_functions.py
 ```
 

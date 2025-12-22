@@ -31,7 +31,13 @@ def main():
     # Применяем миграции (создают таблицы и изменяют схему)
     logger.info("🔄 Применение миграций базы данных...")
     try:
-        from migrate import run_migrations
+        # Добавляем корень проекта в путь для импорта migrate
+        import sys
+        from pathlib import Path
+        project_root = Path(__file__).parent.parent.parent
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        from scripts.migrate import run_migrations
         logger.info("📝 Вызов run_migrations()...")
         result = run_migrations()
         logger.info(f"📝 run_migrations() вернула: {result}")

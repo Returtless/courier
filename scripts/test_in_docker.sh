@@ -12,7 +12,7 @@ fi
 
 # Запускаем тесты в контейнере
 echo "📋 Запуск тестов..."
-docker exec courier_bot python test_bot_functions.py
+docker exec courier_bot python scripts/test_bot_functions.py
 
 echo ""
 echo "✅ Тесты завершены"

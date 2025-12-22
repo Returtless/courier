@@ -12,7 +12,7 @@ if (-not $containerRunning) {
 
 # Запускаем тесты в контейнере
 Write-Host "📋 Запуск тестов..." -ForegroundColor Cyan
-docker exec courier_bot python test_bot_functions.py
+docker exec courier_bot python scripts/test_bot_functions.py
 
 Write-Host "✅ Тесты завершены" -ForegroundColor Green
 

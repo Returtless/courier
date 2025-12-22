@@ -12,7 +12,7 @@
 docker-compose up -d
 
 # Запустите тесты
-.\test_in_docker.ps1
+.\scripts\test_in_docker.ps1
 ```
 
 #### Linux/Mac:
@@ -21,13 +21,13 @@ docker-compose up -d
 docker-compose up -d
 
 # Запустите тесты
-chmod +x test_in_docker.sh
-./test_in_docker.sh
+chmod +x scripts/test_in_docker.sh
+./scripts/test_in_docker.sh
 ```
 
 #### Или вручную:
 ```bash
-docker exec courier_bot python test_bot_functions.py
+docker exec courier_bot python scripts/test_bot_functions.py
 ```
 
 **Преимущества:**
@@ -40,7 +40,7 @@ docker exec courier_bot python test_bot_functions.py
 Для быстрого локального тестирования без Docker:
 
 ```bash
-python test_local_sqlite.py
+python scripts/test_local_sqlite.py
 ```
 
 **Преимущества:**
@@ -85,14 +85,14 @@ python test_local_sqlite.py
 
 **Решение:**
 - Для Docker: убедитесь, что переменные окружения переданы в docker-compose
-- Для локального тестирования: используйте `test_local_sqlite.py` (автоматически использует SQLite)
+- Для локального тестирования: используйте `scripts/test_local_sqlite.py` (автоматически использует SQLite)
 
 ### Ошибка: "no such table: orders"
 
 **Решение:**
 - Убедитесь, что миграции применены
 - В Docker: миграции применяются автоматически при запуске
-- Локально: запустите `python migrate.py` или используйте `test_local_sqlite.py`
+- Локально: запустите `python scripts/migrate.py` или используйте `scripts/test_local_sqlite.py`
 
 ### Ошибка: "Container not running"
 
@@ -103,7 +103,7 @@ docker-compose up -d
 
 ## Рекомендации
 
-1. **Для разработки:** используйте `test_local_sqlite.py` - быстро и удобно
+1. **Для разработки:** используйте `scripts/test_local_sqlite.py` - быстро и удобно
 2. **Перед деплоем:** используйте тесты в Docker - проверяет реальную конфигурацию
 3. **После рефакторинга:** обязательно запустите тесты перед коммитом
 
