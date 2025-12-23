@@ -117,14 +117,36 @@ class RouteService:
                 )
             
             # Определяем start_location и start_time
-            if start_location_db.location_type == "geo":
-                start_location = (start_location_db.latitude, start_location_db.longitude)
+            # Безопасно получаем атрибуты из отсоединенного объекта через __dict__
+            if hasattr(start_location_db, '__dict__'):
+                db_dict = start_location_db.__dict__
+                location_type = db_dict.get('location_type')
+                latitude = db_dict.get('latitude')
+                longitude = db_dict.get('longitude')
+                address = db_dict.get('address')
+                start_time = db_dict.get('start_time')
+            else:
+                # Fallback: пытаемся получить атрибуты напрямую
+                try:
+                    location_type = start_location_db.location_type
+                    latitude = start_location_db.latitude
+                    longitude = start_location_db.longitude
+                    address = start_location_db.address
+                    start_time = start_location_db.start_time
+                except Exception as e:
+                    logger.error(f"Ошибка получения атрибутов StartLocationDB: {e}", exc_info=True)
+                    location_type = None
+                    latitude = None
+                    longitude = None
+                    address = None
+                    start_time = None
+            
+            if location_type == "geo":
+                start_location = (latitude, longitude)
             else:
                 # Геокодируем адрес
-                lat, lon, _ = self.maps_service.geocode_address_sync(start_location_db.address)
+                lat, lon, _ = self.maps_service.geocode_address_sync(address)
                 start_location = (lat, lon)
-            
-            start_time = start_location_db.start_time
             if not start_time:
                 # Используем текущее время
                 start_time = datetime.combine(order_date, time(9, 0))  # 9:00 по умолчанию
@@ -207,40 +229,62 @@ class RouteService:
         if not route_db:
             return False
         
+        # Безопасно получаем route_order и route_summary из отсоединенного объекта через __dict__
+        if hasattr(route_db, '__dict__'):
+            db_dict = route_db.__dict__
+            route_order = db_dict.get('route_order')
+            route_summary = db_dict.get('route_summary')
+        else:
+            try:
+                route_order = route_db.route_order
+                route_summary = route_db.route_summary
+            except Exception as e:
+                logger.error(f"Ошибка получения атрибутов RouteDataDB в set_current_order_index: {e}", exc_info=True)
+                return False
+        
         # Проверяем валидность индекса
-        if route_db.route_order and isinstance(route_db.route_order, list):
-            if index < 0 or index >= len(route_db.route_order):
+        if route_order and isinstance(route_order, list):
+            if index < 0 or index >= len(route_order):
                 return False
         
         # Сохраняем current_order_index в route_summary как метаданные
         # Используем специальный ключ '_current_index' в первом элементе route_summary
         # чтобы не нарушать существующую структуру
-        if route_db.route_summary is None:
-            route_db.route_summary = []
+        if route_summary is None:
+            route_summary = []
         
         # Если route_summary - список словарей, добавляем метаданные в первый элемент
-        if isinstance(route_db.route_summary, list) and len(route_db.route_summary) > 0:
-            if isinstance(route_db.route_summary[0], dict):
+        if isinstance(route_summary, list) and len(route_summary) > 0:
+            if isinstance(route_summary[0], dict):
                 # Добавляем метаданные в первый элемент, не нарушая остальные поля
-                route_db.route_summary[0]['_current_index'] = index
+                route_summary[0]['_current_index'] = index
             else:
                 # Если первый элемент не словарь, создаем новый первый элемент с метаданными
-                route_db.route_summary = [{'_current_index': index}] + list(route_db.route_summary)
+                route_summary = [{'_current_index': index}] + list(route_summary)
         else:
             # Если route_summary пустой, создаем структуру с метаданными
-            route_db.route_summary = [{'_current_index': index}]
+            route_summary = [{'_current_index': index}]
         
-        # Важно: для JSON-полей нужно явно пометить поле как измененное
+        # Сохраняем обновленный route_summary в БД
+        # Получаем текущие данные маршрута и обновляем только route_summary
+        from src.database.connection import get_db_session
         if session:
-            from sqlalchemy.orm.attributes import flag_modified
-            flag_modified(route_db, 'route_summary')
-            session.commit()
-            session.refresh(route_db)  # Обновляем объект из БД
+            # Используем переданную сессию - получаем объект через внутренний метод репозитория
+            actual_route_db = self.route_repository._get_route(user_id, order_date, session)
+            if actual_route_db:
+                actual_route_db.route_summary = route_summary
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(actual_route_db, 'route_summary')
+                session.commit()
         else:
-            from src.database.connection import get_db_session
+            # Создаем новую сессию для обновления
             with get_db_session() as sess:
-                sess.merge(route_db)
-                sess.commit()
+                actual_route_db = self.route_repository._get_route(user_id, order_date, sess)
+                if actual_route_db:
+                    actual_route_db.route_summary = route_summary
+                    from sqlalchemy.orm.attributes import flag_modified
+                    flag_modified(actual_route_db, 'route_summary')
+                    sess.commit()
         
         logger.info(f"📍 Установлен текущий индекс заказа {index} для user_id={user_id}, date={order_date}")
         return True
@@ -263,12 +307,24 @@ class RouteService:
             Индекс заказа (по умолчанию 0)
         """
         route_db = self.route_repository.get_route(user_id, order_date, session)
-        if not route_db or not route_db.route_summary:
+        if not route_db:
+            return 0
+        
+        # Безопасно получаем route_summary из отсоединенного объекта через __dict__
+        if hasattr(route_db, '__dict__'):
+            route_summary = route_db.__dict__.get('route_summary')
+        else:
+            try:
+                route_summary = route_db.route_summary
+            except Exception:
+                route_summary = None
+        
+        if not route_summary:
             return 0
         
         # Извлекаем current_order_index из метаданных
-        if isinstance(route_db.route_summary, list) and len(route_db.route_summary) > 0:
-            first_item = route_db.route_summary[0]
+        if isinstance(route_summary, list) and len(route_summary) > 0:
+            first_item = route_summary[0]
             if isinstance(first_item, dict) and '_current_index' in first_item:
                 return int(first_item['_current_index'])
         
@@ -299,14 +355,35 @@ class RouteService:
         if not route_db:
             return None
         
+        # Безопасно получаем атрибуты из отсоединенного объекта через __dict__
+        if hasattr(route_db, '__dict__'):
+            db_dict = route_db.__dict__
+            route_summary = db_dict.get('route_summary')
+            route_order = db_dict.get('route_order')
+            call_schedule = db_dict.get('call_schedule')
+            total_distance = db_dict.get('total_distance')
+            total_time = db_dict.get('total_time')
+            estimated_completion = db_dict.get('estimated_completion')
+        else:
+            try:
+                route_summary = route_db.route_summary
+                route_order = route_db.route_order
+                call_schedule = route_db.call_schedule
+                total_distance = route_db.total_distance
+                total_time = route_db.total_time
+                estimated_completion = route_db.estimated_completion
+            except Exception as e:
+                logger.error(f"Ошибка получения атрибутов RouteDataDB: {e}", exc_info=True)
+                return None
+        
         # Преобразуем RouteDataDB в RouteDTO
         route_points = []
-        if route_db.route_summary:
+        if route_summary:
             # route_summary может быть списком словарей (новый формат) или списком строк (старый)
-            if isinstance(route_db.route_summary, list) and len(route_db.route_summary) > 0:
-                if isinstance(route_db.route_summary[0], dict):
+            if isinstance(route_summary, list) and len(route_summary) > 0:
+                if isinstance(route_summary[0], dict):
                     # Новый формат
-                    for point_dict in route_db.route_summary:
+                    for point_dict in route_summary:
                         # Пропускаем метаданные (элементы с ключом _current_index)
                         if '_current_index' in point_dict and len(point_dict) == 1:
                             continue
@@ -323,10 +400,10 @@ class RouteService:
         
         return RouteDTO(
             route_points=route_points,
-            route_order=route_db.route_order or [],
-            total_distance=route_db.total_distance,
-            total_time=route_db.total_time,
-            estimated_completion=route_db.estimated_completion,
+            route_order=route_order or [],
+            total_distance=total_distance,
+            total_time=total_time,
+            estimated_completion=estimated_completion,
             call_schedule=call_schedule
         )
     
@@ -357,12 +434,30 @@ class RouteService:
         if not start_location_db:
             return None
         
+        # Безопасно получаем атрибуты из отсоединенного объекта через __dict__
+        if hasattr(start_location_db, '__dict__'):
+            db_dict = start_location_db.__dict__
+            attrs = {k: v for k, v in db_dict.items() if not k.startswith('_')}
+        else:
+            # Fallback: пытаемся получить атрибуты напрямую
+            try:
+                attrs = {
+                    'location_type': start_location_db.location_type,
+                    'address': start_location_db.address,
+                    'latitude': start_location_db.latitude,
+                    'longitude': start_location_db.longitude,
+                    'start_time': start_location_db.start_time
+                }
+            except Exception as e:
+                logger.error(f"Критическая ошибка преобразования StartLocationDB в StartLocationDTO: {e}", exc_info=True)
+                attrs = {}
+        
         return StartLocationDTO(
-            location_type=start_location_db.location_type,
-            address=start_location_db.address,
-            latitude=start_location_db.latitude,
-            longitude=start_location_db.longitude,
-            start_time=start_location_db.start_time
+            location_type=attrs.get('location_type'),
+            address=attrs.get('address'),
+            latitude=attrs.get('latitude'),
+            longitude=attrs.get('longitude'),
+            start_time=attrs.get('start_time')
         )
     
     def save_start_location(
@@ -392,12 +487,32 @@ class RouteService:
             user_id, order_date, location_dict, session
         )
         
+        # Безопасно получаем атрибуты из отсоединенного объекта через __dict__
+        if hasattr(start_location_db, '__dict__'):
+            db_dict = start_location_db.__dict__
+            attrs = {k: v for k, v in db_dict.items() if not k.startswith('_')}
+        else:
+            # Fallback: пытаемся получить атрибуты напрямую
+            try:
+                attrs = {
+                    'location_type': start_location_db.location_type,
+                    'address': start_location_db.address,
+                    'latitude': start_location_db.latitude,
+                    'longitude': start_location_db.longitude,
+                    'start_time': start_location_db.start_time
+                }
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Критическая ошибка преобразования StartLocationDB в StartLocationDTO: {e}", exc_info=True)
+                attrs = {}
+        
         return StartLocationDTO(
-            location_type=start_location_db.location_type,
-            address=start_location_db.address,
-            latitude=start_location_db.latitude,
-            longitude=start_location_db.longitude,
-            start_time=start_location_db.start_time
+            location_type=attrs.get('location_type'),
+            address=attrs.get('address'),
+            latitude=attrs.get('latitude'),
+            longitude=attrs.get('longitude'),
+            start_time=attrs.get('start_time')
         )
     
     def recalculate_without_manual_times(

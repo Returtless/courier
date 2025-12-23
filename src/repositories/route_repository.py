@@ -39,7 +39,20 @@ class RouteRepository:
         """
         if session is None:
             with get_db_session() as session:
-                return self._get_route(user_id, route_date, session)
+                result = self._get_route(user_id, route_date, session)
+                if result:
+                    # Загружаем все атрибуты перед отсоединением
+                    session.refresh(result)
+                    # Сохраняем все загруженные атрибуты в словарь до expunge
+                    loaded_attrs = {}
+                    for key, value in result.__dict__.items():
+                        if not key.startswith('_sa_'):
+                            loaded_attrs[key] = value
+                    session.expunge(result)
+                    # Восстанавливаем атрибуты из словаря после expunge
+                    for key, value in loaded_attrs.items():
+                        object.__setattr__(result, key, value)
+                return result
         return self._get_route(user_id, route_date, session)
     
     def _get_route(
@@ -84,7 +97,17 @@ class RouteRepository:
         """
         if session is None:
             with get_db_session() as session:
-                return self._save_route(user_id, route_date, route_data, session)
+                result = self._save_route(user_id, route_date, route_data, session)
+                if result:
+                    session.refresh(result)
+                    loaded_attrs = {}
+                    for key, value in result.__dict__.items():
+                        if not key.startswith('_sa_'):
+                            loaded_attrs[key] = value
+                    session.expunge(result)
+                    for key, value in loaded_attrs.items():
+                        object.__setattr__(result, key, value)
+                return result
         return self._save_route(user_id, route_date, route_data, session)
     
     def _save_route(
@@ -165,7 +188,20 @@ class RouteRepository:
         """
         if session is None:
             with get_db_session() as session:
-                return self._get_start_location(user_id, location_date, session)
+                result = self._get_start_location(user_id, location_date, session)
+                if result:
+                    # Загружаем все атрибуты перед отсоединением
+                    session.refresh(result)
+                    # Сохраняем все загруженные атрибуты в словарь до expunge
+                    loaded_attrs = {}
+                    for key, value in result.__dict__.items():
+                        if not key.startswith('_sa_'):
+                            loaded_attrs[key] = value
+                    session.expunge(result)
+                    # Восстанавливаем атрибуты из словаря после expunge
+                    for key, value in loaded_attrs.items():
+                        object.__setattr__(result, key, value)
+                return result
         return self._get_start_location(user_id, location_date, session)
     
     def _get_start_location(
@@ -208,7 +244,20 @@ class RouteRepository:
         """
         if session is None:
             with get_db_session() as session:
-                return self._save_start_location(user_id, location_date, location_data, session)
+                result = self._save_start_location(user_id, location_date, location_data, session)
+                if result:
+                    # Загружаем все атрибуты перед отсоединением
+                    session.refresh(result)
+                    # Сохраняем все загруженные атрибуты в словарь до expunge
+                    loaded_attrs = {}
+                    for key, value in result.__dict__.items():
+                        if not key.startswith('_sa_'):
+                            loaded_attrs[key] = value
+                    session.expunge(result)
+                    # Восстанавливаем атрибуты из словаря после expunge
+                    for key, value in loaded_attrs.items():
+                        object.__setattr__(result, key, value)
+                return result
         return self._save_start_location(user_id, location_date, location_data, session)
     
     def _save_start_location(

@@ -38,7 +38,22 @@ class OrderRepository(BaseRepository[OrderDB]):
         """
         if session is None:
             with get_db_session() as session:
-                return self._get_by_user_and_date(user_id, order_date, session)
+                results = self._get_by_user_and_date(user_id, order_date, session)
+                # Загружаем все атрибуты перед отсоединением для каждого результата
+                expunged_results = []
+                for result in results:
+                    session.refresh(result)
+                    # Сохраняем все загруженные атрибуты в словарь до expunge
+                    loaded_attrs = {}
+                    for key, value in result.__dict__.items():
+                        if not key.startswith('_sa_'):
+                            loaded_attrs[key] = value
+                    session.expunge(result)
+                    # Восстанавливаем атрибуты из словаря после expunge
+                    for key, value in loaded_attrs.items():
+                        object.__setattr__(result, key, value)
+                    expunged_results.append(result)
+                return expunged_results
         return self._get_by_user_and_date(user_id, order_date, session)
     
     def _get_by_user_and_date(
@@ -91,7 +106,20 @@ class OrderRepository(BaseRepository[OrderDB]):
         """
         if session is None:
             with get_db_session() as session:
-                return self._get_by_number(user_id, order_number, order_date, session)
+                result = self._get_by_number(user_id, order_number, order_date, session)
+                if result:
+                    # Загружаем все атрибуты перед отсоединением
+                    session.refresh(result)
+                    # Сохраняем все загруженные атрибуты в словарь до expunge
+                    loaded_attrs = {}
+                    for key, value in result.__dict__.items():
+                        if not key.startswith('_sa_'):
+                            loaded_attrs[key] = value
+                    session.expunge(result)
+                    # Восстанавливаем атрибуты из словаря после expunge
+                    for key, value in loaded_attrs.items():
+                        object.__setattr__(result, key, value)
+                return result
         return self._get_by_number(user_id, order_number, order_date, session)
     
     def _get_by_number(
@@ -156,16 +184,16 @@ class OrderRepository(BaseRepository[OrderDB]):
                 result = self._save(user_id, order, order_date, session, partial_update)
                 # Загружаем все атрибуты перед отсоединением, чтобы избежать DetachedInstanceError
                 session.refresh(result)
-                # Принудительно загружаем все атрибуты, обращаясь к каждому
-                # Это гарантирует, что они будут доступны после expunge
-                from sqlalchemy import inspect
-                mapper = inspect(result)
-                for attr in mapper.attrs:
-                    try:
-                        _ = getattr(result, attr.key)
-                    except Exception:
-                        pass  # Игнорируем ошибки для deferred/lazy атрибутов
+                # Сохраняем все загруженные атрибуты в словарь до expunge
+                # После refresh все атрибуты уже должны быть в __dict__
+                loaded_attrs = {}
+                for key, value in result.__dict__.items():
+                    if not key.startswith('_sa_'):
+                        loaded_attrs[key] = value
                 session.expunge(result)
+                # Восстанавливаем атрибуты из словаря после expunge
+                for key, value in loaded_attrs.items():
+                    object.__setattr__(result, key, value)
                 return result
         return self._save(user_id, order, order_date, session, partial_update)
     

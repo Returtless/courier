@@ -211,7 +211,38 @@ class CourierBot:
         
         orders_dto = self.order_service.get_orders_by_date(user_id, order_date)
         # Преобразуем DTO в словари
-        return [order_dto.model_dump() for order_dto in orders_dto]
+        # Используем .dict() для совместимости с Pydantic v1, если доступен, иначе .model_dump()
+        result = []
+        for order_dto in orders_dto:
+            try:
+                # Пробуем использовать .dict() (Pydantic v1) или .model_dump() (Pydantic v2)
+                if hasattr(order_dto, 'dict') and callable(order_dto.dict):
+                    result.append(order_dto.dict())
+                elif hasattr(order_dto, 'model_dump') and callable(order_dto.model_dump):
+                    result.append(order_dto.model_dump())
+                else:
+                    # Fallback: преобразуем вручную
+                    result.append({
+                        'id': getattr(order_dto, 'id', None),
+                        'order_number': getattr(order_dto, 'order_number', None),
+                        'customer_name': getattr(order_dto, 'customer_name', None),
+                        'phone': getattr(order_dto, 'phone', None),
+                        'address': getattr(order_dto, 'address', None),
+                        'latitude': getattr(order_dto, 'latitude', None),
+                        'longitude': getattr(order_dto, 'longitude', None),
+                        'comment': getattr(order_dto, 'comment', None),
+                        'delivery_time_start': getattr(order_dto, 'delivery_time_start', None),
+                        'delivery_time_end': getattr(order_dto, 'delivery_time_end', None),
+                        'delivery_time_window': getattr(order_dto, 'delivery_time_window', None),
+                        'status': getattr(order_dto, 'status', 'pending'),
+                        'entrance_number': getattr(order_dto, 'entrance_number', None),
+                        'apartment_number': getattr(order_dto, 'apartment_number', None),
+                        'gis_id': getattr(order_dto, 'gis_id', None),
+                    })
+            except Exception as e:
+                logger.error(f"Ошибка преобразования OrderDTO в словарь: {e}", exc_info=True)
+                continue
+        return result
     
     def get_route_data_dict(self, user_id: int, route_date: date = None):
         """

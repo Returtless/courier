@@ -72,11 +72,12 @@ class OrderService:
             call_statuses_list = self.call_status_repository.get_by_user_and_date(
                 user_id, order_date, session
             )
-            call_statuses = {
-                cs.order_number: cs 
-                for cs in call_statuses_list 
-                if cs.order_number
-            }
+            call_statuses = {}
+            for cs in call_statuses_list:
+                # Безопасно получаем order_number через __dict__
+                order_num = cs.__dict__.get('order_number') if hasattr(cs, '__dict__') else getattr(cs, 'order_number', None)
+                if order_num:
+                    call_statuses[order_num] = cs
         else:
             # Если сессия не передана, создаем новую для call_status
             from src.database.connection import get_db_session
@@ -147,8 +148,12 @@ class OrderService:
                     user_id, order_number, order_date, session
                 )
         
-        if cs and cs.is_manual_arrival and cs.manual_arrival_time:
-            dto.manual_arrival_time = cs.manual_arrival_time
+        if cs:
+            # Безопасно получаем атрибуты через __dict__
+            is_manual_arrival = cs.__dict__.get('is_manual_arrival') if hasattr(cs, '__dict__') else getattr(cs, 'is_manual_arrival', False)
+            manual_arrival_time = cs.__dict__.get('manual_arrival_time') if hasattr(cs, '__dict__') else getattr(cs, 'manual_arrival_time', None)
+            if is_manual_arrival and manual_arrival_time:
+                dto.manual_arrival_time = manual_arrival_time
         
         return dto
     
@@ -268,24 +273,34 @@ class OrderService:
                 user_id, order_number, order_date, session
             )
             if cs:
-                if updates.phone:
-                    cs.phone = updates.phone
-                if updates.customer_name:
-                    cs.customer_name = updates.customer_name
-                # Если уведомление уже было отправлено, сбрасываем статус для повторной отправки
-                if cs.status == "confirmed":
-                    cs.status = "pending"
+                # Обновляем только если передана сессия (иначе нужно использовать репозиторий)
+                if session:
+                    if updates.phone:
+                        cs.phone = updates.phone
+                    if updates.customer_name:
+                        cs.customer_name = updates.customer_name
+                    # Если уведомление уже было отправлено, сбрасываем статус для повторной отправки
+                    # Безопасно получаем статус через __dict__
+                    current_status = cs.__dict__.get('status') if hasattr(cs, '__dict__') else getattr(cs, 'status', None)
+                    if current_status == "confirmed":
+                        cs.status = "pending"
                 if session:
                     session.commit()
                 else:
-                    # Если сессия не передана, используем метод update из BaseRepository
+                    # Если сессия не передана, получаем объект заново и обновляем через сессию
                     from src.database.connection import get_db_session
-                    with get_db_session() as session:
-                        cs.phone = updates.phone if updates.phone else cs.phone
-                        cs.customer_name = updates.customer_name if updates.customer_name else cs.customer_name
-                        if cs.status == "confirmed":
-                            cs.status = "pending"
-                        session.commit()
+                    with get_db_session() as sess:
+                        # Получаем объект заново через внутренний метод репозитория
+                        from src.repositories.call_status_repository import CallStatusRepository
+                        actual_cs = self.call_status_repository._get_by_order(user_id, order_number, order_date, sess)
+                        if actual_cs:
+                            if updates.phone:
+                                actual_cs.phone = updates.phone
+                            if updates.customer_name:
+                                actual_cs.customer_name = updates.customer_name
+                            if actual_cs.status == "confirmed":
+                                actual_cs.status = "pending"
+                            sess.commit()
         
         return self._order_db_to_dto(order_db)
     
@@ -396,33 +411,38 @@ class OrderService:
     
     def _order_db_to_dto(self, order_db) -> OrderDTO:
         """Преобразовать OrderDB в OrderDTO"""
-        from sqlalchemy import inspect
-        
-        # Используем inspect для безопасного получения атрибутов,
-        # даже если объект отсоединен от сессии
-        try:
-            # Пытаемся получить атрибуты напрямую (если объект привязан к сессии)
-            attrs = {
-                'id': order_db.id,
-                'order_number': order_db.order_number,
-                'customer_name': order_db.customer_name,
-                'phone': order_db.phone,
-                'address': order_db.address,
-                'latitude': order_db.latitude,
-                'longitude': order_db.longitude,
-                'comment': order_db.comment,
-                'delivery_time_start': order_db.delivery_time_start,
-                'delivery_time_end': order_db.delivery_time_end,
-                'delivery_time_window': order_db.delivery_time_window,
-                'status': order_db.status,
-                'entrance_number': order_db.entrance_number,
-                'apartment_number': order_db.apartment_number,
-                'gis_id': order_db.gis_id
-            }
-        except Exception:
-            # Если объект отсоединен от сессии, используем inspect
-            mapper = inspect(order_db)
-            attrs = {attr.key: getattr(order_db, attr.key, None) for attr in mapper.attrs}
+        # Получаем атрибуты через __dict__ напрямую, чтобы избежать DetachedInstanceError
+        # Это безопасно, так как после session.refresh() все атрибуты уже загружены в __dict__
+        if hasattr(order_db, '__dict__'):
+            db_dict = order_db.__dict__
+            # Фильтруем служебные атрибуты SQLAlchemy (начинающиеся с _)
+            attrs = {k: v for k, v in db_dict.items() if not k.startswith('_')}
+        else:
+            # Fallback: пытаемся получить атрибуты напрямую
+            try:
+                attrs = {
+                    'id': order_db.id,
+                    'order_number': order_db.order_number,
+                    'customer_name': order_db.customer_name,
+                    'phone': order_db.phone,
+                    'address': order_db.address,
+                    'latitude': order_db.latitude,
+                    'longitude': order_db.longitude,
+                    'comment': order_db.comment,
+                    'delivery_time_start': order_db.delivery_time_start,
+                    'delivery_time_end': order_db.delivery_time_end,
+                    'delivery_time_window': order_db.delivery_time_window,
+                    'status': order_db.status,
+                    'entrance_number': order_db.entrance_number,
+                    'apartment_number': order_db.apartment_number,
+                    'gis_id': order_db.gis_id
+                }
+            except Exception as e:
+                # Если и это не работает, возвращаем пустой DTO (не должно происходить)
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Критическая ошибка преобразования OrderDB в OrderDTO: {e}", exc_info=True)
+                attrs = {}
         
         return OrderDTO(
             id=attrs.get('id'),
@@ -436,7 +456,7 @@ class OrderService:
             delivery_time_start=attrs.get('delivery_time_start'),
             delivery_time_end=attrs.get('delivery_time_end'),
             delivery_time_window=attrs.get('delivery_time_window'),
-            status=attrs.get('status'),
+            status=attrs.get('status', 'pending'),
             entrance_number=attrs.get('entrance_number'),
             apartment_number=attrs.get('apartment_number'),
             gis_id=attrs.get('gis_id')

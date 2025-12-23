@@ -411,7 +411,11 @@ class OrderHandlers:
                 )
                 return
             # Преобразуем DTO в словарь для совместимости
-            order = order_dto.dict()
+            # Используем .dict() или .model_dump() в зависимости от версии Pydantic
+            try:
+                order = order_dto.dict() if hasattr(order_dto, 'dict') and callable(order_dto.dict) else order_dto.model_dump()
+            except AttributeError:
+                order = order_dto.model_dump() if hasattr(order_dto, 'model_dump') else {}
             if order:
                 self.parent.update_user_state(user_id, 'searching_order_by_number', {})
                 self.process_search_order_by_number(message)
@@ -460,7 +464,11 @@ class OrderHandlers:
             # Парсим изображение через OrderService (интеграция с ImageOrderParser внутри сервиса)
             logger.info(f"🔍 Начало парсинга изображения для user_id={user_id} через OrderService")
             order_dto = self.parent.order_service.parse_order_from_image(user_id, image_data)
-            order_data = order_dto.dict() if order_dto else None
+            # Используем .dict() или .model_dump() в зависимости от версии Pydantic
+            try:
+                order_data = order_dto.dict() if hasattr(order_dto, 'dict') and callable(order_dto.dict) else order_dto.model_dump()
+            except AttributeError:
+                order_data = order_dto.model_dump() if hasattr(order_dto, 'model_dump') else {} if order_dto else None
 
             if not order_data:
                 logger.warning(f"⚠️ Не удалось извлечь данные из изображения user_id={user_id}")
@@ -488,25 +496,59 @@ class OrderHandlers:
             if order_data.get('order_number'):
                 today = date.today()
                 existing_order_dto = self.parent.order_service.get_order_by_number(user_id, order_data['order_number'], today)
-                existing_order = existing_order_dto.dict() if existing_order_dto else None
+                # Используем .dict() или .model_dump() в зависимости от версии Pydantic
+                if existing_order_dto:
+                    try:
+                        existing_order = existing_order_dto.dict() if hasattr(existing_order_dto, 'dict') and callable(existing_order_dto.dict) else existing_order_dto.model_dump()
+                    except AttributeError:
+                        existing_order = existing_order_dto.model_dump() if hasattr(existing_order_dto, 'model_dump') else {}
+                else:
+                    existing_order = None
                 if existing_order:
                     order_exists = True
                     logger.info(f"⚠️ Заказ {order_data['order_number']} уже существует в БД для user_id={user_id}, date={today}")
             
             # Показываем извлеченные данные для подтверждения
+            # Преобразуем все значения в строки, проверяя что это примитивы
+            def safe_str(value):
+                """Безопасное преобразование значения в строку"""
+                if value is None:
+                    return None
+                # Проверяем что это примитивный тип
+                if isinstance(value, (str, int, float, bool)):
+                    return str(value)
+                # Если это datetime/time объект, преобразуем в строку
+                if hasattr(value, 'strftime'):
+                    return value.strftime('%H:%M' if hasattr(value, 'hour') else '%Y-%m-%d %H:%M:%S')
+                # Для других типов просто преобразуем в строку (но это не должно происходить)
+                logger.warning(f"Неожиданный тип данных в order_data: {type(value)} = {value}")
+                return str(value)
+            
             preview_text = "📋 <b>Извлеченные данные:</b>\n\n"
             if order_data.get('order_number'):
-                preview_text += f"📦 <b>Номер заказа:</b> {order_data['order_number']}\n"
+                order_num = safe_str(order_data['order_number'])
+                if order_num:
+                    preview_text += f"📦 <b>Номер заказа:</b> {order_num}\n"
             if order_data.get('address'):
-                preview_text += f"📍 <b>Адрес:</b> {order_data['address']}\n"
+                address = safe_str(order_data['address'])
+                if address:
+                    preview_text += f"📍 <b>Адрес:</b> {address}\n"
             if order_data.get('customer_name'):
-                preview_text += f"👤 <b>Имя:</b> {order_data['customer_name']}\n"
+                name = safe_str(order_data['customer_name'])
+                if name:
+                    preview_text += f"👤 <b>Имя:</b> {name}\n"
             if order_data.get('phone'):
-                preview_text += f"📞 <b>Телефон:</b> {order_data['phone']}\n"
+                phone = safe_str(order_data['phone'])
+                if phone:
+                    preview_text += f"📞 <b>Телефон:</b> {phone}\n"
             if order_data.get('delivery_time_window'):
-                preview_text += f"🕐 <b>Время доставки:</b> {order_data['delivery_time_window']}\n"
+                time_window = safe_str(order_data['delivery_time_window'])
+                if time_window:
+                    preview_text += f"🕐 <b>Время доставки:</b> {time_window}\n"
             if order_data.get('comment'):
-                preview_text += f"💬 <b>Комментарий:</b> {order_data['comment']}\n"
+                comment = safe_str(order_data['comment'])
+                if comment:
+                    preview_text += f"💬 <b>Комментарий:</b> {comment}\n"
             
             from telebot import types
             markup = types.InlineKeyboardMarkup()
@@ -643,7 +685,10 @@ class OrderHandlers:
                 except Exception as e:
                     error_msg = f"Заказ {i+1}: {str(e)}"
                     errors.append(error_msg)
-                    logger.error(f"Ошибка сохранения заказа {i+1}: {e}, данные: {order_data}", exc_info=True)
+                    # Преобразуем order_data в безопасный формат для логирования (без объектов)
+                    safe_order_data = {k: str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v 
+                                     for k, v in order_data.items()} if isinstance(order_data, dict) else str(order_data)
+                    logger.error(f"Ошибка сохранения заказа {i+1}: {e}, данные: {safe_order_data}", exc_info=True)
             
             # Очищаем временные данные
             self.parent.update_user_state(user_id, 'state', None)
@@ -876,8 +921,20 @@ class OrderHandlers:
         user_id = message.from_user.id
         today = date.today()
         
-        # Загружаем через OrderService
-        orders_data = self.parent.get_today_orders_dict(user_id, today)
+        logger.info(f"handle_order_details_start вызван для user_id={user_id}")
+        
+        try:
+            # Загружаем через OrderService
+            orders_data = self.parent.get_today_orders_dict(user_id, today)
+            logger.debug(f"Загружено заказов: {len(orders_data) if orders_data else 0}")
+        except Exception as e:
+            logger.error(f"Ошибка загрузки заказов для редактирования: {e}", exc_info=True)
+            self.bot.reply_to(
+                message,
+                f"❌ Ошибка загрузки заказов: {str(e)}",
+                reply_markup=self.parent._orders_menu_markup(user_id)
+            )
+            return
         
         if not orders_data:
             user_id = message.from_user.id
@@ -1074,7 +1131,11 @@ class OrderHandlers:
             if not order_dto:
                 self.bot.send_message(chat_id, f"❌ Заказ №{order_number} не найден", reply_markup=self.parent._main_menu_markup())
                 return
-            order_data = order_dto.dict()
+            # Используем .dict() или .model_dump() в зависимости от версии Pydantic
+            try:
+                order_data = order_dto.dict() if hasattr(order_dto, 'dict') and callable(order_dto.dict) else order_dto.model_dump()
+            except AttributeError:
+                order_data = order_dto.model_dump() if hasattr(order_dto, 'model_dump') else {}
         except Exception as e:
             logger.error(f"Ошибка загрузки заказа из БД: {e}", exc_info=True)
             self.bot.send_message(chat_id, f"❌ Ошибка загрузки данных: {str(e)}", reply_markup=self.parent._main_menu_markup())

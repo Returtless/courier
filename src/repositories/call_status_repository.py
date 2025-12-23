@@ -40,7 +40,17 @@ class CallStatusRepository(BaseRepository[CallStatusDB]):
         """
         if session is None:
             with get_db_session() as session:
-                return self._get_by_order(user_id, order_number, call_date, session)
+                result = self._get_by_order(user_id, order_number, call_date, session)
+                if result:
+                    session.refresh(result)
+                    loaded_attrs = {}
+                    for key, value in result.__dict__.items():
+                        if not key.startswith('_sa_'):
+                            loaded_attrs[key] = value
+                    session.expunge(result)
+                    for key, value in loaded_attrs.items():
+                        object.__setattr__(result, key, value)
+                return result
         return self._get_by_order(user_id, order_number, call_date, session)
     
     def _get_by_order(
@@ -78,7 +88,19 @@ class CallStatusRepository(BaseRepository[CallStatusDB]):
         """
         if session is None:
             with get_db_session() as session:
-                return self._get_pending_calls(user_id, call_date, session)
+                results = self._get_pending_calls(user_id, call_date, session)
+                expunged_results = []
+                for result in results:
+                    session.refresh(result)
+                    loaded_attrs = {}
+                    for key, value in result.__dict__.items():
+                        if not key.startswith('_sa_'):
+                            loaded_attrs[key] = value
+                    session.expunge(result)
+                    for key, value in loaded_attrs.items():
+                        object.__setattr__(result, key, value)
+                    expunged_results.append(result)
+                return expunged_results
         return self._get_pending_calls(user_id, call_date, session)
     
     def _get_pending_calls(
@@ -113,7 +135,19 @@ class CallStatusRepository(BaseRepository[CallStatusDB]):
         """
         if session is None:
             with get_db_session() as session:
-                return self._get_pending_calls(None, call_date, session)
+                results = self._get_pending_calls(None, call_date, session)
+                expunged_results = []
+                for result in results:
+                    session.refresh(result)
+                    loaded_attrs = {}
+                    for key, value in result.__dict__.items():
+                        if not key.startswith('_sa_'):
+                            loaded_attrs[key] = value
+                    session.expunge(result)
+                    for key, value in loaded_attrs.items():
+                        object.__setattr__(result, key, value)
+                    expunged_results.append(result)
+                return expunged_results
         return self._get_pending_calls(None, call_date, session)
     
     def get_confirmed_calls(
@@ -135,7 +169,19 @@ class CallStatusRepository(BaseRepository[CallStatusDB]):
         """
         if session is None:
             with get_db_session() as session:
-                return self._get_confirmed_calls(user_id, call_date, session)
+                results = self._get_confirmed_calls(user_id, call_date, session)
+                expunged_results = []
+                for result in results:
+                    session.refresh(result)
+                    loaded_attrs = {}
+                    for key, value in result.__dict__.items():
+                        if not key.startswith('_sa_'):
+                            loaded_attrs[key] = value
+                    session.expunge(result)
+                    for key, value in loaded_attrs.items():
+                        object.__setattr__(result, key, value)
+                    expunged_results.append(result)
+                return expunged_results
         return self._get_confirmed_calls(user_id, call_date, session)
     
     def _get_confirmed_calls(
@@ -188,11 +234,21 @@ class CallStatusRepository(BaseRepository[CallStatusDB]):
         """
         if session is None:
             with get_db_session() as session:
-                return self._create_or_update(
+                result = self._create_or_update(
                     user_id, order_number, call_time, phone, customer_name,
                     call_date, is_manual_call, is_manual_arrival,
                     arrival_time, manual_arrival_time, session
                 )
+                if result:
+                    session.refresh(result)
+                    loaded_attrs = {}
+                    for key, value in result.__dict__.items():
+                        if not key.startswith('_sa_'):
+                            loaded_attrs[key] = value
+                    session.expunge(result)
+                    for key, value in loaded_attrs.items():
+                        object.__setattr__(result, key, value)
+                return result
         return self._create_or_update(
             user_id, order_number, call_time, phone, customer_name,
             call_date, is_manual_call, is_manual_arrival,
@@ -320,7 +376,19 @@ class CallStatusRepository(BaseRepository[CallStatusDB]):
         """
         if session is None:
             with get_db_session() as session:
-                return self._get_by_user_and_date(user_id, call_date, session)
+                results = self._get_by_user_and_date(user_id, call_date, session)
+                expunged_results = []
+                for result in results:
+                    session.refresh(result)
+                    loaded_attrs = {}
+                    for key, value in result.__dict__.items():
+                        if not key.startswith('_sa_'):
+                            loaded_attrs[key] = value
+                    session.expunge(result)
+                    for key, value in loaded_attrs.items():
+                        object.__setattr__(result, key, value)
+                    expunged_results.append(result)
+                return expunged_results
         return self._get_by_user_and_date(user_id, call_date, session)
     
     def _get_by_user_and_date(
@@ -360,7 +428,19 @@ class CallStatusRepository(BaseRepository[CallStatusDB]):
         """
         if session is None:
             with get_db_session() as session:
-                return self._get_retry_calls(user_id, call_date, max_time, max_attempts, session)
+                results = self._get_retry_calls(user_id, call_date, max_time, max_attempts, session)
+                expunged_results = []
+                for result in results:
+                    session.refresh(result)
+                    loaded_attrs = {}
+                    for key, value in result.__dict__.items():
+                        if not key.startswith('_sa_'):
+                            loaded_attrs[key] = value
+                    session.expunge(result)
+                    for key, value in loaded_attrs.items():
+                        object.__setattr__(result, key, value)
+                    expunged_results.append(result)
+                return expunged_results
         return self._get_retry_calls(user_id, call_date, max_time, max_attempts, session)
     
     def _get_retry_calls(
@@ -403,7 +483,19 @@ class CallStatusRepository(BaseRepository[CallStatusDB]):
         """
         if session is None:
             with get_db_session() as session:
-                return self._get_retry_calls(None, call_date, max_time, max_attempts, session)
+                results = self._get_retry_calls(None, call_date, max_time, max_attempts, session)
+                expunged_results = []
+                for result in results:
+                    session.refresh(result)
+                    loaded_attrs = {}
+                    for key, value in result.__dict__.items():
+                        if not key.startswith('_sa_'):
+                            loaded_attrs[key] = value
+                    session.expunge(result)
+                    for key, value in loaded_attrs.items():
+                        object.__setattr__(result, key, value)
+                    expunged_results.append(result)
+                return expunged_results
         return self._get_retry_calls(None, call_date, max_time, max_attempts, session)
     
     def mark_as_sent(

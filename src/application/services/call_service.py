@@ -406,19 +406,47 @@ class CallService:
     
     def _call_status_db_to_dto(self, call_status_db: CallStatusDB) -> CallStatusDTO:
         """Преобразовать CallStatusDB в CallStatusDTO"""
+        # Безопасно получаем атрибуты из отсоединенного объекта через __dict__
+        if hasattr(call_status_db, '__dict__'):
+            db_dict = call_status_db.__dict__
+            attrs = {k: v for k, v in db_dict.items() if not k.startswith('_')}
+        else:
+            # Fallback: пытаемся получить атрибуты напрямую
+            try:
+                attrs = {
+                    'id': call_status_db.id,
+                    'user_id': call_status_db.user_id,
+                    'order_number': call_status_db.order_number,
+                    'call_time': call_status_db.call_time,
+                    'arrival_time': call_status_db.arrival_time,
+                    'phone': call_status_db.phone,
+                    'customer_name': call_status_db.customer_name,
+                    'status': call_status_db.status,
+                    'attempts': call_status_db.attempts,
+                    'is_manual_call': call_status_db.is_manual_call,
+                    'is_manual_arrival': call_status_db.is_manual_arrival,
+                    'manual_arrival_time': call_status_db.manual_arrival_time,
+                    'confirmation_comment': call_status_db.confirmation_comment
+                }
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Критическая ошибка преобразования CallStatusDB в CallStatusDTO: {e}", exc_info=True)
+                attrs = {}
+        
         return CallStatusDTO(
-            id=call_status_db.id,
-            user_id=call_status_db.user_id,
-            order_number=call_status_db.order_number,
-            call_time=call_status_db.call_time,
-            arrival_time=call_status_db.arrival_time,
-            phone=call_status_db.phone,
-            customer_name=call_status_db.customer_name,
-            status=call_status_db.status,
-            attempts=call_status_db.attempts,
-            is_manual_call=call_status_db.is_manual_call,
-            is_manual_arrival=call_status_db.is_manual_arrival,
-            manual_arrival_time=call_status_db.manual_arrival_time,
-            confirmation_comment=call_status_db.confirmation_comment
+            id=attrs.get('id'),
+            user_id=attrs.get('user_id'),
+            order_number=attrs.get('order_number'),
+            call_time=attrs.get('call_time'),
+            arrival_time=attrs.get('arrival_time'),
+            phone=attrs.get('phone'),
+            customer_name=attrs.get('customer_name'),
+            status=attrs.get('status'),
+            attempts=attrs.get('attempts'),
+            is_manual_call=attrs.get('is_manual_call'),
+            is_manual_arrival=attrs.get('is_manual_arrival'),
+            manual_arrival_time=attrs.get('manual_arrival_time'),
+            confirmation_comment=attrs.get('confirmation_comment')
         )
 
