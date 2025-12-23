@@ -153,7 +153,20 @@ class OrderRepository(BaseRepository[OrderDB]):
         """
         if session is None:
             with get_db_session() as session:
-                return self._save(user_id, order, order_date, session, partial_update)
+                result = self._save(user_id, order, order_date, session, partial_update)
+                # Загружаем все атрибуты перед отсоединением, чтобы избежать DetachedInstanceError
+                session.refresh(result)
+                # Принудительно загружаем все атрибуты, обращаясь к каждому
+                # Это гарантирует, что они будут доступны после expunge
+                from sqlalchemy import inspect
+                mapper = inspect(result)
+                for attr in mapper.attrs:
+                    try:
+                        _ = getattr(result, attr.key)
+                    except Exception:
+                        pass  # Игнорируем ошибки для deferred/lazy атрибутов
+                session.expunge(result)
+                return result
         return self._save(user_id, order, order_date, session, partial_update)
     
     def _save(

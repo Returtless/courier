@@ -396,21 +396,49 @@ class OrderService:
     
     def _order_db_to_dto(self, order_db) -> OrderDTO:
         """Преобразовать OrderDB в OrderDTO"""
+        from sqlalchemy import inspect
+        
+        # Используем inspect для безопасного получения атрибутов,
+        # даже если объект отсоединен от сессии
+        try:
+            # Пытаемся получить атрибуты напрямую (если объект привязан к сессии)
+            attrs = {
+                'id': order_db.id,
+                'order_number': order_db.order_number,
+                'customer_name': order_db.customer_name,
+                'phone': order_db.phone,
+                'address': order_db.address,
+                'latitude': order_db.latitude,
+                'longitude': order_db.longitude,
+                'comment': order_db.comment,
+                'delivery_time_start': order_db.delivery_time_start,
+                'delivery_time_end': order_db.delivery_time_end,
+                'delivery_time_window': order_db.delivery_time_window,
+                'status': order_db.status,
+                'entrance_number': order_db.entrance_number,
+                'apartment_number': order_db.apartment_number,
+                'gis_id': order_db.gis_id
+            }
+        except Exception:
+            # Если объект отсоединен от сессии, используем inspect
+            mapper = inspect(order_db)
+            attrs = {attr.key: getattr(order_db, attr.key, None) for attr in mapper.attrs}
+        
         return OrderDTO(
-            id=order_db.id,
-            order_number=order_db.order_number,
-            customer_name=order_db.customer_name,
-            phone=order_db.phone,
-            address=order_db.address,
-            latitude=order_db.latitude,
-            longitude=order_db.longitude,
-            comment=order_db.comment,
-            delivery_time_start=order_db.delivery_time_start,
-            delivery_time_end=order_db.delivery_time_end,
-            delivery_time_window=order_db.delivery_time_window,
-            status=order_db.status,
-            entrance_number=order_db.entrance_number,
-            apartment_number=order_db.apartment_number,
-            gis_id=order_db.gis_id
+            id=attrs.get('id'),
+            order_number=attrs.get('order_number'),
+            customer_name=attrs.get('customer_name'),
+            phone=attrs.get('phone'),
+            address=attrs.get('address'),
+            latitude=attrs.get('latitude'),
+            longitude=attrs.get('longitude'),
+            comment=attrs.get('comment'),
+            delivery_time_start=attrs.get('delivery_time_start'),
+            delivery_time_end=attrs.get('delivery_time_end'),
+            delivery_time_window=attrs.get('delivery_time_window'),
+            status=attrs.get('status'),
+            entrance_number=attrs.get('entrance_number'),
+            apartment_number=attrs.get('apartment_number'),
+            gis_id=attrs.get('gis_id')
         )
 
