@@ -469,11 +469,14 @@ class RouteHandlers:
         user_id = message.from_user.id
         today = date.today()
 
-        logger.debug(f"Начало оптимизации для user_id={user_id}")
+        logger.info(f"🚀 Начало оптимизации для user_id={user_id}, date={today}")
 
         # Проверяем наличие точки старта и времени старта
+        logger.debug(f"Проверяю точку старта для user_id={user_id}")
         start_location = self.parent.route_service.get_start_location(user_id, today)
+        logger.debug(f"Получена точка старта: {start_location}")
         if not start_location:
+            logger.warning(f"Точка старта не найдена для user_id={user_id}")
             self.bot.reply_to(
                 message,
                 "❌ Не установлена точка старта. Используйте кнопку 📍 Точка старта",
@@ -481,7 +484,9 @@ class RouteHandlers:
             )
             return
 
+        logger.debug(f"Проверяю время старта: {start_location.start_time}")
         if not start_location.start_time:
+            logger.warning(f"Время старта не установлено для user_id={user_id}")
             self.bot.reply_to(
                 message,
                 "❌ Не установлено время старта. Используйте кнопку 📍 Точка старта",
@@ -496,15 +501,27 @@ class RouteHandlers:
         )
 
         try:
+            logger.info(f"Вызываю optimize_route для user_id={user_id}")
+            import sys
+            sys.stdout.flush()  # Принудительно сбрасываем буфер вывода
             result = self.parent.route_service.optimize_route(user_id, today)
+            logger.info(f"Оптимизация завершена, результат: success={result.success if result else None}")
+            sys.stdout.flush()
         except Exception as e:
+            import sys
+            import traceback
             logger.error(f"Ошибка оптимизации маршрута: {e}", exc_info=True)
-            self.bot.edit_message_text(
-                f"❌ Ошибка оптимизации маршрута: {str(e)}",
-                message.chat.id,
-                status_msg.message_id,
-                parse_mode='HTML'
-            )
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            sys.stdout.flush()
+            try:
+                self.bot.edit_message_text(
+                    f"❌ Ошибка оптимизации маршрута: {str(e)}",
+                    message.chat.id,
+                    status_msg.message_id,
+                    parse_mode='HTML'
+                )
+            except Exception as bot_error:
+                logger.error(f"Ошибка отправки сообщения об ошибке: {bot_error}")
             return
 
         if not result or not result.success or not result.route:

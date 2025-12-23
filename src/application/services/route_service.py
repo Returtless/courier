@@ -69,13 +69,18 @@ class RouteService:
             order_date = date.today()
         
         try:
+            logger.info(f"🔍 Начало optimize_route для user_id={user_id}, date={order_date}")
             # Получаем заказы
+            logger.debug("Загружаю заказы...")
             orders_dto = self.order_service.get_orders_by_date(user_id, order_date, session)
+            logger.debug(f"Загружено заказов: {len(orders_dto)}")
             
             # Фильтруем только активные (не доставленные) заказы
             active_orders_dto = [o for o in orders_dto if o.status != "delivered"]
+            logger.debug(f"Активных заказов: {len(active_orders_dto)}")
             
             if not active_orders_dto:
+                logger.warning(f"Нет активных заказов для оптимизации для user_id={user_id}")
                 return RouteOptimizationResult(
                     success=False,
                     error_message="Нет активных заказов для оптимизации"
@@ -106,17 +111,20 @@ class RouteService:
                 orders.append(order)
             
             # Получаем точку старта
+            logger.debug("Получаю точку старта...")
             start_location_db = self.route_repository.get_start_location(
                 user_id, order_date, session
             )
             
             if not start_location_db:
+                logger.warning(f"Точка старта не найдена для user_id={user_id}")
                 return RouteOptimizationResult(
                     success=False,
                     error_message="Точка старта не установлена. Установите точку старта перед оптимизацией."
                 )
             
             # Определяем start_location и start_time
+            logger.debug("Извлекаю атрибуты точки старта...")
             # Безопасно получаем атрибуты из отсоединенного объекта через __dict__
             if hasattr(start_location_db, '__dict__'):
                 db_dict = start_location_db.__dict__
@@ -141,12 +149,16 @@ class RouteService:
                     address = None
                     start_time = None
             
+            logger.debug(f"Тип точки старта: {location_type}, start_time: {start_time}")
             if location_type == "geo":
                 start_location = (latitude, longitude)
+                logger.debug(f"Использую координаты: {start_location}")
             else:
                 # Геокодируем адрес
+                logger.info(f"Геокодирую адрес: {address}")
                 lat, lon, _ = self.maps_service.geocode_address_sync(address)
                 start_location = (lat, lon)
+                logger.debug(f"Получены координаты из геокодирования: {start_location}")
             if not start_time:
                 # Используем текущее время
                 start_time = datetime.combine(order_date, time(9, 0))  # 9:00 по умолчанию
@@ -159,6 +171,7 @@ class RouteService:
                     order.manual_arrival_time = None
             
             # Оптимизируем маршрут
+            logger.info(f"Запускаю оптимизацию маршрута для {len(orders)} заказов...")
             optimized_route = self.route_optimizer.optimize_route_sync(
                 orders=orders,
                 start_location=start_location,
@@ -166,6 +179,7 @@ class RouteService:
                 user_id=user_id,
                 use_fallback=recalculate_without_manual
             )
+            logger.info(f"Оптимизация завершена, точек в маршруте: {len(optimized_route.points) if optimized_route.points else 0}")
             
             if not optimized_route.points:
                 return RouteOptimizationResult(
@@ -174,9 +188,11 @@ class RouteService:
                 )
             
             # Преобразуем OptimizedRoute в RouteDTO
+            logger.debug("Преобразую оптимизированный маршрут в DTO...")
             route_dto = self._optimized_route_to_dto(optimized_route, active_orders_dto)
             
             # Сохраняем маршрут в БД
+            logger.debug("Сохраняю маршрут в БД...")
             route_data = {
                 'route_summary': [self._route_point_to_dict(p) for p in optimized_route.points],
                 'route_order': [p.order.order_number for p in optimized_route.points],
@@ -187,9 +203,12 @@ class RouteService:
             }
             
             self.route_repository.save_route(user_id, order_date, route_data, session)
+            logger.debug("Маршрут сохранен в БД")
             
             # Создаем/обновляем call_status для каждого заказа
+            logger.debug("Создаю/обновляю call_status...")
             self._create_call_statuses(optimized_route, user_id, order_date, active_orders_dto, session)
+            logger.debug("Call_status созданы/обновлены")
             
             return RouteOptimizationResult(
                 success=True,
@@ -197,7 +216,11 @@ class RouteService:
             )
             
         except Exception as e:
+            import sys
+            import traceback
             logger.error(f"Ошибка оптимизации маршрута: {e}", exc_info=True)
+            logger.error(f"Полный traceback: {traceback.format_exc()}")
+            sys.stdout.flush()
             return RouteOptimizationResult(
                 success=False,
                 error_message=f"Ошибка оптимизации: {str(e)}"
