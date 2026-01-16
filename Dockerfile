@@ -59,5 +59,6 @@ RUN mkdir -p /app/data
 ENV PYTHONUNBUFFERED=1
 
 # Команда запуска
-CMD ["python", "main.py"]
+# Используем shell-форму, чтобы можно было запустить миграции перед стартом приложения
+CMD ["sh", "-c", "python scripts/migrate.py && python main.py"]
 

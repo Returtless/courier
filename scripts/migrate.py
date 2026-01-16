@@ -18,6 +18,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def wait_for_postgres(db_url: str, max_retries: int = 30, retry_delay: int = 2):
+    """Ожидание готовности PostgreSQL"""
+    from sqlalchemy import create_engine, text
+    import time
+    
+    for attempt in range(max_retries):
+        try:
+            engine = create_engine(db_url, connect_args={"connect_timeout": 2})
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            logger.info("✅ PostgreSQL готов к подключению")
+            return True
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.info(f"⏳ Ожидание PostgreSQL... (попытка {attempt + 1}/{max_retries})")
+                time.sleep(retry_delay)
+            else:
+                logger.error(f"❌ PostgreSQL не готов после {max_retries} попыток: {e}")
+                return False
+    return False
+
+
 def run_migrations():
     """Run all pending migrations"""
     try:
@@ -33,6 +55,13 @@ def run_migrations():
         
         logger.info("🔄 Starting database migrations...")
         logger.info(f"📊 Database: {db_url.split('@')[1] if '@' in db_url else 'local'}")
+        
+        # Если используется PostgreSQL, ждем готовности
+        if "postgresql" in db_url or "postgres" in db_url:
+            logger.info("⏳ Ожидание готовности PostgreSQL...")
+            if not wait_for_postgres(db_url):
+                logger.error("❌ Не удалось подключиться к PostgreSQL. Проверьте, что база данных запущена.")
+                return False
         
         # Create Alembic config
         logger.info("📝 Создание конфигурации Alembic...")
@@ -51,31 +80,55 @@ def run_migrations():
         current_version = None
         try:
             from sqlalchemy import create_engine, text, inspect
+            from sqlalchemy.exc import ProgrammingError
             engine = create_engine(db_url)
             inspector = inspect(engine)
             
             # Проверяем, существует ли таблица alembic_version
-            if inspector.has_table('alembic_version'):
-                with engine.begin() as conn:
-                    result = conn.execute(text("SELECT version_num FROM alembic_version LIMIT 1"))
-                    current_version = result.scalar()
-                    if current_version:
-                        logger.info(f"📌 Текущая версия миграций в БД: {current_version}")
-                        
-                        # Если версия 002 (старая удаленная миграция), обновляем на 000
-                        if current_version == '002':
-                            logger.warning("⚠️ Обнаружена версия '002' (старая удаленная миграция)")
-                            logger.info("🔄 Обновление версии в БД на '000'...")
-                            conn.execute(text("UPDATE alembic_version SET version_num = '000'"))
-                            logger.info("✅ Версия обновлена на '000'")
-                            current_version = '000'
-                    else:
-                        logger.info("📌 Таблица alembic_version пуста - миграции не применялись")
+            # Используем безопасную проверку через информацию о схеме
+            has_alembic_table = False
+            try:
+                tables = inspector.get_table_names()
+                has_alembic_table = 'alembic_version' in tables
+                logger.debug(f"Список таблиц: {tables}")
+            except Exception as inspect_error:
+                logger.warning(f"⚠️ Не удалось проверить список таблиц через inspector: {inspect_error}")
+                # Пробуем альтернативный способ - прямой SQL запрос с обработкой ошибки
+                try:
+                    with engine.connect() as test_conn:
+                        test_conn.execute(text("SELECT 1 FROM alembic_version LIMIT 1"))
+                        has_alembic_table = True
+                except (ProgrammingError, Exception):
+                    has_alembic_table = False
+            
+            if has_alembic_table:
+                try:
+                    with engine.begin() as conn:
+                        result = conn.execute(text("SELECT version_num FROM alembic_version LIMIT 1"))
+                        current_version = result.scalar()
+                        if current_version:
+                            logger.info(f"📌 Текущая версия миграций в БД: {current_version}")
+                            
+                            # Если версия 002 (старая удаленная миграция), обновляем на 000
+                            if current_version == '002':
+                                logger.warning("⚠️ Обнаружена версия '002' (старая удаленная миграция)")
+                                logger.info("🔄 Обновление версии в БД на '000'...")
+                                conn.execute(text("UPDATE alembic_version SET version_num = '000'"))
+                                logger.info("✅ Версия обновлена на '000'")
+                                current_version = '000'
+                        else:
+                            logger.info("📌 Таблица alembic_version пуста - миграции не применялись")
+                except (ProgrammingError, Exception) as query_error:
+                    # Если запрос не выполнился (таблица может не существовать), игнорируем
+                    logger.warning(f"⚠️ Не удалось проверить версию через SQL (таблица может не существовать): {query_error}")
+                    logger.info("🔄 Продолжаем применение миграций...")
+                    current_version = None
             else:
                 logger.info("📌 Таблица alembic_version не существует - применяем миграции с нуля")
         except Exception as e:
             logger.warning(f"⚠️ Не удалось проверить версию миграций: {e}")
-            logger.info("🔄 Продолжаем применение миграций...")
+            logger.info("🔄 Продолжаем применение миграций (таблица, вероятно, не существует)...")
+            current_version = None
         
         # Проверяем, нужны ли миграции
         logger.info("🔄 Проверка необходимости миграций...")
@@ -119,15 +172,28 @@ def run_migrations():
                 logger.error(f"❌ Ошибка при применении миграций: {upgrade_error}", exc_info=True)
                 raise
         
-        # Проверяем финальную версию
+        # Проверяем финальную версию (только если таблица существует)
         try:
-            from sqlalchemy import create_engine, text
+            from sqlalchemy import create_engine, text, inspect
+            from sqlalchemy.exc import ProgrammingError
             engine = create_engine(db_url)
-            with engine.connect() as conn:
-                result = conn.execute(text("SELECT version_num FROM alembic_version LIMIT 1"))
-                final_version = result.scalar()
-                logger.info(f"📌 Финальная версия миграций в БД: {final_version}")
-        except Exception as e:
+            inspector = inspect(engine)
+            
+            # Проверяем существование таблицы перед запросом
+            try:
+                tables = inspector.get_table_names()
+                has_alembic_table = 'alembic_version' in tables
+            except Exception:
+                has_alembic_table = False
+            
+            if has_alembic_table:
+                with engine.connect() as conn:
+                    result = conn.execute(text("SELECT version_num FROM alembic_version LIMIT 1"))
+                    final_version = result.scalar()
+                    logger.info(f"📌 Финальная версия миграций в БД: {final_version}")
+            else:
+                logger.info("📌 Таблица alembic_version еще не создана (миграции могут быть в процессе)")
+        except (ProgrammingError, Exception) as e:
             logger.warning(f"⚠️ Не удалось проверить финальную версию: {e}")
         
         # Проверяем и добавляем отсутствующие столбцы в call_status (если таблица существует)
