@@ -241,35 +241,11 @@ def upgrade():
     else:
         logger.info("⏭️ Таблица 'geocode_cache' уже существует, пропускаем создание")
     
-    # Create route_cache table
-    logger.info("📋 Проверка таблицы 'route_cache'...")
-    if not inspector.has_table('route_cache'):
-        logger.info("📝 Создание таблицы 'route_cache'...")
-        op.create_table(
-        'route_cache',
-        sa.Column('id', sa.Integer(), nullable=False),
-        sa.Column('start_lat', sa.Float(), nullable=False),
-        sa.Column('start_lon', sa.Float(), nullable=False),
-        sa.Column('end_lat', sa.Float(), nullable=False),
-        sa.Column('end_lon', sa.Float(), nullable=False),
-        sa.Column('distance_km', sa.Float(), nullable=False),
-        sa.Column('time_minutes', sa.Float(), nullable=False),
-        sa.Column('created_at', sa.DateTime(), nullable=True),
-        sa.Column('updated_at', sa.DateTime(), nullable=True),
-        sa.PrimaryKeyConstraint('id')
-    )
-        op.create_index(op.f('ix_route_cache_id'), 'route_cache', ['id'], unique=False)
-        op.create_index('idx_route_coords', 'route_cache', ['start_lat', 'start_lon', 'end_lat', 'end_lon'], unique=False)
-        logger.info("✅ Таблица 'route_cache' создана")
-    else:
-        logger.info("⏭️ Таблица 'route_cache' уже существует, пропускаем создание")
-    
     print("✅ [000_initial] Миграция 000_initial завершена успешно!", file=sys.stdout, flush=True)
     logger.info("✅ Миграция 000_initial завершена успешно!")
 
 
 def downgrade():
-    op.drop_table('route_cache')
     op.drop_table('geocode_cache')
     op.drop_table('user_credentials')
     op.drop_table('user_settings')
