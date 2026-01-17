@@ -189,12 +189,16 @@ class RouteService:
             
             # Преобразуем OptimizedRoute в RouteDTO
             logger.debug("Преобразую оптимизированный маршрут в DTO...")
-            route_dto = self._optimized_route_to_dto(optimized_route, active_orders_dto)
+            route_dto = self._optimized_route_to_dto(optimized_route, active_orders_dto, user_id)
+            
+            # Получаем настройки пользователя для расчета времени звонков
+            user_settings = self.settings_service.get_settings(user_id)
+            call_advance_minutes = user_settings.call_advance_minutes if user_settings else 10
             
             # Сохраняем маршрут в БД
             logger.debug("Сохраняю маршрут в БД...")
             route_data = {
-                'route_summary': [self._route_point_to_dict(p) for p in optimized_route.points],
+                'route_summary': [self._route_point_to_dict(p, call_advance_minutes) for p in optimized_route.points],
                 'route_order': [p.order.order_number for p in optimized_route.points],
                 'call_schedule': self._build_call_schedule(optimized_route, user_id, order_date),
                 'total_distance': optimized_route.total_distance,
@@ -561,11 +565,18 @@ class RouteService:
     def _optimized_route_to_dto(
         self,
         optimized_route,
-        orders_dto: List
+        orders_dto: List,
+        user_id: int = None
     ) -> RouteDTO:
         """Преобразовать OptimizedRoute в RouteDTO"""
         route_points = []
         orders_dict = {o.order_number: o for o in orders_dto}
+        
+        # Получаем настройки пользователя
+        call_advance_minutes = 10
+        if user_id:
+            user_settings = self.settings_service.get_settings(user_id)
+            call_advance_minutes = user_settings.call_advance_minutes if user_settings else 10
         
         for point in optimized_route.points:
             order_dto = orders_dict.get(point.order.order_number)
@@ -574,7 +585,7 @@ class RouteService:
                     order_number=point.order.order_number,
                     address=point.order.address or "",
                     estimated_arrival=point.estimated_arrival,
-                    call_time=self._calculate_call_time(point.estimated_arrival, point.order.order_number, orders_dto),
+                    call_time=self._calculate_call_time(point.estimated_arrival, point.order.order_number, orders_dto, call_advance_minutes),
                     distance_from_previous=point.distance_from_previous,
                     time_from_previous=point.time_from_previous,
                     customer_name=order_dto.customer_name,
@@ -595,17 +606,14 @@ class RouteService:
         self,
         arrival_time: datetime,
         order_number: str,
-        orders_dto: List
+        orders_dto: List,
+        call_advance_minutes: int = 10
     ) -> Optional[datetime]:
         """Рассчитать время звонка на основе времени прибытия"""
         # Находим заказ
         order_dto = next((o for o in orders_dto if o.order_number == order_number), None)
         if not order_dto:
             return None
-        
-        # Получаем настройки пользователя (нужен user_id, но его нет в контексте)
-        # Используем значение по умолчанию
-        call_advance_minutes = 10
         
         from datetime import timedelta
         call_time = arrival_time - timedelta(minutes=call_advance_minutes)
@@ -620,11 +628,18 @@ class RouteService:
         """Построить график звонков"""
         call_schedule = []
         
+        # Получаем настройки пользователя
+        call_advance_minutes = 10
+        if user_id:
+            user_settings = self.settings_service.get_settings(user_id)
+            call_advance_minutes = user_settings.call_advance_minutes if user_settings else 10
+        
         for point in optimized_route.points:
             call_time = self._calculate_call_time(
                 point.estimated_arrival,
                 point.order.order_number,
-                []
+                [],
+                call_advance_minutes
             )
             if call_time:
                 call_schedule.append({
@@ -635,13 +650,12 @@ class RouteService:
         
         return call_schedule
     
-    def _route_point_to_dict(self, point) -> Dict:
+    def _route_point_to_dict(self, point, call_advance_minutes: int = 10) -> Dict:
         """Преобразовать RoutePoint в словарь"""
         # Рассчитываем call_time для сохранения в БД
         call_time = None
         if point.estimated_arrival:
             from datetime import timedelta
-            call_advance_minutes = 10  # TODO: брать из настроек пользователя
             call_time = point.estimated_arrival - timedelta(minutes=call_advance_minutes)
         
         return {
@@ -664,6 +678,10 @@ class RouteService:
         """Создать/обновить статусы звонков для заказов в маршруте"""
         orders_dict = {o.order_number: o for o in orders_dto}
         
+        # Получаем настройки пользователя
+        user_settings = self.settings_service.get_settings(user_id)
+        call_advance_minutes = user_settings.call_advance_minutes if user_settings else 10
+        
         for point in optimized_route.points:
             order_dto = orders_dict.get(point.order.order_number)
             if not order_dto:
@@ -673,7 +691,8 @@ class RouteService:
             call_time = self._calculate_call_time(
                 point.estimated_arrival,
                 point.order.order_number,
-                orders_dto
+                orders_dto,
+                call_advance_minutes
             )
             
             if call_time and order_dto.phone:
@@ -697,6 +716,122 @@ class RouteService:
                         manual_arrival_time=None,
                         session=session
                     )
+    
+    def recalculate_call_times(
+        self,
+        user_id: int,
+        order_date: date = None,
+        session: Session = None
+    ) -> bool:
+        """
+        Пересчитать времена звонков для существующего маршрута при изменении настроек
+        
+        Args:
+            user_id: ID пользователя
+            order_date: Дата маршрута (по умолчанию сегодня)
+            session: Сессия БД (опционально)
+            
+        Returns:
+            True если успешно пересчитано, False если маршрут не найден
+        """
+        if order_date is None:
+            order_date = date.today()
+        
+        try:
+            # Получаем существующий маршрут
+            route_db = self.route_repository.get_route(user_id, order_date, session)
+            if not route_db:
+                logger.warning(f"Маршрут не найден для user_id={user_id}, date={order_date}")
+                return False
+            
+            # Безопасно извлекаем route_summary
+            if hasattr(route_db, '__dict__'):
+                db_dict = route_db.__dict__
+                route_summary = db_dict.get('route_summary')
+            else:
+                route_summary = getattr(route_db, 'route_summary', None)
+            
+            if not route_summary or not isinstance(route_summary, list):
+                logger.warning(f"route_summary пустой или неверный формат для user_id={user_id}")
+                return False
+            
+            # Получаем новые настройки пользователя
+            user_settings = self.settings_service.get_settings(user_id)
+            call_advance_minutes = user_settings.call_advance_minutes if user_settings else 10
+            
+            # Пересчитываем call_time для каждой точки маршрута
+            from datetime import datetime, timedelta
+            updated_route_summary = []
+            for point_data in route_summary:
+                estimated_arrival_str = point_data.get('estimated_arrival')
+                if estimated_arrival_str:
+                    estimated_arrival = datetime.fromisoformat(estimated_arrival_str)
+                    new_call_time = estimated_arrival - timedelta(minutes=call_advance_minutes)
+                    point_data['call_time'] = new_call_time.isoformat()
+                updated_route_summary.append(point_data)
+            
+            # Обновляем маршрут в БД
+            route_data = {
+                'route_summary': updated_route_summary,
+                'route_order': getattr(route_db, 'route_order', []),
+                'total_distance': getattr(route_db, 'total_distance', 0),
+                'total_time': getattr(route_db, 'total_time', 0),
+                'estimated_completion': getattr(route_db, 'estimated_completion', None)
+            }
+            
+            # Пересчитываем call_schedule
+            call_schedule = []
+            for point_data in updated_route_summary:
+                call_time_str = point_data.get('call_time')
+                arrival_time_str = point_data.get('estimated_arrival')
+                order_number = point_data.get('order_number')
+                if call_time_str and arrival_time_str and order_number:
+                    call_schedule.append({
+                        "order_number": order_number,
+                        "call_time": call_time_str,
+                        "arrival_time": arrival_time_str
+                    })
+            route_data['call_schedule'] = call_schedule
+            
+            self.route_repository.save_route(user_id, order_date, route_data, session)
+            
+            # Обновляем call_status для всех заказов в маршруте
+            for point_data in updated_route_summary:
+                order_number = point_data.get('order_number')
+                call_time_str = point_data.get('call_time')
+                estimated_arrival_str = point_data.get('estimated_arrival')
+                
+                if order_number and call_time_str and estimated_arrival_str:
+                    call_time = datetime.fromisoformat(call_time_str)
+                    arrival_time = datetime.fromisoformat(estimated_arrival_str)
+                    
+                    # Обновляем существующий call_status
+                    existing_call_status = self.call_status_repository.get_by_order(
+                        user_id, order_number, order_date, session
+                    )
+                    
+                    if existing_call_status:
+                        # Обновляем только времена, не трогая статус и другие поля
+                        self.call_status_repository.create_or_update(
+                            user_id=user_id,
+                            order_number=order_number,
+                            call_time=call_time,
+                            phone=getattr(existing_call_status, 'phone', ''),
+                            customer_name=getattr(existing_call_status, 'customer_name', ''),
+                            call_date=order_date,
+                            is_manual_call=getattr(existing_call_status, 'is_manual_call', False),
+                            is_manual_arrival=getattr(existing_call_status, 'is_manual_arrival', False),
+                            arrival_time=arrival_time,
+                            manual_arrival_time=getattr(existing_call_status, 'manual_arrival_time', None),
+                            session=session
+                        )
+            
+            logger.info(f"✅ Времена звонков пересчитаны для user_id={user_id}, call_advance_minutes={call_advance_minutes}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка пересчета времен звонков: {e}", exc_info=True)
+            return False
     
     def delete_all_data_by_date(
         self,

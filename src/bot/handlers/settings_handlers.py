@@ -199,14 +199,28 @@ class SettingsHandlers:
             success = self.parent.settings_service.update_setting(user_id, setting_name, value)
             
             if success:
+                # Если изменилось время звонка, пересчитываем расписание для существующего маршрута
+                if setting_name == 'call_advance_minutes':
+                    from datetime import date
+                    today = date.today()
+                    recalc_success = self.parent.route_service.recalculate_call_times(user_id, today)
+                    if recalc_success:
+                        logger.info(f"✅ Пересчитаны времена звонков для user_id={user_id} после изменения настройки")
+                
                 self.parent.update_user_state(user_id, 'state', None)
                 self.parent.update_user_state(user_id, 'pending_setting_name', None)
                 
                 setting_description = self.parent.settings_service.get_setting_description(setting_name)
                 
+                response_text = f"✅ Настройка обновлена!\n\n{setting_description}: <b>{value}</b>"
+                
+                # Дополнительное сообщение при изменении времени звонка
+                if setting_name == 'call_advance_minutes':
+                    response_text += "\n\n📅 Расписание звонков для текущего маршрута обновлено автоматически"
+                
                 self.bot.reply_to(
                     message,
-                    f"✅ Настройка обновлена!\n\n{setting_description}: <b>{value}</b>",
+                    response_text,
                     parse_mode='HTML',
                     reply_markup=self.parent._main_menu_markup()
                 )
