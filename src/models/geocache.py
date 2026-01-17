@@ -19,3 +19,22 @@ class GeocodeCacheDB(Base):
         Index('idx_address', 'address'),
     )
 
+
+class RouteCacheDB(Base):
+    """Кэш для рассчитанных маршрутов"""
+    __tablename__ = "route_cache"
+
+    id = Column(Integer, primary_key=True, index=True)
+    start_lat = Column(Float, nullable=False)
+    start_lon = Column(Float, nullable=False)
+    end_lat = Column(Float, nullable=False)
+    end_lon = Column(Float, nullable=False)
+    distance_km = Column(Float, nullable=False)
+    time_minutes = Column(Float, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('idx_route_coords', 'start_lat', 'start_lon', 'end_lat', 'end_lon'),
+    )
+

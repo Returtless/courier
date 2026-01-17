@@ -637,10 +637,18 @@ class RouteService:
     
     def _route_point_to_dict(self, point) -> Dict:
         """Преобразовать RoutePoint в словарь"""
+        # Рассчитываем call_time для сохранения в БД
+        call_time = None
+        if point.estimated_arrival:
+            from datetime import timedelta
+            call_advance_minutes = 10  # TODO: брать из настроек пользователя
+            call_time = point.estimated_arrival - timedelta(minutes=call_advance_minutes)
+        
         return {
             "order_number": point.order.order_number,
             "address": point.order.address or "",  # Добавляем адрес для RoutePointDTO (может быть None)
             "estimated_arrival": point.estimated_arrival.isoformat() if point.estimated_arrival else None,
+            "call_time": call_time.isoformat() if call_time else None,  # Добавляем call_time
             "distance_from_previous": point.distance_from_previous,
             "time_from_previous": point.time_from_previous
         }

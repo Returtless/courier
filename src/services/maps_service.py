@@ -277,17 +277,38 @@ class MapsService:
 
     def get_route_sync(self, start_lat: float, start_lon: float, end_lat: float, end_lon: float) -> Tuple[float, float]:
         """Синхронный расчет маршрута через 2GIS (если есть ключ) с fallback."""
-        # Проверяем кэш (округление координат до 5 знаков для ключа кэша)
-        route_key = (
-            round(start_lat, 5),
-            round(start_lon, 5),
-            round(end_lat, 5),
-            round(end_lon, 5)
-        )
+        # Округляем координаты до 5 знаков для ключа кэша
+        start_lat_rounded = round(start_lat, 5)
+        start_lon_rounded = round(start_lon, 5)
+        end_lat_rounded = round(end_lat, 5)
+        end_lon_rounded = round(end_lon, 5)
+        
+        route_key = (start_lat_rounded, start_lon_rounded, end_lat_rounded, end_lon_rounded)
+        
+        # Проверяем кэш в памяти
         if route_key in self._route_cache:
             cached_result = self._route_cache[route_key]
-            logger.debug(f"Маршрут из кэша: ({start_lat:.5f}, {start_lon:.5f}) -> ({end_lat:.5f}, {end_lon:.5f})")
+            logger.debug(f"Маршрут из кэша памяти: ({start_lat:.5f}, {start_lon:.5f}) -> ({end_lat:.5f}, {end_lon:.5f})")
             return cached_result
+        
+        # Проверяем кэш в БД
+        try:
+            from src.models.geocache import RouteCacheDB
+            with get_db_session() as session:
+                cached = session.query(RouteCacheDB).filter(
+                    RouteCacheDB.start_lat == start_lat_rounded,
+                    RouteCacheDB.start_lon == start_lon_rounded,
+                    RouteCacheDB.end_lat == end_lat_rounded,
+                    RouteCacheDB.end_lon == end_lon_rounded
+                ).first()
+                if cached:
+                    result = (cached.distance_km, cached.time_minutes)
+                    # Сохраняем в кэш памяти
+                    self._route_cache[route_key] = result
+                    logger.debug(f"Маршрут из БД кэша: ({start_lat:.5f}, {start_lon:.5f}) -> ({end_lat:.5f}, {end_lon:.5f})")
+                    return result
+        except Exception as e:
+            logger.warning(f"Ошибка проверки БД кэша маршрутов: {e}")
         
         # 1) 2GIS Routing API с учетом дорожной сети (traffic_mode=jam при наличии тарифа)
         if self.two_gis_api_key:
@@ -321,8 +342,10 @@ class MapsService:
                         time_seconds = route_obj.get("total_duration", 0)  # секунды
                         time_minutes = time_seconds / 60
                         result_tuple = (distance, time_minutes)
-                        # Сохраняем в кэш
+                        # Сохраняем в кэш памяти
                         self._route_cache[route_key] = result_tuple
+                        # Сохраняем в БД кэш
+                        self._save_route_to_db_cache(start_lat_rounded, start_lon_rounded, end_lat_rounded, end_lon_rounded, distance, time_minutes)
                         return result_tuple
                 elif response.status_code == 429:
                     logger.warning("2GIS route rate-limited (429), fallback to other providers")
@@ -354,8 +377,10 @@ class MapsService:
                         time_seconds = route.get("duration", 0)  # Без учета пробок
                         time_minutes = time_seconds / 60
                         result_tuple = (distance, time_minutes)
-                        # Сохраняем в кэш
+                        # Сохраняем в кэш памяти
                         self._route_cache[route_key] = result_tuple
+                        # Сохраняем в БД кэш
+                        self._save_route_to_db_cache(start_lat_rounded, start_lon_rounded, end_lat_rounded, end_lon_rounded, distance, time_minutes)
                         return result_tuple
 
             except Exception as e:
@@ -366,9 +391,45 @@ class MapsService:
         # Estimate time: 30 km/h average speed
         time_minutes = (distance / 30) * 60
         result_tuple = (distance, time_minutes)
-        # Сохраняем в кэш (даже fallback результаты)
+        # Сохраняем в кэш памяти (даже fallback результаты)
         self._route_cache[route_key] = result_tuple
+        # Сохраняем в БД кэш
+        self._save_route_to_db_cache(start_lat_rounded, start_lon_rounded, end_lat_rounded, end_lon_rounded, distance, time_minutes)
         return result_tuple
+    
+    def _save_route_to_db_cache(self, start_lat: float, start_lon: float, end_lat: float, end_lon: float, distance_km: float, time_minutes: float):
+        """Сохранить маршрут в БД кэш"""
+        try:
+            from src.models.geocache import RouteCacheDB
+            with get_db_session() as session:
+                # Проверяем, есть ли уже запись
+                existing = session.query(RouteCacheDB).filter(
+                    RouteCacheDB.start_lat == start_lat,
+                    RouteCacheDB.start_lon == start_lon,
+                    RouteCacheDB.end_lat == end_lat,
+                    RouteCacheDB.end_lon == end_lon
+                ).first()
+                
+                if existing:
+                    # Обновляем существующую запись
+                    existing.distance_km = distance_km
+                    existing.time_minutes = time_minutes
+                    existing.updated_at = datetime.utcnow()
+                else:
+                    # Создаем новую запись
+                    cache_entry = RouteCacheDB(
+                        start_lat=start_lat,
+                        start_lon=start_lon,
+                        end_lat=end_lat,
+                        end_lon=end_lon,
+                        distance_km=distance_km,
+                        time_minutes=time_minutes
+                    )
+                    session.add(cache_entry)
+                session.commit()
+        except Exception as e:
+            # Не критично, если не удалось сохранить в БД кэш
+            logger.warning(f"Не удалось сохранить маршрут в БД кэш: {e}")
 
     async def get_route_with_traffic(
         self,
