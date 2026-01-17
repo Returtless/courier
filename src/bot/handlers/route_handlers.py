@@ -543,7 +543,14 @@ class RouteHandlers:
             status_msg.message_id,
             parse_mode='HTML'
         )
-        fake_message = SimpleNamespace(from_user=message.from_user, chat=message.chat)
+        # Создаем fake_message с message_id для корректной работы bot.reply_to()
+        # Используем message_id из исходного сообщения, если есть, иначе из status_msg
+        msg_id = getattr(message, 'message_id', None) or status_msg.message_id
+        fake_message = SimpleNamespace(
+            from_user=message.from_user, 
+            chat=message.chat,
+            message_id=msg_id
+        )
         self.handle_show_route(fake_message)
         return
 
