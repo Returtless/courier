@@ -749,36 +749,44 @@ class RouteHandlers:
             route_info.append(f"⏱️ {point_data.get('time_from_previous', 0):.0f} мин")
             order_info.append(" | ".join(route_info))
 
-            # Кнопки с картами будут добавлены в route_summary отдельно
-            # Обновляем prev_latlon для следующей точки (для расчета маршрута)
-            if order.latitude and order.longitude:
-                prev_latlon = (order.latitude, order.longitude)
-                prev_gid = order.gis_id
-
             # Комментарий (если есть)
             if order.comment:
                 order_info.append(f"💬 {order.comment}")
             
             # Создаем inline кнопки с картами для каждого заказа
             map_buttons = []
-            if order.latitude and order.longitude and prev_latlon:
-                links = maps_service.build_route_links(
-                    prev_latlon[0],
-                    prev_latlon[1],
-                    order.latitude,
-                    order.longitude,
-                    prev_gid,
-                    order.gis_id
-                )
-                point_links = maps_service.build_point_links(order.latitude, order.longitude, order.gis_id)
+            if order.latitude and order.longitude:
+                # Создаем кнопки для маршрута (если есть предыдущая точка)
+                if prev_latlon:
+                    links = maps_service.build_route_links(
+                        prev_latlon[0],
+                        prev_latlon[1],
+                        order.latitude,
+                        order.longitude,
+                        prev_gid,
+                        order.gis_id
+                    )
+                    point_links = maps_service.build_point_links(order.latitude, order.longitude, order.gis_id)
+                    
+                    from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+                    map_buttons = [
+                        InlineKeyboardButton("🗺️ Маршрут 2ГИС", url=links["2gis"]),
+                        InlineKeyboardButton("🗺️ Маршрут Яндекс", url=links["yandex"]),
+                        InlineKeyboardButton("📍 Точка 2ГИС", url=point_links["2gis"]),
+                        InlineKeyboardButton("📍 Точка Яндекс", url=point_links["yandex"])
+                    ]
+                else:
+                    # Для первого заказа - только кнопки точки (без маршрута)
+                    point_links = maps_service.build_point_links(order.latitude, order.longitude, order.gis_id)
+                    from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+                    map_buttons = [
+                        InlineKeyboardButton("📍 Точка 2ГИС", url=point_links["2gis"]),
+                        InlineKeyboardButton("📍 Точка Яндекс", url=point_links["yandex"])
+                    ]
                 
-                from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-                map_buttons = [
-                    InlineKeyboardButton("🗺️ Маршрут 2ГИС", url=links["2gis"]),
-                    InlineKeyboardButton("🗺️ Маршрут Яндекс", url=links["yandex"]),
-                    InlineKeyboardButton("📍 Точка 2ГИС", url=point_links["2gis"]),
-                    InlineKeyboardButton("📍 Точка Яндекс", url=point_links["yandex"])
-                ]
+                # Обновляем prev_latlon для следующей точки (для расчета маршрута)
+                prev_latlon = (order.latitude, order.longitude)
+                prev_gid = order.gis_id
             
             route_summary.append({
                 "text": "\n".join(order_info),
