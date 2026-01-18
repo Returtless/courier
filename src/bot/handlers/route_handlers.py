@@ -652,9 +652,19 @@ class RouteHandlers:
             
             # Преобразуем данные заказа
             try:
+                # Проверяем наличие координат в данных перед созданием Order
+                lat = order_data.get('latitude')
+                lon = order_data.get('longitude')
+                logger.debug(f"Заказ {order_number}: lat={lat}, lon={lon}, gis_id={order_data.get('gis_id')}")
+                
                 order = Order(**order_data)
+                
+                # Проверяем координаты после создания Order
+                if not order.latitude or not order.longitude:
+                    logger.warning(f"⚠️ Заказ {order_number} без координат после создания Order: lat={order.latitude}, lon={order.longitude} (было в данных: lat={lat}, lon={lon})")
             except Exception as e:
-                logger.error(f"Ошибка создания Order из данных: {e}", exc_info=True)
+                logger.error(f"Ошибка создания Order из данных для заказа {order_number}: {e}", exc_info=True)
+                logger.debug(f"Данные заказа {order_number}: {order_data}")
                 continue
             
             # Парсим время (может быть строкой или datetime)
@@ -756,10 +766,13 @@ class RouteHandlers:
             order_info.append(" | ".join(route_info))
 
             # Ссылки на карты (в тексте, как было раньше)
+            logger.debug(f"🔍 Проверка координат для заказа {order.order_number}: lat={order.latitude}, lon={order.longitude}, gis_id={order.gis_id}")
+            
             if order.latitude and order.longitude:
                 try:
                     # Ссылки на точку (всегда показываем)
                     point_links = maps_service.build_point_links(order.latitude, order.longitude, order.gis_id)
+                    logger.debug(f"✅ Созданы ссылки на точку для заказа {order.order_number}: 2ГИС={point_links.get('2gis')[:50] if point_links.get('2gis') else None}...")
                     
                     # Ссылки на маршрут (только если есть предыдущая точка)
                     if prev_latlon:
@@ -771,7 +784,9 @@ class RouteHandlers:
                             prev_gid,
                             order.gis_id
                         )
-                        order_info.append(
+                        logger.debug(f"✅ Созданы ссылки на маршрут для заказа {order.order_number}: prev_latlon={prev_latlon}")
+                        
+                        map_links_text = (
                             "🔗 <a href=\"{dg}\">Маршрут 2ГИС</a> | <a href=\"{ya}\">Яндекс</a> | "
                             "<a href=\"{pdg}\">Точка 2ГИС</a> | <a href=\"{pya}\">Яндекс</a>".format(
                                 dg=links["2gis"],
@@ -780,24 +795,26 @@ class RouteHandlers:
                                 pya=point_links["yandex"]
                             )
                         )
-                        logger.debug(f"Добавлены ссылки на карты для заказа {order.order_number}: маршрут + точка, prev_latlon={prev_latlon}")
+                        order_info.append(map_links_text)
+                        logger.info(f"✅ Добавлены ссылки на карты для заказа {order.order_number}: маршрут + точка (4 ссылки)")
                     else:
                         # Для первого заказа - только кнопки точки (если нет предыдущей точки)
-                        order_info.append(
+                        map_links_text = (
                             "🔗 <a href=\"{pdg}\">Точка 2ГИС</a> | <a href=\"{pya}\">Яндекс</a>".format(
                                 pdg=point_links["2gis"],
                                 pya=point_links["yandex"]
                             )
                         )
-                        logger.debug(f"Добавлены ссылки на карты для заказа {order.order_number}: только точка (нет prev_latlon)")
+                        order_info.append(map_links_text)
+                        logger.info(f"✅ Добавлены ссылки на карты для заказа {order.order_number}: только точка (2 ссылки, нет prev_latlon)")
 
                     # Обновляем prev_latlon для следующей точки
                     prev_latlon = (order.latitude, order.longitude)
                     prev_gid = order.gis_id
                 except Exception as e:
-                    logger.error(f"Ошибка создания ссылок на карты для заказа {order.order_number}: {e}", exc_info=True)
+                    logger.error(f"❌ Ошибка создания ссылок на карты для заказа {order.order_number}: {e}", exc_info=True)
             else:
-                logger.warning(f"Заказ {order.order_number} без координат: lat={order.latitude}, lon={order.longitude}")
+                logger.warning(f"⚠️ Заказ {order.order_number} без координат: lat={order.latitude}, lon={order.longitude} (координаты не будут отображены)")
 
             # Комментарий (если есть)
             if order.comment:
@@ -1474,15 +1491,21 @@ class RouteHandlers:
                     disable_web_page_preview=True
                 )
             except Exception as e:
-                logger.warning(f"Не удалось отредактировать сообщение: {e}")
-                # Если не удалось отредактировать, отправляем новое
-                self.bot.send_message(
-                    chat_id,
-                    order_text,
-                    parse_mode='HTML',
-                    reply_markup=markup,
-                    disable_web_page_preview=True
-                )
+                error_msg = str(e)
+                # Игнорируем ошибку "message is not modified" - это не критично
+                if "message is not modified" in error_msg.lower():
+                    logger.debug(f"Сообщение не изменилось (это нормально): {error_msg}")
+                    return  # Просто выходим, так как сообщение уже актуально
+                else:
+                    logger.warning(f"Не удалось отредактировать сообщение: {e}")
+                    # Если не удалось отредактировать, отправляем новое
+                    self.bot.send_message(
+                        chat_id,
+                        order_text,
+                        parse_mode='HTML',
+                        reply_markup=markup,
+                        disable_web_page_preview=True
+                    )
         else:
             self.bot.send_message(
                 chat_id,
@@ -1552,11 +1575,29 @@ class RouteHandlers:
             from src.application.dto.order_dto import UpdateOrderDTO
             from src.database.connection import get_db_session
             update_dto = UpdateOrderDTO(status="delivered")
+            
+            logger.info(f"💾 Обновляю статус заказа {order_number} на 'delivered' в БД")
             with get_db_session() as session:
+                # Получаем заказ до обновления для проверки
+                order_before = self.parent.order_service.get_order_by_number(user_id, order_number, today, session)
+                logger.info(f"Статус заказа {order_number} ДО обновления: {order_before.status if order_before else 'не найден'}")
+                
                 updated_order = self.parent.order_service.update_order(user_id, order_number, update_dto, today, session)
+                
+                # Проверяем, что заказ действительно обновился
+                if updated_order:
+                    logger.info(f"✅ Статус заказа {order_number} обновлен в БД: {updated_order.status}")
+                else:
+                    logger.error(f"❌ Не удалось обновить статус заказа {order_number} в БД (update_order вернул None)")
+                    
+                # Явно коммитим изменения (хотя update_order уже должен это делать)
+                session.commit()
+                logger.info(f"💾 Изменения закоммичены в БД")
+            
             updated = updated_order is not None
 
             if not updated:
+                logger.error(f"❌ Не удалось обновить статус заказа {order_number} в БД")
                 self.bot.answer_callback_query(
                     call.id,
                     f"❌ Заказ №{order_number} не найден за сегодня",
@@ -1567,30 +1608,74 @@ class RouteHandlers:
             # Отвечаем на callback
             self.bot.answer_callback_query(call.id, f"✅ Заказ №{order_number} отмечен доставленным")
             
-            # Загружаем активные заказы ПОСЛЕ обновления статуса
+            # Загружаем активные заказы ПОСЛЕ обновления статуса (обязательно перезагружаем из БД)
+            logger.info(f"🔄 Перезагружаю данные заказов и маршрута после обновления статуса")
             orders_data_after = self.parent.get_today_orders_dict(user_id, today)
+            logger.debug(f"Загружено заказов после обновления: {len(orders_data_after)}")
+            
+            # Проверяем, что заказ действительно обновился
+            updated_order_data = next((od for od in orders_data_after if od.get('order_number') == order_number), None)
+            if updated_order_data:
+                logger.info(f"Статус заказа {order_number} в загруженных данных: {updated_order_data.get('status')} (ожидается 'delivered')")
+                if updated_order_data.get('status') != 'delivered':
+                    logger.warning(f"⚠️ Статус заказа {order_number} НЕ обновился в БД! Текущий статус: {updated_order_data.get('status')}")
+            else:
+                logger.warning(f"⚠️ Заказ {order_number} не найден в загруженных данных после обновления")
+            
             active_order_numbers_after = {od.get('order_number') for od in orders_data_after if od.get('status', 'pending') != 'delivered'}
-            active_points_after = [p for p in sorted_points if p.get('order_number') in active_order_numbers_after]
+            logger.info(f"Активных заказов после обновления: {len(active_order_numbers_after)} (было: {len(active_order_numbers_before)})")
+            
+            # Перезагружаем маршрут из БД, чтобы получить актуальные данные
+            route_data_after = self.parent.get_route_data_dict(user_id, today)
+            if route_data_after:
+                route_points_data_after = route_data_after.get('route_points_data', [])
+                try:
+                    sorted_points_after = sorted(
+                        route_points_data_after,
+                        key=lambda pd: datetime.fromisoformat(pd.get("estimated_arrival"))
+                    )
+                except Exception:
+                    sorted_points_after = route_points_data_after
+                active_points_after = [p for p in sorted_points_after if p.get('order_number') in active_order_numbers_after]
+            else:
+                active_points_after = [p for p in sorted_points if p.get('order_number') in active_order_numbers_after]
+            
+            logger.info(f"Активных точек маршрута после обновления: {len(active_points_after)}")
             
             if active_points_after:
                 # Определяем, какой заказ показать
                 if current_index is not None:
-                    # Если был не последний - показываем следующий (который теперь на том же индексе)
-                    if current_index < len(active_points_after):
+                    # Находим следующий заказ в исходном списке активных заказов
+                    # Если текущий заказ был не последним, следующий был на current_index + 1
+                    # После удаления текущего заказа, следующий сдвинулся на current_index
+                    if current_index < len(active_points_before) - 1:
+                        # Текущий заказ был не последним - следующий заказ был на current_index + 1
+                        # После удаления текущего, следующий стал на current_index
                         next_index = current_index
+                        next_order_number = active_points_before[current_index + 1].get('order_number') if current_index + 1 < len(active_points_before) else None
+                        logger.info(f"Текущий заказ {order_number} был на индексе {current_index}, следующий заказ {next_order_number} был на индексе {current_index + 1}, теперь он на индексе {next_index}")
                     else:
-                        # Если был последний - показываем предыдущий
+                        # Текущий заказ был последним - показываем предыдущий (который теперь последний)
                         next_index = len(active_points_after) - 1
+                        logger.info(f"Текущий заказ {order_number} был последним (индекс {current_index}), показываю предыдущий заказ на индексе {next_index}")
                 else:
                     # Если не нашли индекс (не должно случиться), показываем первый
                     next_index = 0
+                    logger.warning(f"Не удалось найти индекс текущего заказа {order_number}, показываю первый заказ")
                 
+                # Проверяем, что индекс валидный
+                if next_index >= len(active_points_after):
+                    logger.warning(f"Индекс {next_index} выходит за пределы списка активных заказов ({len(active_points_after)}), показываю последний")
+                    next_index = len(active_points_after) - 1
+                
+                next_order_number = active_points_after[next_index].get('order_number') if next_index < len(active_points_after) else None
+                logger.info(f"🔄 Показываю следующий заказ {next_order_number} с индексом {next_index} из {len(active_points_after)} активных")
                 self._show_order_at_index(call.message.chat.id, user_id, active_points_after, next_index, call.message.message_id)
             else:
                 # Больше нет активных заказов
+                logger.info(f"Все заказы доставлены, нет активных заказов для показа")
                 try:
                     # Удаляем старое сообщение и отправляем новое с клавиатурой
-                    # (на случай, если исходное сообщение не имело reply_markup)
                     try:
                         self.bot.delete_message(call.message.chat.id, call.message.message_id)
                     except:
