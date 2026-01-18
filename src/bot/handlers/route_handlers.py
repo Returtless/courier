@@ -793,65 +793,151 @@ class RouteHandlers:
         user_id = message.from_user.id
         today = date.today()
         
+        logger.info(f"🚀 handle_show_route вызван для user_id={user_id}, date={today}")
+        import sys
+        sys.stdout.flush()
+        
         # Загружаем через RouteService
-        route_dto = self.parent.route_service.get_route(user_id, today)
+        logger.debug(f"Загружаю маршрут через RouteService для user_id={user_id}")
+        try:
+            route_dto = self.parent.route_service.get_route(user_id, today)
+            logger.info(f"Получен route_dto: {route_dto is not None}")
+            if route_dto:
+                logger.info(f"  - route_points: {len(route_dto.route_points) if route_dto.route_points else 0}")
+                logger.info(f"  - route_order: {len(route_dto.route_order) if route_dto.route_order else 0}")
+        except Exception as e:
+            import traceback
+            logger.error(f"❌ Ошибка получения маршрута: {e}\n{traceback.format_exc()}")
+            sys.stdout.flush()
+            try:
+                self.bot.reply_to(message, f"❌ Ошибка загрузки маршрута: {str(e)}", reply_markup=self.parent._route_menu_markup())
+            except Exception:
+                pass
+            return
+        
         if not route_dto:
-            self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Используйте кнопку ▶️ Оптимизировать", reply_markup=self.parent._route_menu_markup())
+            logger.warning(f"⚠️ Маршрут не найден для user_id={user_id}, date={today}")
+            try:
+                self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Используйте кнопку ▶️ Оптимизировать", reply_markup=self.parent._route_menu_markup())
+            except Exception as e:
+                logger.error(f"Ошибка отправки сообщения: {e}")
             return
         
         # Преобразуем RouteDTO в формат для совместимости
+        logger.debug("Преобразую RouteDTO в формат для совместимости")
         route_points_data = []
         for point in route_dto.route_points:
-            route_points_data.append({
-                'order_number': point.order_number,
-                'estimated_arrival': point.estimated_arrival.isoformat() if point.estimated_arrival else None,
-                'call_time': point.call_time.isoformat() if point.call_time else None,
-                'distance_from_previous': point.distance_from_previous,
-                'time_from_previous': point.time_from_previous
-            })
+            try:
+                route_points_data.append({
+                    'order_number': point.order_number,
+                    'estimated_arrival': point.estimated_arrival.isoformat() if point.estimated_arrival else None,
+                    'call_time': point.call_time.isoformat() if point.call_time else None,
+                    'distance_from_previous': point.distance_from_previous,
+                    'time_from_previous': point.time_from_previous
+                })
+            except Exception as e:
+                logger.error(f"Ошибка преобразования точки маршрута {point.order_number}: {e}")
+        
         route_order = route_dto.route_order
+        logger.info(f"Преобразовано {len(route_points_data)} точек маршрута, route_order: {len(route_order) if route_order else 0}")
         
         if not route_points_data or not route_order:
-            self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Используйте кнопку ▶️ Оптимизировать", reply_markup=self.parent._route_menu_markup())
+            logger.warning(f"⚠️ Пустой маршрут: route_points_data={len(route_points_data)}, route_order={len(route_order) if route_order else 0}")
+            try:
+                self.bot.reply_to(message, "❌ Маршрут не оптимизирован. Используйте кнопку ▶️ Оптимизировать", reply_markup=self.parent._route_menu_markup())
+            except Exception as e:
+                logger.error(f"Ошибка отправки сообщения: {e}")
             return
         
         # Загружаем заказы через OrderService
-        orders_data = self.parent.get_today_orders_dict(user_id, today)
+        logger.debug("Загружаю заказы через OrderService")
+        try:
+            orders_data = self.parent.get_today_orders_dict(user_id, today)
+            logger.info(f"Загружено заказов: {len(orders_data)}")
+        except Exception as e:
+            import traceback
+            logger.error(f"❌ Ошибка загрузки заказов: {e}\n{traceback.format_exc()}")
+            sys.stdout.flush()
+            try:
+                self.bot.reply_to(message, f"❌ Ошибка загрузки заказов: {str(e)}", reply_markup=self.parent._route_menu_markup())
+            except Exception:
+                pass
+            return
         
         # Фильтруем только активные (не доставленные) заказы
         active_orders_data = [od for od in orders_data if od.get('status', 'pending') != 'delivered']
         orders_dict = {od.get('order_number'): od for od in active_orders_data if od.get('order_number')}
+        logger.info(f"Активных заказов: {len(active_orders_data)}, в словаре: {len(orders_dict)}")
         
         # Фильтруем route_points_data, оставляя только активные заказы
         active_order_numbers = set(orders_dict.keys())
         active_route_points_data = [p for p in route_points_data if p.get('order_number') in active_order_numbers]
+        logger.info(f"Активных точек маршрута: {len(active_route_points_data)}")
         
         if not active_route_points_data:
-            self.bot.reply_to(message, "✅ Все заказы доставлены", reply_markup=self.parent._route_menu_markup())
+            logger.info("Все заказы доставлены")
+            try:
+                self.bot.reply_to(message, "✅ Все заказы доставлены", reply_markup=self.parent._route_menu_markup())
+            except Exception as e:
+                logger.error(f"Ошибка отправки сообщения: {e}")
             return
         
         # Загружаем точку старта через RouteService
+        logger.debug("Загружаю точку старта")
         start_location_data = self.parent.get_start_location_dict(user_id, today) or {}
+        logger.info(f"Точка старта: {start_location_data is not None and bool(start_location_data)}")
         
         # Форматируем маршрут только для активных заказов
-        maps_service = MapsService()
-        route_summary = self._format_route_summary(user_id, active_route_points_data, orders_dict, start_location_data, maps_service)
+        logger.debug("Форматирую маршрут")
+        try:
+            maps_service = MapsService()
+            route_summary = self._format_route_summary(user_id, active_route_points_data, orders_dict, start_location_data, maps_service)
+            logger.info(f"Отформатировано {len(route_summary) if route_summary else 0} элементов маршрута")
+        except Exception as e:
+            import traceback
+            logger.error(f"❌ Ошибка форматирования маршрута: {e}\n{traceback.format_exc()}")
+            sys.stdout.flush()
+            try:
+                self.bot.reply_to(message, f"❌ Ошибка форматирования маршрута: {str(e)}", reply_markup=self.parent._route_menu_markup())
+            except Exception:
+                pass
+            return
         
         if not route_summary:
-            self.bot.reply_to(message, "❌ Не удалось сформировать маршрут", reply_markup=self.parent._route_menu_markup())
+            logger.warning("⚠️ route_summary пустой после форматирования")
+            try:
+                self.bot.reply_to(message, "❌ Не удалось сформировать маршрут", reply_markup=self.parent._route_menu_markup())
+            except Exception as e:
+                logger.error(f"Ошибка отправки сообщения: {e}")
             return
         
         # Отправляем маршрут по частям (по 3 заказа в сообщении) - БЕЗ кнопок
+        logger.info(f"Отправляю маршрут ({len(route_summary)} элементов) пользователю {user_id}")
         text_header = "<b>🗺️ Маршрут доставки</b>\n\n"
         
-        # Первое сообщение с заголовком и первыми заказами
-        first_chunk = text_header + "\n\n".join(item["text"] for item in route_summary[:3])
-        self.bot.reply_to(message, first_chunk, parse_mode='HTML', reply_markup=self.parent._route_menu_markup(), disable_web_page_preview=True)
-        
-        # Остальные заказы по 5 в сообщении
-        for i in range(3, len(route_summary), 5):
-            chunk = "\n\n".join(item["text"] for item in route_summary[i:i+5])
-            self.bot.send_message(message.chat.id, chunk, parse_mode='HTML', disable_web_page_preview=True)
+        try:
+            # Первое сообщение с заголовком и первыми заказами
+            first_chunk = text_header + "\n\n".join(item["text"] for item in route_summary[:3])
+            logger.debug(f"Отправляю первое сообщение (длина: {len(first_chunk)} символов)")
+            self.bot.reply_to(message, first_chunk, parse_mode='HTML', reply_markup=self.parent._route_menu_markup(), disable_web_page_preview=True)
+            logger.info("✅ Первое сообщение отправлено")
+            
+            # Остальные заказы по 5 в сообщении
+            for i in range(3, len(route_summary), 5):
+                chunk = "\n\n".join(item["text"] for item in route_summary[i:i+5])
+                logger.debug(f"Отправляю сообщение {i//5 + 2} (элементы {i}-{min(i+5, len(route_summary))})")
+                self.bot.send_message(message.chat.id, chunk, parse_mode='HTML', disable_web_page_preview=True)
+            
+            logger.info(f"✅ Маршрут успешно отправлен ({len(route_summary)} элементов)")
+            sys.stdout.flush()
+        except Exception as e:
+            import traceback
+            logger.error(f"❌ Ошибка отправки маршрута: {e}\n{traceback.format_exc()}")
+            sys.stdout.flush()
+            try:
+                self.bot.reply_to(message, f"❌ Ошибка отправки маршрута: {str(e)}", reply_markup=self.parent._route_menu_markup())
+            except Exception:
+                pass
     
     def handle_show_calls(self, message):
         """Показать график звонков"""

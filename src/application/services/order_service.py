@@ -85,21 +85,32 @@ class OrderService:
                 call_statuses_list = self.call_status_repository.get_by_user_and_date(
                     user_id, order_date, session
                 )
-                call_statuses = {
-                    cs.order_number: cs 
-                    for cs in call_statuses_list 
-                    if cs.order_number
-                }
+                # Безопасно получаем order_number для ключа словаря
+                call_statuses = {}
+                for cs in call_statuses_list:
+                    order_num = cs.__dict__.get('order_number') if hasattr(cs, '__dict__') else getattr(cs, 'order_number', None)
+                    if order_num:
+                        call_statuses[order_num] = cs
         
         result = []
         for order_db in orders_db:
             dto = self._order_db_to_dto(order_db)
             
-            # Добавляем manual_arrival_time из call_status
+            # Добавляем manual_arrival_time из call_status (безопасное получение атрибутов)
             if order_db.order_number:
                 cs = call_statuses.get(order_db.order_number)
-                if cs and cs.is_manual_arrival and cs.manual_arrival_time:
-                    dto.manual_arrival_time = cs.manual_arrival_time
+                if cs:
+                    # Безопасно получаем атрибуты через __dict__
+                    if hasattr(cs, '__dict__'):
+                        db_dict = cs.__dict__
+                        is_manual_arrival = db_dict.get('is_manual_arrival', False)
+                        manual_arrival_time = db_dict.get('manual_arrival_time')
+                    else:
+                        is_manual_arrival = getattr(cs, 'is_manual_arrival', False)
+                        manual_arrival_time = getattr(cs, 'manual_arrival_time', None)
+                    
+                    if is_manual_arrival and manual_arrival_time:
+                        dto.manual_arrival_time = manual_arrival_time
             
             result.append(dto)
         
