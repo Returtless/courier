@@ -749,49 +749,39 @@ class RouteHandlers:
             route_info.append(f"⏱️ {point_data.get('time_from_previous', 0):.0f} мин")
             order_info.append(" | ".join(route_info))
 
+            # Ссылки на карты (в тексте, как было раньше)
+            if order.latitude and order.longitude and prev_latlon:
+                links = maps_service.build_route_links(
+                    prev_latlon[0],
+                    prev_latlon[1],
+                    order.latitude,
+                    order.longitude,
+                    prev_gid,
+                    order.gis_id
+                )
+                point_links = maps_service.build_point_links(order.latitude, order.longitude, order.gis_id)
+
+                order_info.append(
+                    "🔗 <a href=\"{dg}\">Маршрут 2ГИС</a> | <a href=\"{ya}\">Яндекс</a> | "
+                    "<a href=\"{pdg}\">Точка 2ГИС</a> | <a href=\"{pya}\">Яндекс</a>".format(
+                        dg=links["2gis"],
+                        ya=links["yandex"],
+                        pdg=point_links["2gis"],
+                        pya=point_links["yandex"]
+                    )
+                )
+
+                # Обновляем prev_latlon для следующей точки
+                prev_latlon = (order.latitude, order.longitude)
+                prev_gid = order.gis_id
+
             # Комментарий (если есть)
             if order.comment:
                 order_info.append(f"💬 {order.comment}")
             
-            # Создаем inline кнопки с картами для каждого заказа
-            map_buttons = []
-            if order.latitude and order.longitude:
-                # Создаем кнопки для маршрута (если есть предыдущая точка)
-                if prev_latlon:
-                    links = maps_service.build_route_links(
-                        prev_latlon[0],
-                        prev_latlon[1],
-                        order.latitude,
-                        order.longitude,
-                        prev_gid,
-                        order.gis_id
-                    )
-                    point_links = maps_service.build_point_links(order.latitude, order.longitude, order.gis_id)
-                    
-                    from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-                    map_buttons = [
-                        InlineKeyboardButton("🗺️ Маршрут 2ГИС", url=links["2gis"]),
-                        InlineKeyboardButton("🗺️ Маршрут Яндекс", url=links["yandex"]),
-                        InlineKeyboardButton("📍 Точка 2ГИС", url=point_links["2gis"]),
-                        InlineKeyboardButton("📍 Точка Яндекс", url=point_links["yandex"])
-                    ]
-                else:
-                    # Для первого заказа - только кнопки точки (без маршрута)
-                    point_links = maps_service.build_point_links(order.latitude, order.longitude, order.gis_id)
-                    from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-                    map_buttons = [
-                        InlineKeyboardButton("📍 Точка 2ГИС", url=point_links["2gis"]),
-                        InlineKeyboardButton("📍 Точка Яндекс", url=point_links["yandex"])
-                    ]
-                
-                # Обновляем prev_latlon для следующей точки (для расчета маршрута)
-                prev_latlon = (order.latitude, order.longitude)
-                prev_gid = order.gis_id
-            
             route_summary.append({
                 "text": "\n".join(order_info),
-                "order_number": order.order_number,
-                "map_buttons": map_buttons  # Добавляем кнопки с картами
+                "order_number": order.order_number
             })
         
         return route_summary
@@ -931,38 +921,14 @@ class RouteHandlers:
             # Первое сообщение с заголовком и первыми заказами
             first_chunk = text_header + "\n\n".join(item["text"] for item in route_summary[:3])
             logger.debug(f"Отправляю первое сообщение (длина: {len(first_chunk)} символов)")
-            
-            # Создаем клавиатуру для первого сообщения (меню маршрута + кнопки карт)
-            first_markup = InlineKeyboardMarkup()
-            
-            # Добавляем кнопки карт для первого заказа (если есть)
-            if route_summary[0].get("map_buttons"):
-                first_markup.row(*route_summary[0]["map_buttons"][:2])  # Маршруты на первой строке
-                first_markup.row(*route_summary[0]["map_buttons"][2:])  # Точки на второй строке
-            
-            # Добавляем меню маршрута
-            for btn_row in self.parent._route_menu_markup().keyboard:
-                first_markup.row(*btn_row)
-            
-            self.bot.reply_to(message, first_chunk, parse_mode='HTML', reply_markup=first_markup, disable_web_page_preview=True)
+            self.bot.reply_to(message, first_chunk, parse_mode='HTML', reply_markup=self.parent._route_menu_markup(), disable_web_page_preview=True)
             logger.info("✅ Первое сообщение отправлено")
             
-            # Остальные заказы по 5 в сообщении с кнопками карт для каждого
+            # Остальные заказы по 5 в сообщении
             for i in range(3, len(route_summary), 5):
-                chunk_items = route_summary[i:i+5]
-                chunk = "\n\n".join(item["text"] for item in chunk_items)
-                
-                # Создаем клавиатуру с кнопками карт для каждого заказа в этом сообщении
-                chunk_markup = InlineKeyboardMarkup()
-                
-                for item in chunk_items:
-                    if item.get("map_buttons"):
-                        # Для каждого заказа добавляем его кнопки карт
-                        chunk_markup.row(*item["map_buttons"][:2])  # Маршруты
-                        chunk_markup.row(*item["map_buttons"][2:])  # Точки
-                
-                logger.debug(f"Отправляю сообщение {i//5 + 2} (элементы {i}-{min(i+5, len(route_summary))}) с {len(chunk_items)} заказами")
-                self.bot.send_message(message.chat.id, chunk, parse_mode='HTML', reply_markup=chunk_markup if chunk_items[0].get("map_buttons") else None, disable_web_page_preview=True)
+                chunk = "\n\n".join(item["text"] for item in route_summary[i:i+5])
+                logger.debug(f"Отправляю сообщение {i//5 + 2} (элементы {i}-{min(i+5, len(route_summary))})")
+                self.bot.send_message(message.chat.id, chunk, parse_mode='HTML', disable_web_page_preview=True)
             
             logger.info(f"✅ Маршрут успешно отправлен ({len(route_summary)} элементов)")
             sys.stdout.flush()
