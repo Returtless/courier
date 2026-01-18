@@ -67,17 +67,22 @@ class RouteOptimizer:
         
         if not route_result:
             logger.error("❌ Не удалось найти решение задачи маршрутизации")
-            if use_fallback:
-                # Используем fallback только если пользователь явно согласился пересчитать без ручных времен
-                logger.warning(f"⚠️ Используем fallback: простой порядок заказов с расчетом времени для {len(orders_with_coords)} заказов")
+            # ВСЕГДА используем fallback если OR-Tools не нашел решение (даже если use_fallback=False)
+            # Fallback создаст рабочий маршрут, игнорируя ручные времена и жесткие окна
+            logger.warning(f"⚠️ Используем fallback: простой порядок заказов с расчетом времени для {len(orders_with_coords)} заказов")
+            try:
                 fallback_result = self._build_fallback_route(orders_with_coords, start_location, start_time, user_id)
-                if not fallback_result.points:
-                    logger.error(f"❌ Fallback тоже не создал маршрут! Заказов с координатами: {len(orders_with_coords)}")
+                if not fallback_result or not fallback_result.points:
+                    logger.error(f"❌ КРИТИЧНО: Fallback тоже не создал маршрут! Заказов с координатами: {len(orders_with_coords)}")
+                    # Диагностика: проверяем координаты заказов
+                    for order in orders_with_coords:
+                        logger.error(f"   📦 Заказ {order.order_number}: lat={order.latitude}, lon={order.longitude}")
+                    return OptimizedRoute(points=[], total_distance=0, total_time=0, estimated_completion=start_time)
+                logger.info(f"✅ Fallback успешно создал маршрут с {len(fallback_result.points)} точками")
                 return fallback_result
-            else:
-                # НЕ используем fallback автоматически - возвращаем пустой маршрут,
-                # чтобы пользователь мог выбрать пересчет без ручных времен
-                logger.warning(f"⚠️ Fallback отключен (use_fallback=False), возвращаю пустой маршрут. Заказов с координатами: {len(orders_with_coords)}")
+            except Exception as e:
+                import traceback
+                logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА в fallback: {e}\n{traceback.format_exc()}")
                 return OptimizedRoute(points=[], total_distance=0, total_time=0, estimated_completion=start_time)
         
         route_indices, solution, routing, manager, time_dimension = route_result
@@ -205,13 +210,17 @@ class RouteOptimizer:
         total_time = 0.0
         
         logger.info(f"🔧 Fallback: начинаю построение маршрута для {len(sorted_orders)} заказов")
+        logger.info(f"   📍 Точка старта: ({start_location[0]}, {start_location[1]})")
+        logger.info(f"   🕐 Время старта: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         
-        for order in sorted_orders:
+        skipped_orders = []
+        for idx, order in enumerate(sorted_orders):
             if not order.latitude or not order.longitude:
-                logger.warning(f"⚠️ Пропускаем заказ {order.order_number}: нет координат (lat={order.latitude}, lon={order.longitude})")
+                logger.warning(f"⚠️ [{idx+1}/{len(sorted_orders)}] Пропускаем заказ {order.order_number}: нет координат (lat={order.latitude}, lon={order.longitude})")
+                skipped_orders.append(order.order_number)
                 continue
             
-            logger.debug(f"🔧 Fallback: обрабатываю заказ {order.order_number}, координаты: ({order.latitude}, {order.longitude})")
+            logger.info(f"🔧 [{idx+1}/{len(sorted_orders)}] Fallback: обрабатываю заказ {order.order_number}, координаты: ({order.latitude}, {order.longitude})")
             
             # Рассчитываем время до заказа
             try:
@@ -219,9 +228,12 @@ class RouteOptimizer:
                     current_location[0], current_location[1],
                     order.latitude, order.longitude
                 )
-                logger.debug(f"🔧 Fallback: расстояние до {order.order_number}: {distance_km:.2f} км, время: {time_min:.1f} мин")
+                logger.info(f"   ✅ Расстояние до {order.order_number}: {distance_km:.2f} км, время: {time_min:.1f} мин")
             except Exception as e:
+                import traceback
                 logger.error(f"❌ Ошибка расчета маршрута до заказа {order.order_number}: {e}")
+                logger.error(f"   Traceback: {traceback.format_exc()}")
+                skipped_orders.append(order.order_number)
                 continue
             
             # Время прибытия: текущее время + время в пути (АВТОМАТИЧЕСКИЙ расчет)
@@ -255,7 +267,20 @@ class RouteOptimizer:
         
         estimated_completion = current_time if route_points else start_time
         
-        logger.info(f"✅ Fallback маршрут создан (БЕЗ ручных времен): {len(route_points)} точек, расстояние {total_distance:.1f} км, время {total_time:.0f} мин")
+        if skipped_orders:
+            logger.warning(f"⚠️ Fallback: пропущено {len(skipped_orders)} заказов без координат/с ошибками: {skipped_orders}")
+        
+        if not route_points:
+            logger.error(f"❌ КРИТИЧНО: Fallback не создал ни одной точки маршрута!")
+            logger.error(f"   - Всего заказов: {len(sorted_orders)}")
+            logger.error(f"   - Пропущено: {len(skipped_orders)}")
+            logger.error(f"   - Обработано успешно: {len(route_points)}")
+            # Диагностика: проверяем почему все заказы пропущены
+            for order in sorted_orders:
+                logger.error(f"   📦 Заказ {order.order_number}: lat={order.latitude}, lon={order.longitude}, адрес='{order.address}'")
+        else:
+            logger.info(f"✅ Fallback маршрут создан (БЕЗ ручных времен): {len(route_points)} точек, расстояние {total_distance:.1f} км, время {total_time:.0f} мин")
+            logger.info(f"   🕐 Завершение маршрута: {estimated_completion.strftime('%H:%M:%S')}")
         
         return OptimizedRoute(
             points=route_points,
@@ -524,29 +549,32 @@ class RouteOptimizer:
                 logger.info(f"   📊 Количество заказов: {len(orders)}")
                 logger.info(f"   ⏱️ Лимит времени решения: {search_parameters.time_limit.seconds} сек")
                 
-                time_dimension = routing.GetDimensionOrDie("Time")
-                for i, order in enumerate(orders):
-                    try:
-                        node_index = manager.NodeToIndex(i + 1)
-                        time_var = time_dimension.CumulVar(node_index)
-                        min_seconds = time_var.Min()
-                        max_seconds = time_var.Max()
-                        min_time = (start_time + timedelta(seconds=min_seconds)).strftime('%H:%M')
-                        max_time = (start_time + timedelta(seconds=max_seconds)).strftime('%H:%M')
-                        
-                        logger.info(f"   📦 Заказ #{order.order_number}:")
-                        logger.info(f"      - Окно: {min_seconds}s - {max_seconds}s ({min_time} - {max_time})")
-                        if order.delivery_time_start and order.delivery_time_end:
-                            logger.info(f"      - Окно доставки: {order.delivery_time_start.strftime('%H:%M')} - {order.delivery_time_end.strftime('%H:%M')}")
-                        if order.manual_arrival_time:
-                            manual_seconds = int((order.manual_arrival_time - start_time).total_seconds())
-                            logger.info(f"      - Ручное время: {order.manual_arrival_time.strftime('%H:%M')} ({manual_seconds}s от старта)")
-                            if manual_seconds < min_seconds or manual_seconds > max_seconds:
-                                logger.error(f"      ⚠️ КОНФЛИКТ: Ручное время {manual_seconds}s вне допустимого окна [{min_seconds}s, {max_seconds}s]")
-                    except Exception as e:
-                        logger.warning(f"   ⚠️ Ошибка при проверке заказа #{order.order_number}: {e}")
+                try:
+                    time_dimension = routing.GetDimensionOrDie("Time")
+                    for i, order in enumerate(orders):
+                        try:
+                            node_index = manager.NodeToIndex(i + 1)
+                            time_var = time_dimension.CumulVar(node_index)
+                            min_seconds = time_var.Min()
+                            max_seconds = time_var.Max()
+                            min_time = (start_time + timedelta(seconds=min_seconds)).strftime('%H:%M')
+                            max_time = (start_time + timedelta(seconds=max_seconds)).strftime('%H:%M')
+                            
+                            logger.info(f"   📦 Заказ #{order.order_number}:")
+                            logger.info(f"      - Окно: {min_seconds}s - {max_seconds}s ({min_time} - {max_time})")
+                            if order.delivery_time_start and order.delivery_time_end:
+                                logger.info(f"      - Окно доставки: {order.delivery_time_start.strftime('%H:%M')} - {order.delivery_time_end.strftime('%H:%M')}")
+                            if order.manual_arrival_time:
+                                manual_seconds = int((order.manual_arrival_time - start_time).total_seconds())
+                                logger.info(f"      - Ручное время: {order.manual_arrival_time.strftime('%H:%M')} ({manual_seconds}s от старта)")
+                                if manual_seconds < min_seconds or manual_seconds > max_seconds:
+                                    logger.error(f"      ⚠️ КОНФЛИКТ: Ручное время {manual_seconds}s вне допустимого окна [{min_seconds}s, {max_seconds}s]")
+                        except Exception as e:
+                            logger.warning(f"   ⚠️ Ошибка при проверке заказа #{order.order_number}: {e}")
+                except Exception as e:
+                    logger.error(f"   ❌ Ошибка при диагностике ограничений: {e}")
                 
-                logger.warning("⚠️ Используем fallback: простой порядок заказов с расчетом времени")
+                logger.warning("⚠️ OR-Tools не нашел решение, будет использован fallback")
                 # Fallback: return None (будет обработано в optimize_route_sync)
                 return None
 
