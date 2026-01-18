@@ -168,6 +168,9 @@ class BaseHandlers:
                 self.parent.routes.handle_callback(call)
             elif callback_data == "view_delivered_orders":
                 self.parent.orders.handle_view_delivered(call)
+            elif callback_data.startswith("mark_delivered_"):
+                # Обработка отметки доставки из списка заказов
+                self.parent.orders.handle_callback(call)
             else:
                 logger.warning(f"Неизвестный callback: {callback_data}")
                 self.bot.answer_callback_query(call.id, "❌ Неизвестное действие")
