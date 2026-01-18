@@ -214,6 +214,7 @@ class RouteService:
             self._create_call_statuses(optimized_route, user_id, order_date, active_orders_dto, session)
             logger.debug("Call_status созданы/обновлены")
             
+            logger.info(f"✅ Успешно оптимизирован маршрут для user_id={user_id}, точек: {len(route_dto.route_points)}")
             return RouteOptimizationResult(
                 success=True,
                 route=route_dto
@@ -222,8 +223,9 @@ class RouteService:
         except Exception as e:
             import sys
             import traceback
-            logger.error(f"Ошибка оптимизации маршрута: {e}", exc_info=True)
-            logger.error(f"Полный traceback: {traceback.format_exc()}")
+            error_traceback = traceback.format_exc()
+            logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА оптимизации маршрута для user_id={user_id}: {e}", exc_info=True)
+            logger.error(f"Полный traceback оптимизации:\n{error_traceback}")
             sys.stdout.flush()
             return RouteOptimizationResult(
                 success=False,
@@ -760,15 +762,25 @@ class RouteService:
             call_advance_minutes = user_settings.call_advance_minutes if user_settings else 10
             
             # Пересчитываем call_time для каждой точки маршрута
-            from datetime import datetime, timedelta
+            from datetime import timedelta
             updated_route_summary = []
             for point_data in route_summary:
-                estimated_arrival_str = point_data.get('estimated_arrival')
+                # Создаем копию словаря, чтобы не изменять исходный
+                new_point_data = dict(point_data)
+                estimated_arrival_str = new_point_data.get('estimated_arrival')
                 if estimated_arrival_str:
-                    estimated_arrival = datetime.fromisoformat(estimated_arrival_str)
-                    new_call_time = estimated_arrival - timedelta(minutes=call_advance_minutes)
-                    point_data['call_time'] = new_call_time.isoformat()
-                updated_route_summary.append(point_data)
+                    try:
+                        if isinstance(estimated_arrival_str, str):
+                            estimated_arrival = datetime.fromisoformat(estimated_arrival_str)
+                        else:
+                            estimated_arrival = estimated_arrival_str
+                        new_call_time = estimated_arrival - timedelta(minutes=call_advance_minutes)
+                        new_point_data['call_time'] = new_call_time.isoformat()
+                    except Exception as e:
+                        logger.warning(f"Ошибка пересчета call_time для заказа {new_point_data.get('order_number')}: {e}")
+                        # Оставляем старое значение или None
+                        new_point_data['call_time'] = new_point_data.get('call_time')
+                updated_route_summary.append(new_point_data)
             
             # Обновляем маршрут в БД
             route_data = {

@@ -501,38 +501,65 @@ class RouteHandlers:
         )
 
         try:
-            logger.info(f"Вызываю optimize_route для user_id={user_id}")
+            logger.info(f"Вызываю optimize_route для user_id={user_id}, date={today}")
             import sys
             sys.stdout.flush()  # Принудительно сбрасываем буфер вывода
             result = self.parent.route_service.optimize_route(user_id, today)
-            logger.info(f"Оптимизация завершена, результат: success={result.success if result else None}")
+            logger.info(f"Оптимизация завершена, результат: success={result.success if result else None}, "
+                       f"error_message={result.error_message if result and result.error_message else None}, "
+                       f"route={result.route is not None if result else False}")
             sys.stdout.flush()
         except Exception as e:
             import sys
             import traceback
-            logger.error(f"Ошибка оптимизации маршрута: {e}", exc_info=True)
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            error_traceback = traceback.format_exc()
+            logger.error(f"❌ ИСКЛЮЧЕНИЕ при оптимизации маршрута для user_id={user_id}: {e}", exc_info=True)
+            logger.error(f"Полный traceback:\n{error_traceback}")
             sys.stdout.flush()
             try:
                 self.bot.edit_message_text(
-                    f"❌ Ошибка оптимизации маршрута: {str(e)}",
+                    f"❌ Ошибка оптимизации маршрута: {str(e)}\n\nПроверьте логи для подробностей.",
                     message.chat.id,
                     status_msg.message_id,
                     parse_mode='HTML'
                 )
             except Exception as bot_error:
                 logger.error(f"Ошибка отправки сообщения об ошибке: {bot_error}")
+                # Попытка отправить новое сообщение
+                try:
+                    self.bot.send_message(
+                        message.chat.id,
+                        f"❌ Ошибка оптимизации маршрута: {str(e)}",
+                        parse_mode='HTML'
+                    )
+                except Exception as send_error:
+                    logger.error(f"Не удалось отправить сообщение об ошибке: {send_error}")
             return
 
         if not result or not result.success or not result.route:
             error_text = result.error_message if result and result.error_message else "Не удалось оптимизировать маршрут"
-            self.bot.edit_message_text(
-                f"❌ <b>Не удалось оптимизировать маршрут</b>\n\n{error_text}",
-                message.chat.id,
-                status_msg.message_id,
-                parse_mode='HTML',
-                reply_markup=self.parent._route_menu_markup()
-            )
+            logger.warning(f"⚠️ Оптимизация не удалась для user_id={user_id}: {error_text}")
+            try:
+                # Пытаемся отредактировать сообщение с клавиатурой
+                self.bot.edit_message_text(
+                    f"❌ <b>Не удалось оптимизировать маршрут</b>\n\n{error_text}",
+                    message.chat.id,
+                    status_msg.message_id,
+                    parse_mode='HTML',
+                    reply_markup=self.parent._route_menu_markup()
+                )
+            except Exception as edit_error:
+                # Если не получилось с клавиатурой, отправляем новое сообщение
+                logger.warning(f"Не удалось отредактировать сообщение с клавиатурой: {edit_error}, отправляю новое")
+                try:
+                    self.bot.send_message(
+                        message.chat.id,
+                        f"❌ <b>Не удалось оптимизировать маршрут</b>\n\n{error_text}",
+                        parse_mode='HTML',
+                        reply_markup=self.parent._route_menu_markup()
+                    )
+                except Exception as send_error:
+                    logger.error(f"Не удалось отправить сообщение об ошибке: {send_error}")
             return
 
         # Успешная оптимизация – показываем маршрут через существующий механизм
