@@ -170,6 +170,7 @@ class BaseHandlers:
                 self.parent.orders.handle_view_delivered(call)
             elif callback_data.startswith("mark_delivered_"):
                 # Обработка отметки доставки из списка заказов
+                logger.info(f"📞 Callback mark_delivered_ перенаправлен в OrderHandlers: {callback_data}")
                 self.parent.orders.handle_callback(call)
             else:
                 logger.warning(f"Неизвестный callback: {callback_data}")

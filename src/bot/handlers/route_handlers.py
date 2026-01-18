@@ -616,8 +616,14 @@ class RouteHandlers:
             if start_location_data:
                 if start_location_data.get('location_type') == 'geo':
                     prev_latlon = (start_location_data.get('latitude'), start_location_data.get('longitude'))
+                    prev_gid = start_location_data.get('gis_id')
+                    logger.debug(f"Инициализирован prev_latlon из start_location (geo): {prev_latlon}")
                 elif start_location_data.get('latitude') and start_location_data.get('longitude'):
                     prev_latlon = (start_location_data.get('latitude'), start_location_data.get('longitude'))
+                    prev_gid = start_location_data.get('gis_id')
+                    logger.debug(f"Инициализирован prev_latlon из start_location: {prev_latlon}")
+            else:
+                logger.warning("⚠️ start_location_data пустой, prev_latlon не инициализирован - для первого заказа не будет ссылок на маршрут")
         
         # ВАЖНО: выводим маршрут в хронологическом порядке по фактическому времени прибытия,
         # а не в "сыром" порядке вершин из оптимизатора. Это делает план понятным для человека.
@@ -750,30 +756,48 @@ class RouteHandlers:
             order_info.append(" | ".join(route_info))
 
             # Ссылки на карты (в тексте, как было раньше)
-            if order.latitude and order.longitude and prev_latlon:
-                links = maps_service.build_route_links(
-                    prev_latlon[0],
-                    prev_latlon[1],
-                    order.latitude,
-                    order.longitude,
-                    prev_gid,
-                    order.gis_id
-                )
-                point_links = maps_service.build_point_links(order.latitude, order.longitude, order.gis_id)
+            if order.latitude and order.longitude:
+                try:
+                    # Ссылки на точку (всегда показываем)
+                    point_links = maps_service.build_point_links(order.latitude, order.longitude, order.gis_id)
+                    
+                    # Ссылки на маршрут (только если есть предыдущая точка)
+                    if prev_latlon:
+                        links = maps_service.build_route_links(
+                            prev_latlon[0],
+                            prev_latlon[1],
+                            order.latitude,
+                            order.longitude,
+                            prev_gid,
+                            order.gis_id
+                        )
+                        order_info.append(
+                            "🔗 <a href=\"{dg}\">Маршрут 2ГИС</a> | <a href=\"{ya}\">Яндекс</a> | "
+                            "<a href=\"{pdg}\">Точка 2ГИС</a> | <a href=\"{pya}\">Яндекс</a>".format(
+                                dg=links["2gis"],
+                                ya=links["yandex"],
+                                pdg=point_links["2gis"],
+                                pya=point_links["yandex"]
+                            )
+                        )
+                        logger.debug(f"Добавлены ссылки на карты для заказа {order.order_number}: маршрут + точка, prev_latlon={prev_latlon}")
+                    else:
+                        # Для первого заказа - только кнопки точки (если нет предыдущей точки)
+                        order_info.append(
+                            "🔗 <a href=\"{pdg}\">Точка 2ГИС</a> | <a href=\"{pya}\">Яндекс</a>".format(
+                                pdg=point_links["2gis"],
+                                pya=point_links["yandex"]
+                            )
+                        )
+                        logger.debug(f"Добавлены ссылки на карты для заказа {order.order_number}: только точка (нет prev_latlon)")
 
-                order_info.append(
-                    "🔗 <a href=\"{dg}\">Маршрут 2ГИС</a> | <a href=\"{ya}\">Яндекс</a> | "
-                    "<a href=\"{pdg}\">Точка 2ГИС</a> | <a href=\"{pya}\">Яндекс</a>".format(
-                        dg=links["2gis"],
-                        ya=links["yandex"],
-                        pdg=point_links["2gis"],
-                        pya=point_links["yandex"]
-                    )
-                )
-
-                # Обновляем prev_latlon для следующей точки
-                prev_latlon = (order.latitude, order.longitude)
-                prev_gid = order.gis_id
+                    # Обновляем prev_latlon для следующей точки
+                    prev_latlon = (order.latitude, order.longitude)
+                    prev_gid = order.gis_id
+                except Exception as e:
+                    logger.error(f"Ошибка создания ссылок на карты для заказа {order.order_number}: {e}", exc_info=True)
+            else:
+                logger.warning(f"Заказ {order.order_number} без координат: lat={order.latitude}, lon={order.longitude}")
 
             # Комментарий (если есть)
             if order.comment:
@@ -1477,16 +1501,21 @@ class RouteHandlers:
 
         try:
             data = call.data or ""
+            logger.info(f"🔄 handle_mark_order_delivered вызван: callback_data={data}, user_id={user_id}")
             # Формат callback_data: route_delivered_<order_number>
             prefix = "route_delivered_"
             if not data.startswith(prefix):
+                logger.warning(f"⚠️ Неверный формат callback_data: {data}")
                 self.bot.answer_callback_query(call.id, "❌ Некорректные данные", show_alert=True)
                 return
 
             order_number = data[len(prefix):]
             if not order_number:
+                logger.warning(f"⚠️ Не указан номер заказа в callback_data: {data}")
                 self.bot.answer_callback_query(call.id, "❌ Не указан номер заказа", show_alert=True)
                 return
+            
+            logger.info(f"📦 Отмечаю заказ {order_number} как доставленный для user_id={user_id}")
 
             # Загружаем маршрут ДО обновления статуса, чтобы найти индекс текущего заказа
             route_data = self.parent.get_route_data_dict(user_id, today)

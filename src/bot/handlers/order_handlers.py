@@ -113,8 +113,15 @@ class OrderHandlers:
             )
         elif callback_data.startswith("mark_delivered_"):
             order_number = callback_data.replace("mark_delivered_", "")
-            self.mark_order_delivered(call.from_user.id, order_number, call.message.chat.id)
-            self.bot.answer_callback_query(call.id, "✅ Заказ отмечен как доставленный")
+            logger.info(f"🔄 Обработка mark_delivered_ для заказа {order_number}, user_id={call.from_user.id}")
+            try:
+                self.mark_order_delivered(call.from_user.id, order_number, call.message.chat.id)
+                self.bot.answer_callback_query(call.id, "✅ Заказ отмечен как доставленный")
+                logger.info(f"✅ Заказ {order_number} отмечен как доставленный")
+            except Exception as e:
+                import traceback
+                logger.error(f"❌ Ошибка при отметке заказа {order_number} как доставленного: {e}\n{traceback.format_exc()}")
+                self.bot.answer_callback_query(call.id, f"❌ Ошибка: {str(e)}", show_alert=True)
         elif callback_data.startswith("save_order_from_image_") or callback_data.startswith("overwrite_order_from_image_"):
             # Сохранить или перезаписать заказ из изображения
             is_overwrite = callback_data.startswith("overwrite_order_from_image_")
