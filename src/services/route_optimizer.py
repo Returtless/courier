@@ -69,11 +69,15 @@ class RouteOptimizer:
             logger.error("❌ Не удалось найти решение задачи маршрутизации")
             if use_fallback:
                 # Используем fallback только если пользователь явно согласился пересчитать без ручных времен
-                logger.warning("⚠️ Используем fallback: простой порядок заказов с расчетом времени")
-                return self._build_fallback_route(orders_with_coords, start_location, start_time, user_id)
+                logger.warning(f"⚠️ Используем fallback: простой порядок заказов с расчетом времени для {len(orders_with_coords)} заказов")
+                fallback_result = self._build_fallback_route(orders_with_coords, start_location, start_time, user_id)
+                if not fallback_result.points:
+                    logger.error(f"❌ Fallback тоже не создал маршрут! Заказов с координатами: {len(orders_with_coords)}")
+                return fallback_result
             else:
                 # НЕ используем fallback автоматически - возвращаем пустой маршрут,
                 # чтобы пользователь мог выбрать пересчет без ручных времен
+                logger.warning(f"⚠️ Fallback отключен (use_fallback=False), возвращаю пустой маршрут. Заказов с координатами: {len(orders_with_coords)}")
                 return OptimizedRoute(points=[], total_distance=0, total_time=0, estimated_completion=start_time)
         
         route_indices, solution, routing, manager, time_dimension = route_result
@@ -200,16 +204,25 @@ class RouteOptimizer:
         total_distance = 0.0
         total_time = 0.0
         
+        logger.info(f"🔧 Fallback: начинаю построение маршрута для {len(sorted_orders)} заказов")
+        
         for order in sorted_orders:
             if not order.latitude or not order.longitude:
-                logger.warning(f"⚠️ Пропускаем заказ {order.order_number}: нет координат")
+                logger.warning(f"⚠️ Пропускаем заказ {order.order_number}: нет координат (lat={order.latitude}, lon={order.longitude})")
                 continue
             
+            logger.debug(f"🔧 Fallback: обрабатываю заказ {order.order_number}, координаты: ({order.latitude}, {order.longitude})")
+            
             # Рассчитываем время до заказа
-            distance_km, time_min = self.maps_service.get_route_sync(
-                current_location[0], current_location[1],
-                order.latitude, order.longitude
-            )
+            try:
+                distance_km, time_min = self.maps_service.get_route_sync(
+                    current_location[0], current_location[1],
+                    order.latitude, order.longitude
+                )
+                logger.debug(f"🔧 Fallback: расстояние до {order.order_number}: {distance_km:.2f} км, время: {time_min:.1f} мин")
+            except Exception as e:
+                logger.error(f"❌ Ошибка расчета маршрута до заказа {order.order_number}: {e}")
+                continue
             
             # Время прибытия: текущее время + время в пути (АВТОМАТИЧЕСКИЙ расчет)
             arrival_time = current_time + timedelta(minutes=time_min)

@@ -171,17 +171,21 @@ class RouteService:
                     order.manual_arrival_time = None
             
             # Оптимизируем маршрут
-            logger.info(f"Запускаю оптимизацию маршрута для {len(orders)} заказов...")
+            logger.info(f"Запускаю оптимизацию маршрута для {len(orders)} заказов, use_fallback={recalculate_without_manual}")
+            
+            # ВАЖНО: если оптимизация не удалась, всегда используем fallback для построения хотя бы простого маршрута
             optimized_route = self.route_optimizer.optimize_route_sync(
                 orders=orders,
                 start_location=start_location,
                 start_time=start_time,
                 user_id=user_id,
-                use_fallback=recalculate_without_manual
+                use_fallback=True  # ВСЕГДА используем fallback, если OR-Tools не нашел решение
             )
+            
             logger.info(f"Оптимизация завершена, точек в маршруте: {len(optimized_route.points) if optimized_route.points else 0}")
             
             if not optimized_route.points:
+                logger.error(f"❌ Маршрут пустой! Заказов было: {len(orders)}, координаты: {[(o.order_number, o.latitude, o.longitude) for o in orders[:5]]}")
                 return RouteOptimizationResult(
                     success=False,
                     error_message="Не удалось оптимизировать маршрут. Проверьте, что у всех заказов есть координаты."
