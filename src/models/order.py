@@ -107,7 +107,6 @@ class UserSettingsDB(Base):
     
     # Настройки времени доставки
     service_time_minutes = Column(Integer, default=10)  # Время нахождения на точке (по умолчанию 10 минут)
-    parking_time_minutes = Column(Integer, default=7)  # Время на парковку и подход к подъезду
     
     # Настройки мониторинга пробок
     traffic_check_interval_minutes = Column(Integer, default=5)  # Интервал проверки пробок

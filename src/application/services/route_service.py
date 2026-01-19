@@ -68,11 +68,9 @@ class RouteService:
         if order_date is None:
             order_date = date.today()
         
-        # ВАЖНО: Очищаем кэш маршрутов в памяти ПЕРЕД оптимизацией (в самом начале!)
-        # Причина: время в пути меняется из-за пробок, нужны актуальные данные
-        logger.info("🗑️ Очищаю кэш маршрутов в памяти для получения актуальных данных о пробках")
-        self.maps_service._route_cache.clear()
-        logger.info(f"✅ Кэш очищен, размер после очистки: {len(self.maps_service._route_cache)}")
+            # Кэш маршрутов НЕ очищаем - используется TTL (5 минут) в БД для актуальности
+            # Очистка кэша увеличивает время оптимизации с 30 сек до 6 минут!
+            logger.debug(f"Текущий размер кэша маршрутов в памяти: {len(self.maps_service._route_cache)}")
         
         try:
             logger.info(f"🔍 Начало optimize_route для user_id={user_id}, date={order_date}")

@@ -32,7 +32,6 @@ async def get_settings(
         call_retry_interval_minutes=settings.call_retry_interval_minutes,
         call_max_attempts=settings.call_max_attempts,
         service_time_minutes=settings.service_time_minutes,
-        parking_time_minutes=settings.parking_time_minutes,
         traffic_check_interval_minutes=settings.traffic_check_interval_minutes,
         traffic_threshold_percent=settings.traffic_threshold_percent
     )
@@ -81,7 +80,6 @@ async def update_settings(
         call_retry_interval_minutes=settings.call_retry_interval_minutes,
         call_max_attempts=settings.call_max_attempts,
         service_time_minutes=settings.service_time_minutes,
-        parking_time_minutes=settings.parking_time_minutes,
         traffic_check_interval_minutes=settings.traffic_check_interval_minutes,
         traffic_threshold_percent=settings.traffic_threshold_percent
     )
@@ -114,7 +112,6 @@ async def reset_settings(
         call_retry_interval_minutes=settings.call_retry_interval_minutes,
         call_max_attempts=settings.call_max_attempts,
         service_time_minutes=settings.service_time_minutes,
-        parking_time_minutes=settings.parking_time_minutes,
         traffic_check_interval_minutes=settings.traffic_check_interval_minutes,
         traffic_threshold_percent=settings.traffic_threshold_percent
     )

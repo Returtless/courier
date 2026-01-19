@@ -53,8 +53,7 @@ class SettingsHandlers:
             f"• Повтор через {settings.call_retry_interval_minutes} мин\n"
             f"• Максимум попыток: {settings.call_max_attempts}\n\n"
             f"⏱️ <b>Время:</b>\n"
-            f"• На точке: {settings.service_time_minutes} мин\n"
-            f"• Парковка: {settings.parking_time_minutes} мин\n\n"
+            f"• На точке: {settings.service_time_minutes} мин\n\n"
             f"🚦 <b>Пробки:</b>\n"
             f"• Проверка каждые {settings.traffic_check_interval_minutes} мин\n"
             f"• Уведомлять при увеличении на {settings.traffic_threshold_percent}%\n\n"
@@ -70,7 +69,6 @@ class SettingsHandlers:
             types.InlineKeyboardButton("🔄 Интервал повторных звонков", callback_data="settings_call_retry"),
             types.InlineKeyboardButton("📞 Макс. попыток дозвона", callback_data="settings_call_attempts"),
             types.InlineKeyboardButton("⏰ Время на точке", callback_data="settings_service_time"),
-            types.InlineKeyboardButton("🚗 Время на парковку", callback_data="settings_parking_time"),
             types.InlineKeyboardButton("🚦 Интервал проверки пробок", callback_data="settings_traffic_interval"),
             types.InlineKeyboardButton("⚠️ Порог уведомлений о пробках", callback_data="settings_traffic_threshold"),
             types.InlineKeyboardButton("🔄 Сбросить к умолчанию", callback_data="settings_reset"),
@@ -121,15 +119,6 @@ class SettingsHandlers:
                 'current': settings.service_time_minutes,
                 'min': 1,
                 'max': 60,
-                'unit': 'минут'
-            },
-            'parking_time': {
-                'name': 'parking_time_minutes',
-                'title': '🚗 Время на парковку',
-                'description': 'Время на парковку и подход к подъезду',
-                'current': settings.parking_time_minutes,
-                'min': 0,
-                'max': 30,
                 'unit': 'минут'
             },
             'traffic_interval': {
@@ -250,7 +239,6 @@ class SettingsHandlers:
                 f"🔄 Повтор через {settings.call_retry_interval_minutes} мин\n"
                 f"📞 Максимум попыток: {settings.call_max_attempts}\n"
                 f"⏰ На точке: {settings.service_time_minutes} мин\n"
-                f"🚗 Парковка: {settings.parking_time_minutes} мин\n"
                 f"🚦 Проверка пробок: {settings.traffic_check_interval_minutes} мин\n"
                 f"⚠️ Порог пробок: {settings.traffic_threshold_percent}%"
             )

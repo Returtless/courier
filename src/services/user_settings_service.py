@@ -144,7 +144,6 @@ class UserSettingsService:
             'call_retry_interval_minutes': '🔄 Интервал между повторными звонками (минут)',
             'call_max_attempts': '📞 Максимальное количество попыток дозвона',
             'service_time_minutes': '⏰ Время нахождения на точке (минут)',
-            'parking_time_minutes': '🚗 Время на парковку и подход (минут)',
             'traffic_check_interval_minutes': '🚦 Интервал проверки пробок (минут)',
             'traffic_threshold_percent': '⚠️ Порог уведомления о пробках (%)',
         }
