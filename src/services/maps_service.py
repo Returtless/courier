@@ -288,12 +288,13 @@ class MapsService:
         # Проверяем кэш в памяти
         if route_key in self._route_cache:
             cached_result = self._route_cache[route_key]
-            logger.debug(f"Маршрут из кэша памяти: ({start_lat:.5f}, {start_lon:.5f}) -> ({end_lat:.5f}, {end_lon:.5f})")
+            logger.info(f"💾 Маршрут из кэша памяти: {cached_result[0]:.2f} км, {cached_result[1]:.1f} мин")
             return cached_result
         
-        # Проверяем кэш в БД
+        # Проверяем кэш в БД (только свежие записи - не старше 1 часа)
         try:
             from src.models.geocache import RouteCacheDB
+            from datetime import datetime, timedelta
             with get_db_session() as session:
                 cached = session.query(RouteCacheDB).filter(
                     RouteCacheDB.start_lat == start_lat_rounded,
@@ -302,13 +303,22 @@ class MapsService:
                     RouteCacheDB.end_lon == end_lon_rounded
                 ).first()
                 if cached:
-                    result = (cached.distance_km, cached.time_minutes)
-                    # Сохраняем в кэш памяти
-                    self._route_cache[route_key] = result
-                    logger.debug(f"Маршрут из БД кэша: ({start_lat:.5f}, {start_lon:.5f}) -> ({end_lat:.5f}, {end_lon:.5f})")
-                    return result
+                    # Проверяем возраст записи
+                    cache_age = datetime.utcnow() - cached.updated_at
+                    cache_ttl = timedelta(hours=1)  # TTL кэша - 1 час
+                    
+                    if cache_age < cache_ttl:
+                        result = (cached.distance_km, cached.time_minutes)
+                        # Сохраняем в кэш памяти
+                        self._route_cache[route_key] = result
+                        logger.info(f"💾 Маршрут из БД кэша (возраст {cache_age.seconds // 60} мин): {result[0]:.2f} км, {result[1]:.1f} мин")
+                        return result
+                    else:
+                        logger.debug(f"⏰ Запись в БД кэше устарела (возраст {cache_age.seconds // 60} мин > {cache_ttl.seconds // 60} мин), запрашиваю API")
         except Exception as e:
             logger.warning(f"Ошибка проверки БД кэша маршрутов: {e}")
+        
+        logger.info(f"🌐 Кэша нет, запрашиваю маршрут через API: ({start_lat:.5f}, {start_lon:.5f}) -> ({end_lat:.5f}, {end_lon:.5f})")
         
         # 1) 2GIS Routing API с учетом дорожной сети (traffic_mode=jam при наличии тарифа)
         if self.two_gis_api_key:

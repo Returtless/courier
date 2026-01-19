@@ -185,6 +185,12 @@ class RouteService:
                 for order in orders:
                     order.manual_arrival_time = None
             
+            # ВАЖНО: Очищаем кэш маршрутов в памяти перед оптимизацией
+            # Причина: время в пути меняется из-за пробок, нужны актуальные данные
+            logger.info("🗑️ Очищаю кэш маршрутов в памяти для получения актуальных данных о пробках")
+            self.maps_service._route_cache.clear()
+            logger.debug(f"Кэш маршрутов в памяти очищен, размер: {len(self.maps_service._route_cache)}")
+            
             # Оптимизируем маршрут
             logger.info(f"Запускаю оптимизацию маршрута для {len(orders)} заказов, use_fallback={recalculate_without_manual}")
             
