@@ -360,6 +360,7 @@ class MapsService:
 
         # 2) Yandex (если есть ключ)
         if self.yandex_api_key:
+            logger.info(f"🔄 Пробую Yandex Routing API для ({start_lat:.5f}, {start_lon:.5f}) -> ({end_lat:.5f}, {end_lon:.5f})")
             try:
                 url = "https://api.routing.yandex.net/v2/route"
                 params = {
@@ -369,6 +370,8 @@ class MapsService:
                 }
 
                 response = requests.get(url, params=params, timeout=10)
+                logger.debug(f"Yandex API HTTP статус: {response.status_code}")
+                
                 if response.status_code == 200:
                     data = response.json()
                     route = data.get("route", {})
@@ -376,15 +379,28 @@ class MapsService:
                         distance = route.get("distance", 0) / 1000  # meters to km
                         time_seconds = route.get("duration", 0)  # Без учета пробок
                         time_minutes = time_seconds / 60
+                        logger.info(f"✅ Yandex API успешно: {distance:.2f} км, {time_minutes:.1f} мин")
                         result_tuple = (distance, time_minutes)
                         # Сохраняем в кэш памяти
                         self._route_cache[route_key] = result_tuple
                         # Сохраняем в БД кэш
                         self._save_route_to_db_cache(start_lat_rounded, start_lon_rounded, end_lat_rounded, end_lon_rounded, distance, time_minutes)
                         return result_tuple
+                    else:
+                        logger.warning(f"⚠️ Yandex API вернул пустой route: {data}")
+                else:
+                    try:
+                        resp_text = response.text[:400]
+                    except Exception:
+                        resp_text = ""
+                    logger.warning(f"⚠️ Yandex API HTTP {response.status_code}: {resp_text}")
 
             except Exception as e:
-                logger.warning(f"Yandex route error: {e}")
+                import traceback
+                logger.warning(f"❌ Yandex route error: {e}")
+                logger.debug(f"Traceback: {traceback.format_exc()}")
+        else:
+            logger.debug("⚠️ Yandex API ключ не настроен, пропускаю")
 
         # Fallback to distance calculation (евклидово расстояние)
         logger.warning(f"⚠️ FALLBACK: API недоступны, используем расчет по прямой для ({start_lat:.5f}, {start_lon:.5f}) -> ({end_lat:.5f}, {end_lon:.5f})")
