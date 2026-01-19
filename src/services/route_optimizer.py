@@ -32,18 +32,26 @@ class RouteOptimizer:
             return OptimizedRoute(points=[], total_distance=0, total_time=0, estimated_completion=start_time)
 
         # Geocode addresses if needed (используем координаты из БД, если они есть)
+        logger.info(f"🗺️ Начинаю геокодирование {len(orders)} заказов...")
         geocoded_orders = []
-        for order in orders:
+        for idx, order in enumerate(orders, 1):
             if order.latitude is None or order.longitude is None:
                 # Только если координат нет - делаем геокодирование (с кэшированием)
+                logger.info(f"🗺️ [{idx}/{len(orders)}] Заказ {order.order_number} без координат, геокодирую адрес: {order.address}")
                 # Проверяем, что адрес не пустой
                 if order.address and order.address.strip():
                     lat, lon, gid = self.maps_service.geocode_address_sync(order.address)
                     order.latitude = lat
                     order.longitude = lon
                     order.gis_id = gid
+                    if lat and lon:
+                        logger.info(f"   ✅ Получены координаты: lat={lat:.6f}, lon={lon:.6f}, gis_id={gid}")
+                    else:
+                        logger.error(f"   ❌ Не удалось получить координаты для адреса: {order.address}")
                 else:
-                    logger.warning(f"⚠️ Заказ {order.order_number} не может быть загеокодирован: адрес отсутствует")
+                    logger.warning(f"⚠️ Заказ {order.order_number} не может быть загеокодирован: адрес отсутствует или пустой")
+            else:
+                logger.debug(f"✅ [{idx}/{len(orders)}] Заказ {order.order_number} уже имеет координаты: lat={order.latitude:.6f}, lon={order.longitude:.6f}")
             geocoded_orders.append(order)
 
         # Calculate distance/time matrix
@@ -51,11 +59,17 @@ class RouteOptimizer:
         orders_with_coords = [o for o in geocoded_orders if o.latitude and o.longitude]
         orders_without_coords = [o for o in geocoded_orders if not o.latitude or not o.longitude]
         
+        logger.info(f"📊 Результат геокодирования: {len(orders_with_coords)} заказов с координатами, {len(orders_without_coords)} без координат")
+        
         if orders_without_coords:
-            logger.warning(f"⚠️ {len(orders_without_coords)} заказов без координат будут исключены из маршрута: {[o.order_number for o in orders_without_coords]}")
+            logger.warning(f"⚠️ {len(orders_without_coords)} заказов без координат будут исключены из маршрута:")
+            for order in orders_without_coords:
+                logger.warning(f"   ❌ Заказ {order.order_number}: адрес='{order.address}', lat={order.latitude}, lon={order.longitude}")
         
         if not orders_with_coords:
-            logger.error("❌ Нет заказов с координатами для построения маршрута")
+            logger.error("❌ КРИТИЧНО: Нет заказов с координатами для построения маршрута!")
+            logger.error(f"   Всего заказов: {len(orders)}")
+            logger.error(f"   Заказов без координат: {len(orders_without_coords)}")
             return OptimizedRoute(points=[], total_distance=0, total_time=0, estimated_completion=start_time)
         
         locations = [start_location] + [(o.latitude, o.longitude) for o in orders_with_coords]
@@ -229,6 +243,10 @@ class RouteOptimizer:
                     order.latitude, order.longitude
                 )
                 logger.info(f"   ✅ Расстояние до {order.order_number}: {distance_km:.2f} км, время: {time_min:.1f} мин")
+                
+                # Предупреждение о нереалистично коротком времени
+                if time_min < 5 and distance_km > 1:
+                    logger.warning(f"   ⚠️ Подозрительно короткое время ({time_min:.1f} мин) для расстояния {distance_km:.2f} км - возможно использован fallback без API")
             except Exception as e:
                 import traceback
                 logger.error(f"❌ Ошибка расчета маршрута до заказа {order.order_number}: {e}")

@@ -87,8 +87,18 @@ class RouteService:
                 )
             
             # Преобразуем DTO в Order для RouteOptimizer
+            logger.info(f"📦 Преобразую {len(active_orders_dto)} DTO в Order для оптимизатора...")
             orders = []
+            orders_without_coords_from_db = []
             for order_dto in active_orders_dto:
+                # Логируем координаты из БД
+                has_coords = order_dto.latitude is not None and order_dto.longitude is not None
+                if not has_coords:
+                    orders_without_coords_from_db.append(order_dto.order_number)
+                    logger.warning(f"   ⚠️ Заказ {order_dto.order_number} БЕЗ координат из БД: lat={order_dto.latitude}, lon={order_dto.longitude}, адрес='{order_dto.address}'")
+                else:
+                    logger.debug(f"   ✅ Заказ {order_dto.order_number} с координатами из БД: lat={order_dto.latitude:.6f}, lon={order_dto.longitude:.6f}")
+                
                 order = Order(
                     order_number=order_dto.order_number,
                     customer_name=order_dto.customer_name,
@@ -109,6 +119,11 @@ class RouteService:
                 if order_dto.manual_arrival_time:
                     order.manual_arrival_time = order_dto.manual_arrival_time
                 orders.append(order)
+            
+            if orders_without_coords_from_db:
+                logger.warning(f"⚠️ {len(orders_without_coords_from_db)} заказов без координат в БД (будут геокодированы): {orders_without_coords_from_db}")
+            else:
+                logger.info(f"✅ Все {len(orders)} заказов имеют координаты из БД")
             
             # Получаем точку старта
             logger.debug("Получаю точку старта...")
@@ -198,6 +213,39 @@ class RouteService:
             # Получаем настройки пользователя для расчета времени звонков
             user_settings = self.settings_service.get_settings(user_id)
             call_advance_minutes = user_settings.call_advance_minutes if user_settings else 10
+            
+            # Сохраняем обновленные координаты заказов обратно в БД (после геокодирования)
+            logger.debug("Сохраняю обновленные координаты заказов в БД...")
+            for point in optimized_route.points:
+                order = point.order
+                # Проверяем, были ли получены координаты при оптимизации
+                if order.latitude and order.longitude:
+                    # Находим соответствующий DTO
+                    order_dto = next((o for o in active_orders_dto if o.order_number == order.order_number), None)
+                    if order_dto:
+                        # Обновляем координаты только если они изменились (были NULL или отличаются)
+                        if (order_dto.latitude != order.latitude or 
+                            order_dto.longitude != order.longitude or 
+                            order_dto.gis_id != order.gis_id):
+                            
+                            from src.application.dto.order_dto import UpdateOrderDTO
+                            update_dto = UpdateOrderDTO(
+                                latitude=order.latitude,
+                                longitude=order.longitude,
+                                gis_id=order.gis_id
+                            )
+                            updated_order = self.order_service.update_order(
+                                user_id, 
+                                order.order_number, 
+                                update_dto, 
+                                order_date, 
+                                session
+                            )
+                            if updated_order:
+                                logger.info(f"✅ Обновлены координаты для заказа {order.order_number}: lat={order.latitude}, lon={order.longitude}, gis_id={order.gis_id}")
+                            else:
+                                logger.warning(f"⚠️ Не удалось обновить координаты для заказа {order.order_number}")
+            logger.debug("Координаты заказов сохранены в БД")
             
             # Сохраняем маршрут в БД
             logger.debug("Сохраняю маршрут в БД...")

@@ -386,10 +386,22 @@ class MapsService:
             except Exception as e:
                 logger.warning(f"Yandex route error: {e}")
 
-        # Fallback to distance calculation
-        distance = self._calculate_distance(start_lat, start_lon, end_lat, end_lon)
-        # Estimate time: 30 km/h average speed
-        time_minutes = (distance / 30) * 60
+        # Fallback to distance calculation (евклидово расстояние)
+        logger.warning(f"⚠️ FALLBACK: API недоступны, используем расчет по прямой для ({start_lat:.5f}, {start_lon:.5f}) -> ({end_lat:.5f}, {end_lon:.5f})")
+        straight_distance = self._calculate_distance(start_lat, start_lon, end_lat, end_lon)
+        
+        # Применяем коэффициент извилистости дорог (1.5 - среднее значение для городской дорожной сети)
+        # Реальное расстояние по дорогам обычно в 1.3-1.7 раз больше прямого расстояния
+        road_distance_coefficient = 1.5
+        distance = straight_distance * road_distance_coefficient
+        
+        # Средняя скорость в городе с учетом светофоров, пробок: ~20 км/ч (консервативная оценка)
+        # Лучше переоценить время, чем недооценить
+        average_speed_kmh = 20
+        time_minutes = (distance / average_speed_kmh) * 60
+        
+        logger.warning(f"⚠️ FALLBACK результат: расстояние по прямой {straight_distance:.2f} км → расстояние по дорогам ~{distance:.2f} км, время ~{time_minutes:.1f} мин (средняя скорость {average_speed_kmh} км/ч)")
+        
         result_tuple = (distance, time_minutes)
         # Сохраняем в кэш памяти (даже fallback результаты)
         self._route_cache[route_key] = result_tuple
