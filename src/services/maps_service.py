@@ -288,7 +288,7 @@ class MapsService:
         # Проверяем кэш в памяти
         if route_key in self._route_cache:
             cached_result = self._route_cache[route_key]
-            logger.info(f"💾 Маршрут из кэша памяти: {cached_result[0]:.2f} км, {cached_result[1]:.1f} мин")
+            logger.debug(f"💾 Кэш памяти: ({start_lat:.5f}, {start_lon:.5f}) → ({end_lat:.5f}, {end_lon:.5f}): {cached_result[0]:.2f} км, {cached_result[1]:.1f} мин")
             return cached_result
         
         # Проверяем кэш в БД (только свежие записи - не старше 1 часа)
@@ -305,7 +305,7 @@ class MapsService:
                 if cached:
                     # Проверяем возраст записи
                     cache_age = datetime.utcnow() - cached.updated_at
-                    cache_ttl = timedelta(hours=1)  # TTL кэша - 1 час
+                    cache_ttl = timedelta(minutes=5)  # TTL кэша - 5 минут (для актуальности пробок)
                     
                     if cache_age < cache_ttl:
                         result = (cached.distance_km, cached.time_minutes)
@@ -318,7 +318,7 @@ class MapsService:
         except Exception as e:
             logger.warning(f"Ошибка проверки БД кэша маршрутов: {e}")
         
-        logger.info(f"🌐 Кэша нет, запрашиваю маршрут через API: ({start_lat:.5f}, {start_lon:.5f}) -> ({end_lat:.5f}, {end_lon:.5f})")
+        logger.info(f"🌐 API запрос: ({start_lat:.5f}, {start_lon:.5f}) → ({end_lat:.5f}, {end_lon:.5f})")
         
         # 1) 2GIS Routing API с учетом дорожной сети (traffic_mode=jam при наличии тарифа)
         if self.two_gis_api_key:
@@ -370,7 +370,7 @@ class MapsService:
 
         # 2) Yandex (если есть ключ)
         if self.yandex_api_key:
-            logger.info(f"🔄 Пробую Yandex Routing API для ({start_lat:.5f}, {start_lon:.5f}) -> ({end_lat:.5f}, {end_lon:.5f})")
+            logger.info(f"🔄 Yandex API: ({start_lat:.5f}, {start_lon:.5f}) → ({end_lat:.5f}, {end_lon:.5f})")
             try:
                 url = "https://api.routing.yandex.net/v2/route"
                 params = {
@@ -389,7 +389,7 @@ class MapsService:
                         distance = route.get("distance", 0) / 1000  # meters to km
                         time_seconds = route.get("duration", 0)  # Без учета пробок
                         time_minutes = time_seconds / 60
-                        logger.info(f"✅ Yandex API успешно: {distance:.2f} км, {time_minutes:.1f} мин")
+                        logger.info(f"✅ Yandex: {distance:.2f} км, {time_minutes:.1f} мин")
                         result_tuple = (distance, time_minutes)
                         # Сохраняем в кэш памяти
                         self._route_cache[route_key] = result_tuple

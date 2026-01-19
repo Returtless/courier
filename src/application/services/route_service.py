@@ -68,6 +68,12 @@ class RouteService:
         if order_date is None:
             order_date = date.today()
         
+        # ВАЖНО: Очищаем кэш маршрутов в памяти ПЕРЕД оптимизацией (в самом начале!)
+        # Причина: время в пути меняется из-за пробок, нужны актуальные данные
+        logger.info("🗑️ Очищаю кэш маршрутов в памяти для получения актуальных данных о пробках")
+        self.maps_service._route_cache.clear()
+        logger.info(f"✅ Кэш очищен, размер после очистки: {len(self.maps_service._route_cache)}")
+        
         try:
             logger.info(f"🔍 Начало optimize_route для user_id={user_id}, date={order_date}")
             # Получаем заказы
@@ -184,12 +190,6 @@ class RouteService:
                 recalculate_without_manual = True
                 for order in orders:
                     order.manual_arrival_time = None
-            
-            # ВАЖНО: Очищаем кэш маршрутов в памяти перед оптимизацией
-            # Причина: время в пути меняется из-за пробок, нужны актуальные данные
-            logger.info("🗑️ Очищаю кэш маршрутов в памяти для получения актуальных данных о пробках")
-            self.maps_service._route_cache.clear()
-            logger.debug(f"Кэш маршрутов в памяти очищен, размер: {len(self.maps_service._route_cache)}")
             
             # Оптимизируем маршрут
             logger.info(f"Запускаю оптимизацию маршрута для {len(orders)} заказов, use_fallback={recalculate_without_manual}")
