@@ -2,6 +2,7 @@ import logging
 from typing import List, Tuple
 from datetime import datetime, time, timedelta
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 from src.models.order import Order, RoutePoint, OptimizedRoute
@@ -166,24 +167,63 @@ class RouteOptimizer:
         )
 
     def _build_matrices(self, locations: List[Tuple[float, float]]) -> Tuple[np.ndarray, np.ndarray]:
-        """Build distance and time matrices between all locations"""
+        """Build distance and time matrices between all locations using parallel API requests"""
         n = len(locations)
         distance_matrix = np.zeros((n, n))
         time_matrix = np.zeros((n, n))
-
+        
+        # Создаем список всех пар (i, j) для запросов
+        pairs_to_fetch = []
         for i in range(n):
             for j in range(n):
                 if i != j:
-                    dist, time_min = self.maps_service.get_route_sync(
-                        locations[i][0], locations[i][1],
-                        locations[j][0], locations[j][1]
-                    )
+                    pairs_to_fetch.append((i, j))
+        
+        total_requests = len(pairs_to_fetch)
+        logger.info(f"🚀 Начинаю построение матрицы: {n}×{n} = {total_requests} запросов к API")
+        logger.info(f"⚡ Используем параллельные запросы (макс. 20 одновременно)")
+        
+        # Функция для получения маршрута для одной пары
+        def fetch_route(pair):
+            i, j = pair
+            start_lat, start_lon = locations[i]
+            end_lat, end_lon = locations[j]
+            try:
+                dist, time_min = self.maps_service.get_route_sync(
+                    start_lat, start_lon,
+                    end_lat, end_lon
+                )
+                return (i, j, dist, time_min, True)
+            except Exception as e:
+                logger.error(f"❌ Ошибка запроса маршрута ({i},{j}): {e}")
+                return (i, j, 0, 0, False)
+        
+        # Выполняем запросы параллельно с ограничением на количество одновременных потоков
+        completed_requests = 0
+        max_workers = 20  # Максимум 20 одновременных запросов
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Отправляем все задачи
+            future_to_pair = {executor.submit(fetch_route, pair): pair for pair in pairs_to_fetch}
+            
+            # Собираем результаты по мере готовности
+            for future in as_completed(future_to_pair):
+                i, j, dist, time_min, success = future.result()
+                if success:
                     distance_matrix[i][j] = dist
                     time_matrix[i][j] = time_min
                 else:
+                    # Если запрос не удался, используем значения по умолчанию (0)
                     distance_matrix[i][j] = 0
                     time_matrix[i][j] = 0
-
+                
+                completed_requests += 1
+                # Логируем прогресс каждые 10%
+                if completed_requests % max(1, total_requests // 10) == 0:
+                    progress = (completed_requests / total_requests) * 100
+                    logger.info(f"📊 Прогресс построения матрицы: {completed_requests}/{total_requests} ({progress:.0f}%)")
+        
+        logger.info(f"✅ Матрица построена: {total_requests} запросов завершено")
         return distance_matrix, time_matrix
 
     def _build_fallback_route(
