@@ -142,6 +142,7 @@ class CallHandlers:
                 return
             
             # Проверяем количество попыток после отклонения
+            # Если достигли максимума (например, 3 попытки = attempts достиг 3)
             if updated_call_status_dto.attempts >= user_settings.call_max_attempts:
                 # Превышено максимальное количество попыток
                 updated_text = (

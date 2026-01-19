@@ -529,7 +529,8 @@ class CallStatusRepository(BaseRepository[CallStatusDB]):
         """Внутренний метод пометки как отправленного"""
         call_status = session.query(CallStatusDB).filter_by(id=call_status_id).first()
         if call_status:
-            call_status.attempts += 1
+            # НЕ инкрементируем attempts здесь - только при отклонении/подтверждении
+            # Попытка = действие пользователя (отклонение), а не отправка уведомления
             call_status.status = "sent"
             if is_retry:
                 call_status.next_attempt_time = None
@@ -617,15 +618,15 @@ class CallStatusRepository(BaseRepository[CallStatusDB]):
         call_status = session.query(CallStatusDB).filter_by(id=call_status_id).first()
         if call_status and call_status.user_id == user_id:
             call_status.status = "rejected"
-            call_status.attempts += 1
+            call_status.attempts += 1  # Инкремент при отклонении (это реальная попытка)
             call_status.next_attempt_time = next_attempt_time
             
-            # Если превышен лимит попыток
+            # Если достигнут лимит попыток (например, 3 попытки = attempts достиг 3)
             if call_status.attempts >= max_attempts:
                 call_status.status = "failed"
             
             session.commit()
-            logger.info(f"❌ Звонок {call_status_id} отклонен (попытка {call_status.attempts})")
+            logger.info(f"❌ Звонок {call_status_id} отклонен (попытка {call_status.attempts}/{max_attempts})")
             return True
         return False
     

@@ -1,5 +1,6 @@
 import telebot
 import logging
+import time
 from src.config import settings
 # Импортируем модели для использования в ORM запросах
 from src.models.order import OrderDB, StartLocationDB, RouteDataDB, CallStatusDB, UserSettingsDB, UserCredentialsDB  # noqa: F401
@@ -115,9 +116,36 @@ def main():
     except KeyboardInterrupt:
         logger.info("\n🛑 Остановка бота...")
         courier_bot.call_notifier.stop()
+        import sys
+        sys.exit(0)
     except Exception as e:
         logger.error(f"❌ Критическая ошибка в polling: {e}", exc_info=True)
-        raise
+        
+        # Проверяем, это сетевая ошибка или критическая
+        error_type = type(e).__name__
+        error_msg = str(e)
+        is_network_error = (
+            "ConnectionError" in error_type or 
+            "ReadTimeout" in error_type or 
+            "TimeoutError" in error_type or
+            "Network is unreachable" in error_msg or
+            "Connection refused" in error_msg or
+            "Failed to establish" in error_msg
+        )
+        
+        if is_network_error:
+            # Сетевая ошибка - ждем и переподключаемся
+            logger.warning("⚠️ Проблема с сетью/Telegram API - жду 30 сек перед переподключением...")
+            time.sleep(30)
+            logger.info("🔄 Переподключаюсь к Telegram API...")
+            # Рекурсивно вызываем main() для переподключения
+            main()
+        else:
+            # Критическая ошибка - останавливаем
+            logger.error("❌ Критическая ошибка - останавливаю бот")
+            courier_bot.call_notifier.stop()
+            import sys
+            sys.exit(1)
 
 
 if __name__ == "__main__":

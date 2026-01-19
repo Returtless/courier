@@ -60,4 +60,5 @@ class UpdateOrderDTO(BaseModel):
     entrance_number: Optional[str] = None
     apartment_number: Optional[str] = None
     gis_id: Optional[str] = None
+    status: Optional[str] = None  # pending, delivered
 
