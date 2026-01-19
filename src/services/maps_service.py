@@ -368,9 +368,46 @@ class MapsService:
             except Exception as e:
                 logger.warning(f"2GIS route error: {e}")
 
-        # 2) Yandex (если есть ключ)
+        # 2) OSRM (OpenStreetMap - бесплатный, без пробок, но по реальным дорогам)
+        try:
+            logger.info(f"🗺️ OSRM API: ({start_lat:.5f}, {start_lon:.5f}) → ({end_lat:.5f}, {end_lon:.5f})")
+            url = f"http://router.project-osrm.org/route/v1/driving/{start_lon},{start_lat};{end_lon},{end_lat}"
+            params = {
+                "overview": "false",
+                "geometries": "geojson"
+            }
+            
+            response = requests.get(url, params=params, timeout=10)
+            logger.debug(f"OSRM API HTTP статус: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("code") == "Ok" and data.get("routes"):
+                    route = data["routes"][0]
+                    distance = route.get("distance", 0) / 1000  # meters to km
+                    time_seconds = route.get("duration", 0)  # seconds
+                    time_minutes = time_seconds / 60
+                    logger.info(f"✅ OSRM: {distance:.2f} км, {time_minutes:.1f} мин")
+                    result_tuple = (distance, time_minutes)
+                    # Сохраняем в кэш памяти
+                    self._route_cache[route_key] = result_tuple
+                    # Сохраняем в БД кэш
+                    self._save_route_to_db_cache(start_lat_rounded, start_lon_rounded, end_lat_rounded, end_lon_rounded, distance, time_minutes)
+                    return result_tuple
+                else:
+                    logger.warning(f"⚠️ OSRM API вернул код: {data.get('code')}, {data.get('message', '')}")
+            else:
+                logger.warning(f"⚠️ OSRM API HTTP {response.status_code}")
+        except Exception as e:
+            import traceback
+            logger.warning(f"❌ OSRM route error: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+
+        # 3) Yandex (если есть ключ)
         if self.yandex_api_key:
-            logger.info(f"🔄 Yandex API: ({start_lat:.5f}, {start_lon:.5f}) → ({end_lat:.5f}, {end_lon:.5f})")
+            # Логируем первые и последние символы ключа для отладки
+            key_preview = f"{self.yandex_api_key[:8]}...{self.yandex_api_key[-4:]}" if len(self.yandex_api_key) > 12 else "***"
+            logger.info(f"🔄 Yandex API: ({start_lat:.5f}, {start_lon:.5f}) → ({end_lat:.5f}, {end_lon:.5f}) [ключ: {key_preview}]")
             try:
                 url = "https://api.routing.yandex.net/v2/route"
                 params = {
