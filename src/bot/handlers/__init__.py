@@ -65,12 +65,127 @@ class CourierBot:
         # Настройка callback для мониторинга пробок
         self.traffic_monitor.add_callback(self._send_traffic_notification)
     
-    def _send_traffic_notification(self, user_id: int, message: str):
-        """Callback для отправки уведомлений о пробках"""
+    def _send_traffic_notification(self, user_id: int, changes: list, total_current_time: float):
+        """
+        Callback для обработки изменений в пробках.
+        Автоматически переоптимизирует маршрут от текущей позиции.
+        """
         try:
-            self.bot.send_message(user_id, message, parse_mode='HTML')
+            logger.info(f"🚨 Обнаружены пробки для user_id={user_id}, запускаю автоматическую переоптимизацию")
+            
+            # Формируем сообщение об обнаруженных пробках
+            delay_text = "\n".join([
+                f"📍 Заказ {change['step']}: {change['order'].customer_name} - задержка {change['delay']:.1f} мин"
+                for change in changes
+            ])
+            
+            notification = (
+                f"🚨 <b>ОБНАРУЖЕНЫ ПРОБКИ!</b>\n\n"
+                f"{delay_text}\n\n"
+                f"⏱️ Общее увеличение времени: {total_current_time:.0f} мин\n\n"
+                f"🔄 Запускаю автоматическую переоптимизацию маршрута..."
+            )
+            self.bot.send_message(user_id, notification, parse_mode='HTML')
+            
+            # Получаем текущее состояние пользователя
+            state_data = self.get_user_state(user_id)
+            
+            # Получаем все заказы на сегодня
+            today = date.today()
+            all_orders = self.order_service.get_orders_by_date(user_id, today)
+            
+            if not all_orders:
+                logger.warning(f"⚠️ Нет заказов для переоптимизации user_id={user_id}")
+                self.bot.send_message(user_id, "⚠️ Не найдены заказы для переоптимизации", parse_mode='HTML')
+                return
+            
+            # Фильтруем только не доставленные заказы
+            pending_orders = [o for o in all_orders if o.status == 'pending']
+            
+            if not pending_orders:
+                logger.info(f"✅ Все заказы доставлены для user_id={user_id}, переоптимизация не требуется")
+                self.bot.send_message(user_id, "✅ Все заказы уже доставлены!", parse_mode='HTML')
+                return
+            
+            logger.info(f"📦 Найдено {len(pending_orders)} недоставленных заказов для переоптимизации")
+            
+            # Определяем точку старта: последний доставленный заказ или сохраненная точка
+            delivered_orders = [o for o in all_orders if o.status == 'delivered']
+            
+            if delivered_orders:
+                # Берем последний доставленный заказ
+                last_delivered = delivered_orders[-1]
+                if last_delivered.latitude and last_delivered.longitude:
+                    start_location = (last_delivered.latitude, last_delivered.longitude)
+                    logger.info(f"📍 Точка старта: последний доставленный заказ {last_delivered.order_number} ({start_location})")
+                else:
+                    # Если у последнего доставленного нет координат, используем сохраненную точку старта
+                    start_location = state_data.get('start_location')
+                    if not start_location:
+                        self.bot.send_message(user_id, "❌ Не удалось определить точку старта для переоптимизации", parse_mode='HTML')
+                        return
+                    logger.info(f"📍 Точка старта: сохраненная точка {start_location}")
+            else:
+                # Нет доставленных заказов, используем сохраненную точку старта
+                start_location = state_data.get('start_location')
+                if not start_location:
+                    self.bot.send_message(user_id, "❌ Не удалось определить точку старта для переоптимизации", parse_mode='HTML')
+                    return
+                logger.info(f"📍 Точка старта: изначальная точка {start_location}")
+            
+            # Время старта = текущее время
+            from datetime import datetime
+            start_time = datetime.now()
+            logger.info(f"🕐 Время старта: {start_time.strftime('%H:%M:%S')}")
+            
+            # Запускаем переоптимизацию
+            logger.info(f"🚀 Запускаю переоптимизацию для {len(pending_orders)} заказов")
+            optimized_route = self.route_service.optimize_route(
+                user_id=user_id,
+                delivery_date=today,
+                start_location=start_location,
+                start_time=start_time
+            )
+            
+            if not optimized_route or not optimized_route.points:
+                logger.error(f"❌ Переоптимизация не удалась для user_id={user_id}")
+                self.bot.send_message(
+                    user_id,
+                    "❌ Не удалось переоптимизировать маршрут. Попробуйте вручную.",
+                    parse_mode='HTML'
+                )
+                return
+            
+            # Сохраняем новый маршрут в состояние
+            state_data['optimized_route'] = optimized_route
+            state_data['optimized_orders'] = pending_orders
+            state_data['start_location'] = start_location
+            state_data['start_time'] = start_time.isoformat()
+            self.set_user_state(user_id, state_data)
+            
+            # Отправляем новый маршрут
+            success_msg = (
+                f"✅ <b>Маршрут переоптимизирован!</b>\n\n"
+                f"📍 Точек: {len(optimized_route.points)}\n"
+                f"📏 Расстояние: {optimized_route.total_distance:.1f} км\n"
+                f"⏱️ Время в пути: {optimized_route.total_time:.0f} мин\n"
+                f"🏁 Завершение: {optimized_route.estimated_completion.strftime('%H:%M')}\n\n"
+                f"Используйте '📍 Показать маршрут' для просмотра"
+            )
+            self.bot.send_message(user_id, success_msg, parse_mode='HTML')
+            
+            logger.info(f"✅ Автоматическая переоптимизация успешно завершена для user_id={user_id}")
+            
         except Exception as e:
-            logger.error(f"Ошибка отправки уведомления о пробках user_id={user_id}: {e}")
+            logger.error(f"❌ Ошибка автоматической переоптимизации для user_id={user_id}: {e}", exc_info=True)
+            try:
+                self.bot.send_message(
+                    user_id,
+                    f"❌ Ошибка при переоптимизации маршрута: {str(e)}",
+                    parse_mode='HTML'
+                )
+            except:
+                pass
     
     def register_handlers(self):
         """Регистрация всех обработчиков сообщений"""

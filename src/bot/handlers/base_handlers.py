@@ -48,6 +48,8 @@ class BaseHandlers:
     
     def handle_start(self, message):
         """Обработчик команды /start"""
+        user_id = message.from_user.id
+        
         welcome_text = (
             "👋 <b>Добро пожаловать в Courier Bot!</b>\n\n"
             "Этот бот поможет вам оптимизировать маршруты доставки с учетом:\n"
@@ -61,7 +63,7 @@ class BaseHandlers:
             message,
             welcome_text,
             parse_mode='HTML',
-            reply_markup=self.parent._main_menu_markup(message.from_user.id)
+            reply_markup=self.parent._main_menu_markup(user_id)
         )
     
     def handle_help(self, message):

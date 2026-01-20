@@ -74,7 +74,7 @@ class RouteOptimizer:
             return OptimizedRoute(points=[], total_distance=0, total_time=0, estimated_completion=start_time)
         
         locations = [start_location] + [(o.latitude, o.longitude) for o in orders_with_coords]
-        distance_matrix, time_matrix = self._build_matrices(locations)
+        distance_matrix, time_matrix = self._build_matrices(locations, user_id)
 
         # Create route optimization problem
         # Используем только заказы с координатами для оптимизации
@@ -166,7 +166,7 @@ class RouteOptimizer:
             estimated_completion=last_arrival_time
         )
 
-    def _build_matrices(self, locations: List[Tuple[float, float]]) -> Tuple[np.ndarray, np.ndarray]:
+    def _build_matrices(self, locations: List[Tuple[float, float]], user_id: int = None) -> Tuple[np.ndarray, np.ndarray]:
         """Build distance and time matrices between all locations using parallel API requests"""
         n = len(locations)
         distance_matrix = np.zeros((n, n))
@@ -191,7 +191,8 @@ class RouteOptimizer:
             try:
                 dist, time_min = self.maps_service.get_route_sync(
                     start_lat, start_lon,
-                    end_lat, end_lon
+                    end_lat, end_lon,
+                    user_id=user_id  # Передаем user_id для умного выбора провайдера
                 )
                 return (i, j, dist, time_min, True)
             except Exception as e:
@@ -280,7 +281,8 @@ class RouteOptimizer:
             try:
                 distance_km, time_min = self.maps_service.get_route_sync(
                     current_location[0], current_location[1],
-                    order.latitude, order.longitude
+                    order.latitude, order.longitude,
+                    user_id=user_id  # Передаем user_id для умного выбора провайдера
                 )
                 logger.info(f"   ✅ Расстояние до {order.order_number}: {distance_km:.2f} км, время: {time_min:.1f} мин")
                 

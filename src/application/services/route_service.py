@@ -74,6 +74,10 @@ class RouteService:
         
         try:
             logger.info(f"🔍 Начало optimize_route для user_id={user_id}, date={order_date}")
+            
+            # Проверяем доступность API (если кэш пустой или устарел)
+            self._ensure_api_status_checked(user_id)
+            
             # Получаем заказы
             logger.debug("Загружаю заказы...")
             orders_dto = self.order_service.get_orders_by_date(user_id, order_date, session)
@@ -980,4 +984,33 @@ class RouteService:
         logger.info(f"🗑️ Удалены все данные для user_id={user_id}, date={order_date}: {deleted_counts}")
         
         return deleted_counts
+    
+    def _ensure_api_status_checked(self, user_id: int):
+        """
+        Убедиться, что статус API проверен.
+        Если кэш пустой или устарел (старше 6 часов) - запустить проверку в фоне.
+        """
+        import threading
+        
+        # Проверяем наличие свежего кэша
+        cached_statuses = self.maps_service.get_cached_api_status(user_id, max_age_hours=6)
+        
+        if not cached_statuses or None in cached_statuses.values():
+            # Кэш пустой или устарел - запускаем проверку в фоне
+            logger.info(f"🔍 Кэш API статуса пустой или устарел для user_id={user_id}, запускаю фоновую проверку")
+            
+            def check_api():
+                try:
+                    results = self.maps_service.check_api_availability(user_id)
+                    available = [name for name, status in results.items() if status]
+                    unavailable = [name for name, status in results.items() if not status]
+                    logger.info(f"✅ API проверка завершена: доступны {available}, недоступны {unavailable}")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка проверки API: {e}", exc_info=True)
+            
+            threading.Thread(target=check_api, daemon=True).start()
+        else:
+            # Кэш свежий
+            available = [name for name, status in cached_statuses.items() if status]
+            logger.debug(f"✅ Используем кэшированный статус API: доступны {available}")
 

@@ -108,6 +108,62 @@ def main():
     except Exception as e:
         logger.error(f"❌ Ошибка запуска уведомлений: {e}", exc_info=True)
         return
+    
+    # Start periodic API status checker
+    logger.info("🔧 Запуск периодической проверки API...")
+    try:
+        from threading import Thread
+        from datetime import datetime
+        
+        def periodic_api_checker():
+            """Периодическая проверка доступности API для активных пользователей"""
+            while True:
+                try:
+                    # Ждем 6 часов между проверками
+                    time.sleep(6 * 3600)
+                    
+                    logger.info("🔍 Запуск периодической проверки API для активных пользователей")
+                    
+                    # Получаем список активных пользователей (которые использовали бот сегодня)
+                    from src.database.connection import get_db_session
+                    from src.models.order import OrderDB, RouteDataDB
+                    from datetime import date
+                    
+                    with get_db_session() as session:
+                        # Находим пользователей с заказами или маршрутами на сегодня
+                        today = date.today()
+                        active_user_ids = set()
+                        
+                        orders = session.query(OrderDB.user_id).filter(
+                            OrderDB.order_date == today
+                        ).distinct().all()
+                        active_user_ids.update([o.user_id for o in orders])
+                        
+                        routes = session.query(RouteDataDB.user_id).filter(
+                            RouteDataDB.route_date == today
+                        ).distinct().all()
+                        active_user_ids.update([r.user_id for r in routes])
+                    
+                    if active_user_ids:
+                        logger.info(f"📊 Найдено {len(active_user_ids)} активных пользователей")
+                        for user_id in active_user_ids:
+                            try:
+                                results = courier_bot.maps_service.check_api_availability(user_id)
+                                available = [name for name, status in results.items() if status]
+                                logger.info(f"✅ User {user_id}: доступны {available}")
+                            except Exception as e:
+                                logger.error(f"❌ Ошибка проверки API для user {user_id}: {e}")
+                    else:
+                        logger.info("📊 Нет активных пользователей сегодня")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Ошибка периодической проверки API: {e}", exc_info=True)
+        
+        api_checker_thread = Thread(target=periodic_api_checker, daemon=True)
+        api_checker_thread.start()
+        logger.info("✅ Периодическая проверка API запущена (каждые 6 часов)")
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось запустить периодическую проверку API: {e}")
 
     # Start polling
     logger.info("🤖 Courier Bot started! Начинаю polling...")

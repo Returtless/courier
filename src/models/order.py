@@ -129,6 +129,25 @@ class UserCredentialsDB(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class ApiStatusDB(Base):
+    """Статус доступности API провайдеров для каждого пользователя"""
+    __tablename__ = "api_status"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)  # Telegram user ID
+    provider = Column(String, nullable=False, index=True)  # yandex, 2gis, osrm
+    is_available = Column(Boolean, default=False)  # Доступен ли провайдер
+    last_check = Column(DateTime, nullable=True)  # Время последней проверки
+    error_message = Column(Text, nullable=True)  # Сообщение об ошибке (если недоступен)
+    response_time_ms = Column(Integer, nullable=True)  # Время ответа в миллисекундах
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('idx_user_provider', 'user_id', 'provider', unique=True),
+    )
+
+
 class UserSettings(BaseModel):
     """Pydantic модель для настроек пользователя"""
     user_id: int
@@ -136,7 +155,6 @@ class UserSettings(BaseModel):
     call_retry_interval_minutes: int = 2
     call_max_attempts: int = 3
     service_time_minutes: int = 10
-    parking_time_minutes: int = 7
     traffic_check_interval_minutes: int = 5
     traffic_threshold_percent: int = 50
     

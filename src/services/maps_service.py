@@ -275,8 +275,11 @@ class MapsService:
             # Не критично, если не удалось сохранить в БД кэш
             logger.warning(f"Не удалось сохранить в БД кэш: {e}")
 
-    def get_route_sync(self, start_lat: float, start_lon: float, end_lat: float, end_lon: float) -> Tuple[float, float]:
-        """Синхронный расчет маршрута через 2GIS (если есть ключ) с fallback."""
+    def get_route_sync(self, start_lat: float, start_lon: float, end_lat: float, end_lon: float, user_id: int = None) -> Tuple[float, float]:
+        """
+        Синхронный расчет маршрута через 2GIS/Yandex/OSRM с fallback.
+        Если передан user_id, учитывает кэшированный статус доступности API.
+        """
         # Округляем координаты до 5 знаков для ключа кэша
         start_lat_rounded = round(start_lat, 5)
         start_lon_rounded = round(start_lon, 5)
@@ -321,7 +324,7 @@ class MapsService:
         logger.info(f"🌐 API запрос: ({start_lat:.5f}, {start_lon:.5f}) → ({end_lat:.5f}, {end_lon:.5f})")
         
         # 1) 2GIS Routing API с учетом дорожной сети (traffic_mode=jam при наличии тарифа)
-        if self.two_gis_api_key:
+        if self.two_gis_api_key and self._should_try_provider('2gis', user_id):
             try:
                 # Используем версию 7.0.0, как в рабочем примере Postman
                 url = "https://routing.api.2gis.com/routing/7.0.0/global"
@@ -369,42 +372,43 @@ class MapsService:
                 logger.warning(f"2GIS route error: {e}")
 
         # 2) OSRM (OpenStreetMap - бесплатный, без пробок, но по реальным дорогам)
-        try:
-            logger.info(f"🗺️ OSRM API: ({start_lat:.5f}, {start_lon:.5f}) → ({end_lat:.5f}, {end_lon:.5f})")
-            url = f"http://router.project-osrm.org/route/v1/driving/{start_lon},{start_lat};{end_lon},{end_lat}"
-            params = {
-                "overview": "false",
-                "geometries": "geojson"
-            }
-            
-            response = requests.get(url, params=params, timeout=10)
-            logger.debug(f"OSRM API HTTP статус: {response.status_code}")
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("code") == "Ok" and data.get("routes"):
-                    route = data["routes"][0]
-                    distance = route.get("distance", 0) / 1000  # meters to km
-                    time_seconds = route.get("duration", 0)  # seconds
-                    time_minutes = time_seconds / 60
-                    logger.info(f"✅ OSRM: {distance:.2f} км, {time_minutes:.1f} мин")
-                    result_tuple = (distance, time_minutes)
-                    # Сохраняем в кэш памяти
-                    self._route_cache[route_key] = result_tuple
-                    # Сохраняем в БД кэш
-                    self._save_route_to_db_cache(start_lat_rounded, start_lon_rounded, end_lat_rounded, end_lon_rounded, distance, time_minutes)
-                    return result_tuple
+        if self._should_try_provider('osrm', user_id):
+            try:
+                logger.info(f"🗺️ OSRM API: ({start_lat:.5f}, {start_lon:.5f}) → ({end_lat:.5f}, {end_lon:.5f})")
+                url = f"http://router.project-osrm.org/route/v1/driving/{start_lon},{start_lat};{end_lon},{end_lat}"
+                params = {
+                    "overview": "false",
+                    "geometries": "geojson"
+                }
+                
+                response = requests.get(url, params=params, timeout=10)
+                logger.debug(f"OSRM API HTTP статус: {response.status_code}")
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("code") == "Ok" and data.get("routes"):
+                        route = data["routes"][0]
+                        distance = route.get("distance", 0) / 1000  # meters to km
+                        time_seconds = route.get("duration", 0)  # seconds
+                        time_minutes = time_seconds / 60
+                        logger.info(f"✅ OSRM: {distance:.2f} км, {time_minutes:.1f} мин")
+                        result_tuple = (distance, time_minutes)
+                        # Сохраняем в кэш памяти
+                        self._route_cache[route_key] = result_tuple
+                        # Сохраняем в БД кэш
+                        self._save_route_to_db_cache(start_lat_rounded, start_lon_rounded, end_lat_rounded, end_lon_rounded, distance, time_minutes)
+                        return result_tuple
+                    else:
+                        logger.warning(f"⚠️ OSRM API вернул код: {data.get('code')}, {data.get('message', '')}")
                 else:
-                    logger.warning(f"⚠️ OSRM API вернул код: {data.get('code')}, {data.get('message', '')}")
-            else:
-                logger.warning(f"⚠️ OSRM API HTTP {response.status_code}")
-        except Exception as e:
-            import traceback
-            logger.warning(f"❌ OSRM route error: {e}")
-            logger.debug(f"Traceback: {traceback.format_exc()}")
+                    logger.warning(f"⚠️ OSRM API HTTP {response.status_code}")
+            except Exception as e:
+                import traceback
+                logger.warning(f"❌ OSRM route error: {e}")
+                logger.debug(f"Traceback: {traceback.format_exc()}")
 
         # 3) Yandex (если есть ключ)
-        if self.yandex_api_key:
+        if self.yandex_api_key and self._should_try_provider('yandex', user_id):
             # Логируем первые и последние символы ключа для отладки
             key_preview = f"{self.yandex_api_key[:8]}...{self.yandex_api_key[-4:]}" if len(self.yandex_api_key) > 12 else "***"
             logger.info(f"🔄 Yandex API: ({start_lat:.5f}, {start_lon:.5f}) → ({end_lat:.5f}, {end_lon:.5f}) [ключ: {key_preview}]")
@@ -627,3 +631,199 @@ class MapsService:
             logger.warning(f"Traffic info error: {e}")
 
         return {"level": 0, "description": "No traffic data"}
+
+    def check_api_availability(self, user_id: int) -> dict:
+        """
+        Проверить доступность всех API провайдеров и сохранить статус в БД.
+        Возвращает словарь {provider: is_available}
+        """
+        import time
+        from src.models.order import ApiStatusDB
+        
+        logger.info(f"🔍 Проверяю доступность API провайдеров для user_id={user_id}")
+        results = {}
+        
+        # Тестовые координаты (центр Санкт-Петербурга)
+        test_lat1, test_lon1 = 59.9343, 30.3351
+        test_lat2, test_lon2 = 59.9311, 30.3609
+        
+        # Проверяем каждый провайдер
+        providers = {
+            'yandex': self._check_yandex_api,
+            '2gis': self._check_2gis_api,
+            'osrm': self._check_osrm_api
+        }
+        
+        with get_db_session() as session:
+            for provider_name, check_func in providers.items():
+                start_time = time.time()
+                is_available, error_msg = check_func(test_lat1, test_lon1, test_lat2, test_lon2)
+                response_time = int((time.time() - start_time) * 1000)  # в миллисекундах
+                
+                results[provider_name] = is_available
+                
+                # Сохраняем или обновляем статус в БД
+                api_status = session.query(ApiStatusDB).filter_by(
+                    user_id=user_id,
+                    provider=provider_name
+                ).first()
+                
+                if api_status:
+                    api_status.is_available = is_available
+                    api_status.last_check = datetime.now()
+                    api_status.error_message = error_msg
+                    api_status.response_time_ms = response_time
+                    api_status.updated_at = datetime.now()
+                else:
+                    api_status = ApiStatusDB(
+                        user_id=user_id,
+                        provider=provider_name,
+                        is_available=is_available,
+                        last_check=datetime.now(),
+                        error_message=error_msg,
+                        response_time_ms=response_time
+                    )
+                    session.add(api_status)
+                
+                status_icon = "✅" if is_available else "❌"
+                logger.info(f"{status_icon} {provider_name.upper()}: {'доступен' if is_available else 'недоступен'} ({response_time}ms)")
+                if error_msg:
+                    logger.debug(f"   Ошибка: {error_msg}")
+            
+            session.commit()
+        
+        logger.info(f"✅ Проверка API завершена для user_id={user_id}")
+        return results
+
+    def get_cached_api_status(self, user_id: int, max_age_hours: int = 1) -> dict:
+        """
+        Получить кэшированный статус API провайдеров из БД.
+        Если данных нет или они старше max_age_hours, возвращает None для провайдера.
+        """
+        from src.models.order import ApiStatusDB
+        
+        results = {}
+        with get_db_session() as session:
+            statuses = session.query(ApiStatusDB).filter_by(user_id=user_id).all()
+            
+            for status in statuses:
+                # Проверяем возраст данных
+                if status.last_check:
+                    age = datetime.now() - status.last_check
+                    if age.total_seconds() < max_age_hours * 3600:
+                        results[status.provider] = status.is_available
+                    else:
+                        logger.debug(f"⏰ Статус {status.provider} устарел (возраст: {age}), требуется обновление")
+                        results[status.provider] = None
+        
+        return results
+    
+    def _should_try_provider(self, provider: str, user_id: int = None) -> bool:
+        """
+        Проверить, стоит ли пытаться использовать провайдер.
+        Если есть кэшированный статус и провайдер недоступен - пропускаем.
+        Если статуса нет или он устарел - пытаемся (может заработал).
+        """
+        if not user_id:
+            return True  # Если user_id не передан, пытаемся использовать
+        
+        cached_statuses = self.get_cached_api_status(user_id, max_age_hours=1)
+        status = cached_statuses.get(provider)
+        
+        if status is None:
+            # Нет свежего статуса - пытаемся
+            return True
+        elif status is False:
+            # Провайдер недоступен - пропускаем
+            logger.debug(f"⏭️ Пропускаю {provider} (недоступен по кэшированному статусу)")
+            return False
+        else:
+            # Провайдер доступен - пытаемся
+            return True
+
+    def _check_yandex_api(self, lat1: float, lon1: float, lat2: float, lon2: float) -> tuple[bool, str]:
+        """Проверить доступность Yandex Maps API"""
+        if not self.yandex_api_key:
+            return False, "API ключ не настроен"
+        
+        try:
+            url = "https://api.routing.yandex.net/v2/route"
+            params = {
+                "apikey": self.yandex_api_key,
+                "waypoints": f"{lon1},{lat1}|{lon2},{lat2}",
+                "mode": "driving"
+            }
+            
+            response = requests.get(url, params=params, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if "route" in data:
+                    return True, None
+                else:
+                    return False, "Неожиданный формат ответа"
+            elif response.status_code == 401:
+                return False, "Неверный API ключ"
+            elif response.status_code == 403:
+                return False, "Доступ запрещен"
+            else:
+                return False, f"HTTP {response.status_code}"
+        
+        except requests.exceptions.Timeout:
+            return False, "Таймаут соединения"
+        except Exception as e:
+            return False, str(e)
+
+    def _check_2gis_api(self, lat1: float, lon1: float, lat2: float, lon2: float) -> tuple[bool, str]:
+        """Проверить доступность 2GIS API"""
+        if not self.two_gis_api_key:
+            return False, "API ключ не настроен"
+        
+        try:
+            # Проверяем через geocoding API (меньше лимиты)
+            url = "https://catalog.api.2gis.com/3.0/items/geocode"
+            params = {
+                "q": f"{lat1},{lon1}",
+                "fields": "items.point",
+                "key": self.two_gis_api_key
+            }
+            
+            response = requests.get(url, params=params, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if "meta" in data and data["meta"].get("code") == 200:
+                    return True, None
+                else:
+                    return False, "Неожиданный формат ответа"
+            elif response.status_code == 403:
+                return False, "Неверный API ключ или лимит запросов"
+            else:
+                return False, f"HTTP {response.status_code}"
+        
+        except requests.exceptions.Timeout:
+            return False, "Таймаут соединения"
+        except Exception as e:
+            return False, str(e)
+
+    def _check_osrm_api(self, lat1: float, lon1: float, lat2: float, lon2: float) -> tuple[bool, str]:
+        """Проверить доступность OSRM API"""
+        try:
+            url = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}"
+            params = {"overview": "false"}
+            
+            response = requests.get(url, params=params, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("code") == "Ok" and "routes" in data:
+                    return True, None
+                else:
+                    return False, "Неожиданный формат ответа"
+            else:
+                return False, f"HTTP {response.status_code}"
+        
+        except requests.exceptions.Timeout:
+            return False, "Таймаут соединения"
+        except Exception as e:
+            return False, str(e)
