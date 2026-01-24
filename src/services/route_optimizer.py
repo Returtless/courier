@@ -365,7 +365,18 @@ class RouteOptimizer:
             def distance_callback(from_index, to_index):
                 from_node = manager.IndexToNode(from_index)
                 to_node = manager.IndexToNode(to_index)
-                return int(distance_matrix[from_node][to_node] * 1000)  # Convert to meters
+                distance = distance_matrix[from_node][to_node]
+                
+                # Увеличиваем вес расстояния для приоритизации близких точек
+                # Применяем квадратичный штраф: близкие точки дешевле, далекие - НАМНОГО дороже
+                base_cost = int(distance * 1000)  # Convert to meters
+                
+                # Квадратичный штраф за дальние переезды (усиливает группировку)
+                if distance > 5.0:  # Если расстояние больше 5 км
+                    penalty = int((distance - 5.0) ** 2 * 1000)  # Квадратичный штраф
+                    base_cost += penalty
+                
+                return base_cost
 
             transit_callback_index = routing.RegisterTransitCallback(distance_callback)
             routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
@@ -480,28 +491,37 @@ class RouteOptimizer:
                 
                 # Приоритет 2: Временное окно доставки (если нет ручного времени)
                 elif window_start_seconds is not None and window_end_seconds is not None:
-                    # Используем уже вычисленные значения window_start_seconds и window_end_seconds
-                    time_dimension.CumulVar(node_index).SetRange(window_start_seconds, window_end_seconds)
+                    # Смягчаем окна для группировки близких точек
+                    # Убираем жесткое ограничение SetRange, используем только мягкие штрафы
                     
-                    # Мягкая цель: стремимся к началу окна (чтобы минимизировать ожидание)
-                    # Но с большим штрафом за выход за пределы основного окна
+                    # Основное окно (с буфером)
                     order_date = start_time.date()
                     window_start_dt = datetime.combine(order_date, order.delivery_time_start)
                     window_end_dt = datetime.combine(order_date, order.delivery_time_end)
                     start_seconds = max(0, int((window_start_dt - start_time).total_seconds()))
                     end_seconds = max(start_seconds, int((window_end_dt - start_time).total_seconds()))
                     
-                    early_penalty_per_minute = 1000  # небольшой штраф за раннее прибытие
+                    # Смягченные границы: расширяем окно на ±1 час для гибкости маршрута
+                    flex_buffer_seconds = 60 * 60  # 1 час
+                    flex_start_seconds = max(0, start_seconds - flex_buffer_seconds)
+                    flex_end_seconds = end_seconds + flex_buffer_seconds
+                    
+                    # Устанавливаем ШИРОКОЕ жесткое окно (±1 час)
+                    time_dimension.CumulVar(node_index).SetRange(flex_start_seconds, flex_end_seconds)
+                    
+                    # Мягкие штрафы: стремимся попасть в основное окно, но не критично
+                    early_penalty_per_minute = 100  # Небольшой штраф за раннее прибытие
+                    late_penalty_per_minute = 300  # Средний штраф за опоздание
+                    
                     early_penalty_per_second = early_penalty_per_minute / 60.0
+                    late_penalty_per_second = late_penalty_per_minute / 60.0
+                    
                     time_dimension.SetCumulVarSoftLowerBound(
                         node_index,
                         int(start_seconds),
                         int(early_penalty_per_second)
                     )
                     
-                    # Штраф за выход за верхнюю границу окна
-                    late_penalty_per_minute = 2000  # больший штраф за опоздание
-                    late_penalty_per_second = late_penalty_per_minute / 60.0
                     time_dimension.SetCumulVarSoftUpperBound(
                         node_index,
                         int(end_seconds),
@@ -509,30 +529,30 @@ class RouteOptimizer:
                     )
                     
                     logger.info(
-                        f"📅 Заказ №{order.order_number}: ЖЕСТКОЕ окно доставки "
+                        f"📅 Заказ №{order.order_number}: ГИБКОЕ окно доставки "
                         f"{order.delivery_time_start.strftime('%H:%M')}-{order.delivery_time_end.strftime('%H:%M')} "
-                        f"(от {window_start_seconds}s до {window_end_seconds}s от старта, "
-                        f"основное окно: {start_seconds}s-{end_seconds}s)"
+                        f"(жесткие границы ±1 час: {flex_start_seconds}s-{flex_end_seconds}s, "
+                        f"мягкая цель: {start_seconds}s-{end_seconds}s)"
                     )
 
             # Set advanced search parameters
             search_parameters = pywrapcp.DefaultRoutingSearchParameters()
 
-            # First solution strategy - try different approaches
+            # First solution strategy - используем PATH_CHEAPEST_ARC для группировки близких точек
             search_parameters.first_solution_strategy = (
-                routing_enums_pb2.FirstSolutionStrategy.AUTOMATIC
+                routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
             )
 
-            # Local search metaheuristic for optimization
+            # Local search metaheuristic - используем GUIDED_LOCAL_SEARCH для лучшей оптимизации
             search_parameters.local_search_metaheuristic = (
-                routing_enums_pb2.LocalSearchMetaheuristic.AUTOMATIC
+                routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
             )
 
-            # Time limit for solving (60 seconds) - увеличиваем для сложных задач
-            search_parameters.time_limit.seconds = 60
+            # Time limit for solving (120 seconds) - увеличиваем для лучшей оптимизации
+            search_parameters.time_limit.seconds = 120
 
-            # Solution limit - увеличиваем для поиска большего количества решений
-            search_parameters.solution_limit = 500
+            # Solution limit - увеличиваем для поиска лучших решений
+            search_parameters.solution_limit = 1000
             
             # Добавляем больше стратегий поиска для сложных задач
             search_parameters.use_full_propagation = True
