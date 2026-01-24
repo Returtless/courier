@@ -61,19 +61,7 @@ class HybridRouteOptimizer:
             return OptimizedRoute(points=[], total_distance=0, total_time=0, estimated_completion=start_time)
         
         logger.info(f"🎯 УМНАЯ ОПТИМИЗАЦИЯ С ПРИОРИТИЗАЦИЕЙ: {len(orders)} заказов")
-        
-        # Определяем реальное время старта - начало самого раннего окна
-        earliest_window = None
-        for order in orders:
-            if order.delivery_time_start:
-                order_date = start_time.date()
-                window_start = datetime.combine(order_date, order.delivery_time_start)
-                if earliest_window is None or window_start < earliest_window:
-                    earliest_window = window_start
-        
-        if earliest_window and earliest_window > start_time:
-            start_time = earliest_window
-            logger.info(f"⏰ Устанавливаю время старта на начало первого окна: {start_time.strftime('%H:%M')}")
+        logger.info(f"⏰ Время старта от базы: {start_time.strftime('%H:%M')}")
         
         # Шаг 1: Группировка заказов по ПРИОРИТЕТАМ
         priority_groups = self._group_orders_by_priority(orders, start_time, critical_threshold_hour, medium_threshold_hour)
