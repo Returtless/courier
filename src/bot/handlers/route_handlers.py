@@ -650,14 +650,18 @@ class RouteHandlers:
                 logger.debug(f"Пропускаем доставленный заказ {order_number} в маршруте")
                 continue
             
+            # Окно из маршрута (после синхронизации близких адресов) переопределяет данные из БД
+            order_data_display = dict(order_data)
+            if point_data.get('delivery_time_window'):
+                order_data_display['delivery_time_window'] = point_data['delivery_time_window']
+            
             # Преобразуем данные заказа
             try:
-                # Проверяем наличие координат в данных перед созданием Order
-                lat = order_data.get('latitude')
-                lon = order_data.get('longitude')
-                logger.debug(f"Заказ {order_number}: lat={lat}, lon={lon}, gis_id={order_data.get('gis_id')}")
+                lat = order_data_display.get('latitude')
+                lon = order_data_display.get('longitude')
+                logger.debug(f"Заказ {order_number}: lat={lat}, lon={lon}, gis_id={order_data_display.get('gis_id')}")
                 
-                order = Order(**order_data)
+                order = Order(**order_data_display)
                 
                 # Проверяем координаты после создания Order
                 if not order.latitude or not order.longitude:

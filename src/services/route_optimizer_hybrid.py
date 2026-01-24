@@ -30,7 +30,7 @@ class HybridRouteOptimizer:
         cluster_radius_km: float = 3.0,
         critical_threshold_hour: int = 13,
         medium_threshold_hour: int = 15,
-        sync_nearby_windows_km: float = 0.5
+        sync_nearby_windows_km: float = 0.8
     ) -> OptimizedRoute:
         """
         УМНАЯ оптимизация с приоритизацией:
@@ -228,28 +228,29 @@ class HybridRouteOptimizer:
         if not orders_with_coords:
             return orders
         
-        # Находим кластеры близких адресов (greedy)
+        # Находим кластеры близких адресов: расстояние до ЛЮБОЙ точки кластера
         clusters = []
         remaining = orders_with_coords.copy()
         
         while remaining:
             seed = remaining.pop(0)
             cluster = [seed]
-            
-            # Ищем близкие заказы
-            i = 0
-            while i < len(remaining):
-                order = remaining[i]
-                distance = self._haversine_distance(
-                    seed.latitude, seed.longitude,
-                    order.latitude, order.longitude
-                )
-                
-                if distance <= max_distance_km:
-                    cluster.append(order)
-                    remaining.pop(i)
-                else:
-                    i += 1
+            changed = True
+            while changed:
+                changed = False
+                i = 0
+                while i < len(remaining):
+                    order = remaining[i]
+                    min_d = min(
+                        self._haversine_distance(c.latitude, c.longitude, order.latitude, order.longitude)
+                        for c in cluster
+                    )
+                    if min_d <= max_distance_km:
+                        cluster.append(order)
+                        remaining.pop(i)
+                        changed = True
+                    else:
+                        i += 1
             
             if len(cluster) > 1:
                 # Кластер найден!
@@ -278,41 +279,35 @@ class HybridRouteOptimizer:
                     common_start = max(common_start, window_start)
                     common_end = min(common_end, window_end)
             
-            # Проверяем, есть ли пересечение
-            if common_start < common_end:
-                # Есть пересечение!
-                duration_hours = (common_end - common_start).total_seconds() / 3600.0
+            # Проверяем, есть ли пересечение и не слишком ли оно узкое (минимум 30 мин)
+            duration_min = (common_end - common_start).total_seconds() / 60.0 if common_start < common_end else 0
+            if common_start < common_end and duration_min >= 30:
+                # Есть пересечение >= 30 мин
                 logger.info(
-                    f"   ✅ Синхронизация: {common_start.strftime('%H:%M')}-{common_end.strftime('%H:%M')} ({duration_hours:.1f}ч) "
+                    f"   ✅ Синхронизация: {common_start.strftime('%H:%M')}-{common_end.strftime('%H:%M')} ({duration_min:.0f} мин) "
                     f"для {len(cluster)} заказов"
                 )
-                
-                # ВАЖНО: Аккуратно обновляем поля SQLAlchemy объектов
+                window_str = f"{common_start.strftime('%H:%M')} - {common_end.strftime('%H:%M')}"
                 for order in cluster:
-                    # Используем сеттеры SQLAlchemy
                     setattr(order, 'delivery_time_start', common_start.time())
                     setattr(order, 'delivery_time_end', common_end.time())
+                    setattr(order, 'delivery_time_window', window_str)
                     synchronized.append(order)
             else:
-                # Пересечения нет - берём самое узкое окно
                 narrowest_order = min(cluster, key=lambda o: (
                     datetime.combine(order_date, o.delivery_time_end) -
                     datetime.combine(order_date, o.delivery_time_start)
                 ).total_seconds())
-                
                 target_start = narrowest_order.delivery_time_start
                 target_end = narrowest_order.delivery_time_end
-                
+                window_str = f"{target_start.strftime('%H:%M')} - {target_end.strftime('%H:%M')}"
                 logger.info(
-                    f"   ⚠️ Нет пересечения, использую самое узкое окно: "
-                    f"{target_start.strftime('%H:%M')}-{target_end.strftime('%H:%M')} "
-                    f"для {len(cluster)} заказов"
+                    f"   ⚠️ Нет пересечения (или <30 мин), узкое окно: {window_str} для {len(cluster)} заказов"
                 )
-                
-                # ВАЖНО: Аккуратно обновляем поля SQLAlchemy объектов
                 for order in cluster:
                     setattr(order, 'delivery_time_start', target_start)
                     setattr(order, 'delivery_time_end', target_end)
+                    setattr(order, 'delivery_time_window', window_str)
                     synchronized.append(order)
         
         # Возвращаем все заказы (синхронизированные + остальные)

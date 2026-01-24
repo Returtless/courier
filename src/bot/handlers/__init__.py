@@ -381,13 +381,20 @@ class CourierBot:
         # Преобразуем RouteDTO в формат словаря, который ожидают handlers
         route_points_data = []
         for point in route_dto.route_points:
-            route_points_data.append({
+            item = {
                 'order_number': point.order_number,
                 'estimated_arrival': point.estimated_arrival.isoformat() if point.estimated_arrival else None,
                 'call_time': point.call_time.isoformat() if point.call_time else None,
                 'distance_from_previous': point.distance_from_previous,
                 'time_from_previous': point.time_from_previous
-            })
+            }
+            if getattr(point, 'delivery_time_window', None):
+                item['delivery_time_window'] = point.delivery_time_window
+            if getattr(point, 'delivery_time_start', None):
+                item['delivery_time_start'] = point.delivery_time_start
+            if getattr(point, 'delivery_time_end', None):
+                item['delivery_time_end'] = point.delivery_time_end
+            route_points_data.append(item)
         
         return {
             'route_order': route_dto.route_order,
