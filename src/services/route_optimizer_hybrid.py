@@ -468,6 +468,9 @@ class HybridRouteOptimizer:
         Если первая точка группы имеет окно 10:00-13:00, но OR-Tools выдал прибытие 09:32,
         сдвигаем ВСЕ точки группы на +28 минут.
         
+        ВАЖНО: Не сдвигаем, если хотя бы одна точка уже «позже окна». Сдвиг усугубил бы
+        опоздания (напр. 13:10 → 13:41 при окне до 13:00).
+        
         Args:
             points: Список точек маршрута от OR-Tools
             start_time: Время старта маршрута
@@ -478,6 +481,21 @@ class HybridRouteOptimizer:
         if not points:
             return points
         
+        order_date = start_time.date()
+        
+        # Проверяем: есть ли уже «позже окна»? Сдвиг ухудшит их.
+        for point in points:
+            order = point.order
+            if order.delivery_time_start and order.delivery_time_end and point.estimated_arrival:
+                window_end = datetime.combine(order_date, order.delivery_time_end)
+                if point.estimated_arrival > window_end:
+                    logger.warning(
+                        f"   ⚠️ Не сдвигаю группу: заказ {order.order_number} уже позже окна "
+                        f"({point.estimated_arrival.strftime('%H:%M')} > {order.delivery_time_end.strftime('%H:%M')}). "
+                        f"Сдвиг усугубил бы опоздания."
+                    )
+                    return points
+        
         # Находим самую раннюю точку с временным окном
         earliest_window_point = None
         earliest_window_start = None
@@ -485,7 +503,6 @@ class HybridRouteOptimizer:
         for point in points:
             order = point.order
             if order.delivery_time_start and order.delivery_time_end:
-                order_date = start_time.date()
                 window_start = datetime.combine(order_date, order.delivery_time_start)
                 
                 if earliest_window_start is None or window_start < earliest_window_start:
@@ -502,8 +519,20 @@ class HybridRouteOptimizer:
             # Всё ОК, не приезжаем раньше
             return points
         
-        # Вычисляем сдвиг (сколько нужно ждать)
+        # Проверяем: после сдвига ни одна точка не окажется «позже окна»
         time_shift = earliest_window_start - first_arrival
+        for point in points:
+            order = point.order
+            if order.delivery_time_start and order.delivery_time_end and point.estimated_arrival:
+                window_end = datetime.combine(order_date, order.delivery_time_end)
+                if point.estimated_arrival + time_shift > window_end:
+                    logger.warning(
+                        f"   ⚠️ Не сдвигаю группу: сдвиг +{time_shift.total_seconds() / 60:.0f} мин "
+                        f"приведёт заказ {order.order_number} к «позже окна»."
+                    )
+                    return points
+        
+        # Вычисляем сдвиг (сколько нужно ждать)
         logger.info(f"   ⏰ Сдвигаю все времена на {time_shift.total_seconds() / 60:.0f} мин, чтобы не приехать раньше окна")
         
         # Сдвигаем ВСЕ точки
