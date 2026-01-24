@@ -69,6 +69,22 @@ class HybridRouteOptimizer:
         for cluster_idx, cluster in enumerate(ordered_clusters, 1):
             logger.info(f"🔧 Обрабатываю кластер {cluster_idx}/{len(ordered_clusters)} ({len(cluster)} заказов)")
             
+            # ВАЖНО: Проверяем самое раннее временное окно в кластере и ждем до его начала
+            earliest_window_start = None
+            for order in cluster:
+                if order.delivery_time_start:
+                    order_date = start_time.date()
+                    window_start = datetime.combine(order_date, order.delivery_time_start)
+                    if earliest_window_start is None or window_start < earliest_window_start:
+                        earliest_window_start = window_start
+            
+            # Если кластер имеет временное окно и мы приедем раньше - ЖДЕМ
+            if earliest_window_start and current_time < earliest_window_start:
+                wait_minutes = (earliest_window_start - current_time).total_seconds() / 60.0
+                logger.info(f"   ⏰ Кластер начинается в {earliest_window_start.strftime('%H:%M')}, текущее время {current_time.strftime('%H:%M')}")
+                logger.info(f"   ⌛ Ожидание {wait_minutes:.0f} мин до начала окна кластера")
+                current_time = earliest_window_start
+            
             if len(cluster) == 1:
                 # Один заказ - просто добавляем
                 order = cluster[0]
