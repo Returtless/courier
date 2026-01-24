@@ -27,14 +27,23 @@ class HybridRouteOptimizer:
         start_location: Tuple[float, float],
         start_time: datetime,
         user_id: int = None,
-        cluster_radius_km: float = 3.0
+        cluster_radius_km: float = 3.0,
+        critical_threshold_hour: int = 13,
+        medium_threshold_hour: int = 15
     ) -> OptimizedRoute:
         """
-        ГИБРИДНАЯ оптимизация маршрута:
-        1. Кластеризация по географии (БЕЗ учёта времени!)
-        2. Упорядочивание кластеров по временным окнам
-        3. OR-Tools оптимизация внутри каждого кластера
+        УМНАЯ оптимизация с приоритизацией:
+        1. Разделение заказов на группы ПРИОРИТЕТОВ (по критичности окна)
+        2. Обработка групп последовательно (сначала критичные)
+        3. Внутри каждой группы - OR-Tools с учётом географии
         4. Сборка итогового маршрута
+        
+        Приоритеты:
+        - 0: Ручное время (жёсткая привязка)
+        - 1: Критичные окна (конец до critical_threshold_hour)
+        - 2: Средние окна (конец critical_threshold_hour - medium_threshold_hour)
+        - 3: Гибкие окна (конец после medium_threshold_hour)
+        - 4: Без ограничений
         
         Args:
             orders: Список заказов
@@ -42,6 +51,8 @@ class HybridRouteOptimizer:
             start_time: Время старта
             user_id: ID пользователя
             cluster_radius_km: Радиус кластера (км)
+            critical_threshold_hour: Час для критичных окон (по умолчанию 13)
+            medium_threshold_hour: Час для средних окон (по умолчанию 15)
             
         Returns:
             Оптимизированный маршрут
@@ -49,7 +60,7 @@ class HybridRouteOptimizer:
         if not orders:
             return OptimizedRoute(points=[], total_distance=0, total_time=0, estimated_completion=start_time)
         
-        logger.info(f"🎯 ГИБРИДНАЯ ОПТИМИЗАЦИЯ: {len(orders)} заказов, радиус кластера {cluster_radius_km} км")
+        logger.info(f"🎯 УМНАЯ ОПТИМИЗАЦИЯ С ПРИОРИТИЗАЦИЕЙ: {len(orders)} заказов")
         
         # Определяем реальное время старта - начало самого раннего окна
         earliest_window = None
@@ -64,30 +75,25 @@ class HybridRouteOptimizer:
             start_time = earliest_window
             logger.info(f"⏰ Устанавливаю время старта на начало первого окна: {start_time.strftime('%H:%M')}")
         
-        # Шаг 1: Кластеризация по географии (БЕЗ учёта времени!)
-        all_clusters = self._cluster_orders_by_location(orders, cluster_radius_km)
-        logger.info(f"📊 Создано {len(all_clusters)} географических кластеров")
+        # Шаг 1: Группировка заказов по ПРИОРИТЕТАМ
+        priority_groups = self._group_orders_by_priority(orders, start_time, critical_threshold_hour, medium_threshold_hour)
+        logger.info(f"📊 Создано {len(priority_groups)} групп приоритетов")
         
-        # Шаг 2: Упорядочивание кластеров по временным окнам
-        ordered_clusters = self._order_clusters_by_time_windows(all_clusters, start_time)
-        logger.info(f"📅 Кластеры упорядочены по временным окнам")
-        
-        # Шаг 3: Оптимизация каждого кластера OR-Tools
+        # Шаг 2: Обработка каждой группы приоритета
         all_route_points = []
         total_distance = 0.0
         total_time = 0.0
         current_location = start_location
         current_time = start_time
         
-        for cluster_idx, cluster in enumerate(ordered_clusters, 1):
-            logger.info(f"🔧 Обрабатываю кластер {cluster_idx}/{len(ordered_clusters)} ({len(cluster)} заказов)")
+        for priority_idx, (priority_level, priority_orders) in enumerate(priority_groups, 1):
+            logger.info(f"🔧 Обрабатываю приоритет {priority_idx}/{len(priority_groups)}: {priority_level} ({len(priority_orders)} заказов)")
             
-            # НЕ ждем до начала окна кластера - начинаем сразу
-            # Каждый заказ будет проверен индивидуально внутри OR-Tools или при добавлении
-            
-            if len(cluster) == 1:
-                # Один заказ - просто добавляем
-                order = cluster[0]
+            # Используем OR-Tools для оптимизации внутри группы приоритета
+            # OR-Tools сам найдёт оптимальный маршрут с учётом географии И временных окон
+            if len(priority_orders) == 1:
+                # Один заказ - обрабатываем напрямую
+                order = priority_orders[0]
                 if order.latitude and order.longitude:
                     try:
                         distance, travel_time = self.maps_service.get_route_sync(
@@ -140,36 +146,36 @@ class HybridRouteOptimizer:
                         logger.error(f"❌ Ошибка обработки заказа {order.order_number}: {e}")
             else:
                 # Несколько заказов - используем OR-Tools
-                logger.info(f"   🔍 OR-Tools оптимизация {len(cluster)} заказов в кластере")
+                logger.info(f"   🔍 OR-Tools оптимизация {len(priority_orders)} заказов")
                 
-                # Оптимизируем кластер от текущей позиции
-                cluster_route = self.route_optimizer.optimize_route_sync(
-                    orders=cluster,
+                # Оптимизируем группу от текущей позиции
+                group_route = self.route_optimizer.optimize_route_sync(
+                    orders=priority_orders,
                     start_location=current_location,
                     start_time=current_time,
                     user_id=user_id,
                     use_fallback=True
                 )
                 
-                if cluster_route and cluster_route.points:
-                    # Добавляем точки из кластера
-                    for point in cluster_route.points:
+                if group_route and group_route.points:
+                    # Добавляем точки из группы
+                    for point in group_route.points:
                         all_route_points.append(point)
                     
                     # Обновляем текущие параметры
-                    last_point = cluster_route.points[-1]
+                    last_point = group_route.points[-1]
                     current_location = (last_point.order.latitude, last_point.order.longitude)
-                    current_time = cluster_route.estimated_completion
+                    current_time = group_route.estimated_completion
                     
-                    # Добавляем расстояние и время кластера
-                    total_distance += cluster_route.total_distance
-                    total_time += cluster_route.total_time
+                    # Добавляем расстояние и время группы
+                    total_distance += group_route.total_distance
+                    total_time += group_route.total_time
                     
-                    logger.info(f"   ✅ Кластер обработан: {len(cluster_route.points)} точек")
+                    logger.info(f"   ✅ Группа обработана: {len(group_route.points)} точек")
                 else:
-                    logger.warning(f"   ⚠️ OR-Tools не смог оптимизировать кластер, пропускаем")
+                    logger.warning(f"   ⚠️ OR-Tools не смог оптимизировать группу, пропускаем")
         
-        logger.info(f"✅ ГИБРИДНАЯ ОПТИМИЗАЦИЯ ЗАВЕРШЕНА: {len(all_route_points)} точек, {total_distance:.1f} км, {total_time:.0f} мин")
+        logger.info(f"✅ УМНАЯ ОПТИМИЗАЦИЯ ЗАВЕРШЕНА: {len(all_route_points)} точек, {total_distance:.1f} км, {total_time:.0f} мин")
         
         return OptimizedRoute(
             points=all_route_points,
@@ -178,147 +184,93 @@ class HybridRouteOptimizer:
             estimated_completion=current_time
         )
     
-    def _order_clusters_by_time_windows(
-        self,
-        clusters: List[List[Order]],
-        start_time: datetime
-    ) -> List[List[Order]]:
-        """
-        Упорядочивает географические кластеры по временным окнам.
-        Кластеры с более ранними окнами идут первыми.
-        
-        Args:
-            clusters: Список географических кластеров
-            start_time: Время старта маршрута
-            
-        Returns:
-            Отсортированные кластеры
-        """
-        logger.info(f"📅 Упорядочиваю {len(clusters)} кластеров по временным окнам")
-        
-        def get_cluster_priority(cluster: List[Order]) -> tuple:
-            """
-            Возвращает приоритет кластера для сортировки.
-            (priority_type, earliest_time, latest_time)
-            """
-            earliest_start = None
-            latest_end = None
-            has_manual_time = False
-            earliest_manual = None
-            
-            for order in cluster:
-                # Приоритет 1: ручное время прибытия
-                if order.manual_arrival_time:
-                    has_manual_time = True
-                    if earliest_manual is None or order.manual_arrival_time < earliest_manual:
-                        earliest_manual = order.manual_arrival_time
-                
-                # Приоритет 2: временное окно
-                if order.delivery_time_start and order.delivery_time_end:
-                    order_date = start_time.date()
-                    window_start = datetime.combine(order_date, order.delivery_time_start)
-                    window_end = datetime.combine(order_date, order.delivery_time_end)
-                    
-                    if earliest_start is None or window_start < earliest_start:
-                        earliest_start = window_start
-                    if latest_end is None or window_end > latest_end:
-                        latest_end = window_end
-            
-            # Формируем ключ сортировки
-            if has_manual_time and earliest_manual:
-                return (0, earliest_manual, earliest_manual)
-            elif earliest_start:
-                return (1, earliest_start, latest_end or datetime.max)
-            else:
-                return (2, datetime.max, datetime.max)
-        
-        # Сортируем кластеры
-        sorted_clusters = sorted(clusters, key=get_cluster_priority)
-        
-        # Логируем порядок
-        for i, cluster in enumerate(sorted_clusters, 1):
-            priority = get_cluster_priority(cluster)
-            if priority[0] == 0:
-                time_info = f"ручное время {priority[1].strftime('%H:%M')}"
-            elif priority[0] == 1:
-                time_info = f"окно {priority[1].strftime('%H:%M')}-{priority[2].strftime('%H:%M')}"
-            else:
-                time_info = "без ограничений"
-            
-            logger.info(f"   {i}. Кластер с {len(cluster)} заказами: {time_info}")
-        
-        return sorted_clusters
-    
-    def _cluster_orders_by_location(
+    def _group_orders_by_priority(
         self,
         orders: List[Order],
-        max_distance_km: float = 3.0
-    ) -> List[List[Order]]:
+        start_time: datetime,
+        critical_threshold_hour: int = 13,
+        medium_threshold_hour: int = 15
+    ) -> List[Tuple[str, List[Order]]]:
         """
-        Кластеризация заказов по географической близости.
-        Использует простой алгоритм группировки по расстоянию.
+        Группирует заказы по ПРИОРИТЕТАМ (критичности временного окна).
+        
+        Приоритеты:
+        - 0: Ручное время (жёсткая привязка)
+        - 1: Критичные окна (конец до critical_threshold_hour) - САМЫЕ ВАЖНЫЕ
+        - 2: Средние окна (конец critical_threshold_hour - medium_threshold_hour)
+        - 3: Гибкие окна (конец после medium_threshold_hour)
+        - 4: Без ограничений
         
         Args:
             orders: Список заказов
-            max_distance_km: Максимальное расстояние для одного кластера (км)
+            start_time: Время старта маршрута
+            critical_threshold_hour: Час для критичных окон (по умолчанию 13)
+            medium_threshold_hour: Час для средних окон (по умолчанию 15)
             
         Returns:
-            Список кластеров (каждый кластер - список заказов)
+            Список кортежей (название_приоритета, список_заказов), отсортированный по приоритету
         """
-        if not orders:
-            return []
+        logger.info(f"📅 Группирую {len(orders)} заказов по ПРИОРИТЕТАМ (критичные до {critical_threshold_hour}:00, средние до {medium_threshold_hour}:00)")
         
-        logger.info(f"🗂️ Начинаю кластеризацию {len(orders)} заказов (макс. радиус {max_distance_km} км)")
+        order_date = start_time.date()
         
-        # Фильтруем заказы с координатами
-        orders_with_coords = [o for o in orders if o.latitude and o.longitude]
-        orders_without_coords = [o for o in orders if not o.latitude or not o.longitude]
+        # Разделяем заказы по приоритетам
+        manual_orders = []  # Приоритет 0
+        critical_orders = []  # Приоритет 1
+        medium_orders = []  # Приоритет 2
+        flexible_orders = []  # Приоритет 3
+        no_window_orders = []  # Приоритет 4
         
-        if orders_without_coords:
-            logger.warning(f"⚠️ {len(orders_without_coords)} заказов без координат будут в отдельном кластере")
-        
-        if not orders_with_coords:
-            return [[o] for o in orders_without_coords]  # Каждый в своем кластере
-        
-        # Простая кластеризация: greedy approach
-        clusters = []
-        remaining = orders_with_coords.copy()
-        
-        while remaining:
-            # Начинаем новый кластер с первого оставшегося заказа
-            seed = remaining.pop(0)
-            cluster = [seed]
-            
-            # Ищем близкие заказы
-            i = 0
-            while i < len(remaining):
-                order = remaining[i]
+        for order in orders:
+            if order.manual_arrival_time:
+                manual_orders.append(order)
+            elif order.delivery_time_start and order.delivery_time_end:
+                window_end = datetime.combine(order_date, order.delivery_time_end)
+                critical_threshold = datetime.combine(order_date, order.delivery_time_end.replace(hour=critical_threshold_hour, minute=0, second=0))
+                medium_threshold = datetime.combine(order_date, order.delivery_time_end.replace(hour=medium_threshold_hour, minute=0, second=0))
                 
-                # Проверяем расстояние до ЛЮБОЙ точки в текущем кластере
-                min_distance = float('inf')
-                for cluster_order in cluster:
-                    distance = self._haversine_distance(
-                        cluster_order.latitude, cluster_order.longitude,
-                        order.latitude, order.longitude
-                    )
-                    min_distance = min(min_distance, distance)
-                
-                # Если близко - добавляем в кластер
-                if min_distance <= max_distance_km:
-                    cluster.append(order)
-                    remaining.pop(i)
+                if window_end <= critical_threshold:
+                    critical_orders.append(order)
+                elif window_end <= medium_threshold:
+                    medium_orders.append(order)
                 else:
-                    i += 1
-            
-            clusters.append(cluster)
-            logger.info(f"   📍 Кластер {len(clusters)}: {len(cluster)} заказов (центр: {seed.address[:50]}...)")
+                    flexible_orders.append(order)
+            else:
+                no_window_orders.append(order)
         
-        # Добавляем заказы без координат в отдельные кластеры
-        for order in orders_without_coords:
-            clusters.append([order])
+        # Сортируем заказы внутри каждой группы по началу окна
+        def get_order_start_time(order):
+            if order.manual_arrival_time:
+                return datetime.combine(order_date, order.manual_arrival_time.time())
+            elif order.delivery_time_start:
+                return datetime.combine(order_date, order.delivery_time_start)
+            else:
+                return datetime.max
         
-        logger.info(f"✅ Создано {len(clusters)} кластеров")
-        return clusters
+        manual_orders.sort(key=get_order_start_time)
+        critical_orders.sort(key=get_order_start_time)
+        medium_orders.sort(key=get_order_start_time)
+        flexible_orders.sort(key=get_order_start_time)
+        
+        # Собираем результат
+        result = []
+        if manual_orders:
+            result.append(("Приоритет 0: Ручное время", manual_orders))
+            logger.info(f"   📌 Приоритет 0 (Ручное время): {len(manual_orders)} заказов")
+        if critical_orders:
+            result.append((f"Приоритет 1: Критичные окна (до {critical_threshold_hour}:00)", critical_orders))
+            logger.info(f"   🔴 Приоритет 1 (Критичные до {critical_threshold_hour}:00): {len(critical_orders)} заказов")
+        if medium_orders:
+            result.append((f"Приоритет 2: Средние окна ({critical_threshold_hour}:00-{medium_threshold_hour}:00)", medium_orders))
+            logger.info(f"   🟡 Приоритет 2 (Средние {critical_threshold_hour}-{medium_threshold_hour}): {len(medium_orders)} заказов")
+        if flexible_orders:
+            result.append((f"Приоритет 3: Гибкие окна (после {medium_threshold_hour}:00)", flexible_orders))
+            logger.info(f"   🟢 Приоритет 3 (Гибкие после {medium_threshold_hour}:00): {len(flexible_orders)} заказов")
+        if no_window_orders:
+            result.append(("Приоритет 4: Без ограничений", no_window_orders))
+            logger.info(f"   ⚪ Приоритет 4 (Без ограничений): {len(no_window_orders)} заказов")
+        
+        return result
     
     def _haversine_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         """Расстояние между двумя точками по формуле Haversine (км)"""
