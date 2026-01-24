@@ -375,13 +375,31 @@ class MapsService:
         if self._should_try_provider('osrm', user_id):
             try:
                 logger.info(f"🗺️ OSRM API: ({start_lat:.5f}, {start_lon:.5f}) → ({end_lat:.5f}, {end_lon:.5f})")
-                url = f"http://router.project-osrm.org/route/v1/driving/{start_lon},{start_lat};{end_lon},{end_lat}"
-                params = {
-                    "overview": "false",
-                    "geometries": "geojson"
-                }
                 
-                response = requests.get(url, params=params, timeout=10)
+                # Пробуем несколько OSRM серверов (порт 80 может быть заблокирован провайдером)
+                osrm_servers = [
+                    "https://routing.openstreetmap.de/routed-car/route/v1/driving",  # Немецкий сервер (HTTPS)
+                    "http://router.project-osrm.org/route/v1/driving",  # Основной (HTTP, может быть заблокирован)
+                ]
+                
+                response = None
+                for base_url in osrm_servers:
+                    try:
+                        url = f"{base_url}/{start_lon},{start_lat};{end_lon},{end_lat}"
+                        params = {
+                            "overview": "false",
+                            "geometries": "geojson"
+                        }
+                        response = requests.get(url, params=params, timeout=10)
+                        if response.status_code == 200:
+                            logger.info(f"✅ OSRM сервер доступен: {base_url}")
+                            break
+                    except Exception as e:
+                        logger.debug(f"OSRM сервер {base_url} недоступен: {e}")
+                        continue
+                
+                if not response:
+                    raise Exception("Все OSRM серверы недоступны")
                 logger.debug(f"OSRM API HTTP статус: {response.status_code}")
                 
                 if response.status_code == 200:
@@ -809,7 +827,8 @@ class MapsService:
     def _check_osrm_api(self, lat1: float, lon1: float, lat2: float, lon2: float) -> tuple[bool, str]:
         """Проверить доступность OSRM API"""
         try:
-            url = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}"
+            # Используем HTTPS сервер (порт 80 может быть заблокирован)
+            url = f"https://routing.openstreetmap.de/routed-car/route/v1/driving/{lon1},{lat1};{lon2},{lat2}"
             params = {"overview": "false"}
             
             response = requests.get(url, params=params, timeout=5)
