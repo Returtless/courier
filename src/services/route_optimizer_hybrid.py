@@ -63,8 +63,11 @@ class HybridRouteOptimizer:
         logger.info(f"🎯 УМНАЯ ОПТИМИЗАЦИЯ С ПРИОРИТИЗАЦИЕЙ: {len(orders)} заказов")
         logger.info(f"⏰ Время старта от базы: {start_time.strftime('%H:%M')}")
         
+        # Шаг 0: Синхронизуем временные окна для близких адресов
+        synchronized_orders = self._synchronize_nearby_time_windows(orders, start_time, max_distance_km=0.5)
+        
         # Шаг 1: Группировка заказов по ПРИОРИТЕТАМ
-        priority_groups = self._group_orders_by_priority(orders, start_time, critical_threshold_hour, medium_threshold_hour)
+        priority_groups = self._group_orders_by_priority(synchronized_orders, start_time, critical_threshold_hour, medium_threshold_hour)
         logger.info(f"📊 Создано {len(priority_groups)} групп приоритетов")
         
         # Шаг 2: Обработка каждой группы приоритета
@@ -185,6 +188,186 @@ class HybridRouteOptimizer:
             total_time=total_time,
             estimated_completion=current_time
         )
+    
+    def _synchronize_nearby_time_windows(
+        self,
+        orders: List[Order],
+        start_time: datetime,
+        max_distance_km: float = 0.5
+    ) -> List[Order]:
+        """
+        Синхронизирует временные окна для близких адресов.
+        
+        Алгоритм:
+        1. Находим кластеры близких адресов (< max_distance_km)
+        2. Для каждого кластера находим пересечение окон
+        3. Если есть пересечение → устанавливаем всем
+        4. Если нет → берём самое узкое окно
+        
+        Args:
+            orders: Список заказов
+            start_time: Время старта маршрута
+            max_distance_km: Максимальное расстояние для синхронизации (км)
+            
+        Returns:
+            Список заказов с синхронизированными окнами
+        """
+        if not orders:
+            return orders
+        
+        logger.info(f"🔗 Синхронизирую временные окна для близких адресов (радиус {max_distance_km} км)")
+        
+        order_date = start_time.date()
+        
+        # Фильтруем заказы с координатами и окнами
+        orders_with_coords = [o for o in orders if o.latitude and o.longitude and o.delivery_time_start and o.delivery_time_end]
+        orders_without = [o for o in orders if o not in orders_with_coords]
+        
+        if not orders_with_coords:
+            return orders
+        
+        # Находим кластеры близких адресов (greedy)
+        clusters = []
+        remaining = orders_with_coords.copy()
+        
+        while remaining:
+            seed = remaining.pop(0)
+            cluster = [seed]
+            
+            # Ищем близкие заказы
+            i = 0
+            while i < len(remaining):
+                order = remaining[i]
+                distance = self._haversine_distance(
+                    seed.latitude, seed.longitude,
+                    order.latitude, order.longitude
+                )
+                
+                if distance <= max_distance_km:
+                    cluster.append(order)
+                    remaining.pop(i)
+                else:
+                    i += 1
+            
+            if len(cluster) > 1:
+                # Кластер найден!
+                clusters.append(cluster)
+                logger.info(f"   📍 Кластер: {len(cluster)} заказов на {seed.address[:40]}...")
+            else:
+                # Одиночный заказ - оставляем как есть
+                orders_without.append(seed)
+        
+        # Синхронизируем окна для каждого кластера
+        synchronized = []
+        for cluster in clusters:
+            # Находим пересечение всех окон
+            common_start = None
+            common_end = None
+            
+            for order in cluster:
+                window_start = datetime.combine(order_date, order.delivery_time_start)
+                window_end = datetime.combine(order_date, order.delivery_time_end)
+                
+                if common_start is None:
+                    common_start = window_start
+                    common_end = window_end
+                else:
+                    # Пересечение: max(starts), min(ends)
+                    common_start = max(common_start, window_start)
+                    common_end = min(common_end, window_end)
+            
+            # Проверяем, есть ли пересечение
+            if common_start < common_end:
+                # Есть пересечение!
+                duration_hours = (common_end - common_start).total_seconds() / 3600.0
+                logger.info(
+                    f"   ✅ Синхронизация: {common_start.strftime('%H:%M')}-{common_end.strftime('%H:%M')} ({duration_hours:.1f}ч) "
+                    f"для {len(cluster)} заказов"
+                )
+                
+                # Устанавливаем общее окно всем заказам в кластере
+                for order in cluster:
+                    order.delivery_time_start = common_start.time()
+                    order.delivery_time_end = common_end.time()
+                    synchronized.append(order)
+            else:
+                # Пересечения нет - берём самое узкое окно
+                narrowest_order = min(cluster, key=lambda o: (
+                    datetime.combine(order_date, o.delivery_time_end) -
+                    datetime.combine(order_date, o.delivery_time_start)
+                ).total_seconds())
+                
+                target_start = narrowest_order.delivery_time_start
+                target_end = narrowest_order.delivery_time_end
+                
+                logger.info(
+                    f"   ⚠️ Нет пересечения, использую самое узкое окно: "
+                    f"{target_start.strftime('%H:%M')}-{target_end.strftime('%H:%M')} "
+                    f"для {len(cluster)} заказов"
+                )
+                
+                # Устанавливаем самое узкое окно всем
+                for order in cluster:
+                    order.delivery_time_start = target_start
+                    order.delivery_time_end = target_end
+                    synchronized.append(order)
+        
+        # Возвращаем все заказы (синхронизированные + остальные)
+        return synchronized + orders_without
+    
+    def _normalize_wide_time_windows(
+        self,
+        orders: List[Order],
+        start_time: datetime,
+        max_window_hours: float = 4.0
+    ) -> List[Order]:
+        """
+        Нормализует слишком широкие временные окна, сужая их к началу.
+        
+        Цель: заказы с широкими окнами (11:00-18:00) доставлять раньше,
+        чтобы они попадали в ту же группу, что и соседние заказы с узкими окнами.
+        
+        Args:
+            orders: Список заказов
+            start_time: Время старта маршрута
+            max_window_hours: Максимальная ширина окна (по умолчанию 4 часа)
+            
+        Returns:
+            Список заказов с нормализованными окнами
+        """
+        normalized = []
+        order_date = start_time.date()
+        
+        for order in orders:
+            # Если нет окна или окно узкое - оставляем как есть
+            if not order.delivery_time_start or not order.delivery_time_end:
+                normalized.append(order)
+                continue
+            
+            window_start = datetime.combine(order_date, order.delivery_time_start)
+            window_end = datetime.combine(order_date, order.delivery_time_end)
+            window_duration_hours = (window_end - window_start).total_seconds() / 3600.0
+            
+            if window_duration_hours <= max_window_hours:
+                # Окно нормальное, оставляем как есть
+                normalized.append(order)
+            else:
+                # Окно слишком широкое - сужаем к началу
+                new_window_end = window_start + timedelta(hours=max_window_hours)
+                new_end_time = new_window_end.time()
+                
+                logger.info(
+                    f"   📏 Сужаю окно заказа {order.order_number}: "
+                    f"{order.delivery_time_start.strftime('%H:%M')}-{order.delivery_time_end.strftime('%H:%M')} ({window_duration_hours:.1f}ч) → "
+                    f"{order.delivery_time_start.strftime('%H:%M')}-{new_end_time.strftime('%H:%M')} ({max_window_hours:.1f}ч)"
+                )
+                
+                # Создаём копию заказа с новым окном
+                # ВАЖНО: не модифицируем оригинальный объект!
+                order.delivery_time_end = new_end_time
+                normalized.append(order)
+        
+        return normalized
     
     def _group_orders_by_priority(
         self,
