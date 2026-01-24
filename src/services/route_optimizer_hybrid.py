@@ -73,21 +73,8 @@ class HybridRouteOptimizer:
         for cluster_idx, cluster in enumerate(all_clusters, 1):
             logger.info(f"🔧 Обрабатываю кластер {cluster_idx}/{len(all_clusters)} ({len(cluster)} заказов)")
             
-            # ВАЖНО: Проверяем самое раннее временное окно в кластере и ждем до его начала
-            earliest_window_start = None
-            for order in cluster:
-                if order.delivery_time_start:
-                    order_date = start_time.date()
-                    window_start = datetime.combine(order_date, order.delivery_time_start)
-                    if earliest_window_start is None or window_start < earliest_window_start:
-                        earliest_window_start = window_start
-            
-            # Если кластер имеет временное окно и мы приедем раньше - ЖДЕМ
-            if earliest_window_start and current_time < earliest_window_start:
-                wait_minutes = (earliest_window_start - current_time).total_seconds() / 60.0
-                logger.info(f"   ⏰ Кластер начинается в {earliest_window_start.strftime('%H:%M')}, текущее время {current_time.strftime('%H:%M')}")
-                logger.info(f"   ⌛ Ожидание {wait_minutes:.0f} мин до начала окна кластера")
-                current_time = earliest_window_start
+            # НЕ ждем до начала окна кластера - начинаем сразу
+            # Каждый заказ будет проверен индивидуально внутри OR-Tools или при добавлении
             
             if len(cluster) == 1:
                 # Один заказ - просто добавляем
@@ -188,8 +175,8 @@ class HybridRouteOptimizer:
         start_time: datetime
     ) -> List[List[Order]]:
         """
-        Группирует заказы по временным окнам.
-        Заказы с одинаковыми окнами попадают в одну группу.
+        Группирует заказы по ПЕРЕКРЫВАЮЩИМСЯ временным окнам.
+        Если окна пересекаются - заказы в одной группе.
         ПРИОРИТЕТ ВРЕМЕНИ НАД ГЕОГРАФИЕЙ!
         
         Args:
@@ -197,57 +184,95 @@ class HybridRouteOptimizer:
             start_time: Время старта маршрута
             
         Returns:
-            Список групп заказов с одинаковыми временными окнами
+            Список групп заказов с перекрывающимися временными окнами
         """
-        logger.info(f"📅 Группирую {len(orders)} заказов по временным окнам")
+        logger.info(f"📅 Группирую {len(orders)} заказов по ПЕРЕКРЫВАЮЩИМСЯ временным окнам")
         
-        # Группируем по временным окнам
-        time_window_groups = defaultdict(list)
-        no_window_orders = []
+        # Разделяем заказы по типу ограничений
+        manual_orders = []  # С ручным временем
+        window_orders = []  # С временными окнами
+        no_window_orders = []  # Без ограничений
         
         for order in orders:
             if order.manual_arrival_time:
-                # Заказы с ручным временем - в отдельные группы
-                key = f"manual_{order.manual_arrival_time.strftime('%H:%M')}"
-                time_window_groups[key].append(order)
+                manual_orders.append(order)
             elif order.delivery_time_start and order.delivery_time_end:
-                # Группируем по окну доставки
-                key = f"{order.delivery_time_start.strftime('%H:%M')}-{order.delivery_time_end.strftime('%H:%M')}"
-                time_window_groups[key].append(order)
+                window_orders.append(order)
             else:
-                # Без окна - в конец
                 no_window_orders.append(order)
         
-        # Сортируем группы по времени начала окна
-        def get_group_start_time(item):
-            key, group_orders = item
-            if key.startswith("manual_"):
-                # Ручное время
-                return datetime.combine(start_time.date(), group_orders[0].manual_arrival_time.time())
-            else:
-                # Временное окно
-                return datetime.combine(start_time.date(), group_orders[0].delivery_time_start)
+        # Группируем заказы с окнами по перекрытию
+        time_groups = []
         
-        sorted_groups = sorted(time_window_groups.items(), key=get_group_start_time)
+        # Сортируем по началу окна
+        window_orders.sort(key=lambda o: o.delivery_time_start)
         
-        # Формируем результат: сначала группы с окнами, потом без окон
-        result = [group for key, group in sorted_groups]
+        for order in window_orders:
+            order_date = start_time.date()
+            order_start = datetime.combine(order_date, order.delivery_time_start)
+            order_end = datetime.combine(order_date, order.delivery_time_end)
+            
+            # Ищем группу с пересекающимся окном
+            added_to_group = False
+            for group in time_groups:
+                # Берем первый заказ группы для определения окна
+                first_order = group[0]
+                group_start = datetime.combine(order_date, first_order.delivery_time_start)
+                group_end = datetime.combine(order_date, first_order.delivery_time_end)
+                
+                # Проверяем пересечение окон: окна пересекаются если начало одного раньше конца другого
+                if order_start < group_end and order_end > group_start:
+                    group.append(order)
+                    added_to_group = True
+                    # Расширяем окно группы
+                    for g_order in group:
+                        g_start = datetime.combine(order_date, g_order.delivery_time_start)
+                        g_end = datetime.combine(order_date, g_order.delivery_time_end)
+                        group_start = min(group_start, g_start)
+                        group_end = max(group_end, g_end)
+                    break
+            
+            if not added_to_group:
+                # Создаем новую группу
+                time_groups.append([order])
+        
+        # Добавляем заказы с ручным временем (каждый в свою группу)
+        for order in manual_orders:
+            time_groups.insert(0, [order])  # В начало списка
+        
+        # Добавляем заказы без окон (все в одну группу в конец)
         if no_window_orders:
-            result.append(no_window_orders)
+            time_groups.append(no_window_orders)
+        
+        # Сортируем группы по времени начала
+        def get_group_start_time(group):
+            first_order = group[0]
+            if first_order.manual_arrival_time:
+                return datetime.combine(start_time.date(), first_order.manual_arrival_time.time())
+            elif first_order.delivery_time_start:
+                return datetime.combine(start_time.date(), first_order.delivery_time_start)
+            else:
+                return datetime.max
+        
+        time_groups.sort(key=get_group_start_time)
         
         # Логируем группы
-        for i, group in enumerate(result, 1):
+        for i, group in enumerate(time_groups, 1):
             first_order = group[0]
             if first_order.manual_arrival_time:
                 time_info = f"ручное время {first_order.manual_arrival_time.strftime('%H:%M')}"
             elif first_order.delivery_time_start and first_order.delivery_time_end:
-                time_info = f"окно {first_order.delivery_time_start.strftime('%H:%M')}-{first_order.delivery_time_end.strftime('%H:%M')}"
+                # Находим общее окно группы
+                order_date = start_time.date()
+                min_start = min(datetime.combine(order_date, o.delivery_time_start) for o in group if o.delivery_time_start)
+                max_end = max(datetime.combine(order_date, o.delivery_time_end) for o in group if o.delivery_time_end)
+                time_info = f"перекрывающиеся окна {min_start.strftime('%H:%M')}-{max_end.strftime('%H:%M')}"
             else:
                 time_info = "без ограничений"
             
             logger.info(f"   {i}. Группа с {len(group)} заказами: {time_info}")
         
-        return result
+        return time_groups
     
     def _cluster_orders_by_location(
         self,
