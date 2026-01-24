@@ -283,9 +283,10 @@ class HybridRouteOptimizer:
             duration_min = (common_end - common_start).total_seconds() / 60.0 if common_start < common_end else 0
             if common_start < common_end and duration_min >= 30:
                 # Есть пересечение >= 30 мин
+                order_nums = ", ".join(o.order_number or "?" for o in cluster)
                 logger.info(
                     f"   ✅ Синхронизация: {common_start.strftime('%H:%M')}-{common_end.strftime('%H:%M')} ({duration_min:.0f} мин) "
-                    f"для {len(cluster)} заказов"
+                    f"для заказов {order_nums}"
                 )
                 window_str = f"{common_start.strftime('%H:%M')} - {common_end.strftime('%H:%M')}"
                 for order in cluster:
@@ -301,8 +302,9 @@ class HybridRouteOptimizer:
                 target_start = narrowest_order.delivery_time_start
                 target_end = narrowest_order.delivery_time_end
                 window_str = f"{target_start.strftime('%H:%M')} - {target_end.strftime('%H:%M')}"
+                order_nums = ", ".join(o.order_number or "?" for o in cluster)
                 logger.info(
-                    f"   ⚠️ Нет пересечения (или <30 мин), узкое окно: {window_str} для {len(cluster)} заказов"
+                    f"   ⚠️ Нет пересечения (или <30 мин), узкое окно: {window_str} для заказов {order_nums}"
                 )
                 for order in cluster:
                     setattr(order, 'delivery_time_start', target_start)

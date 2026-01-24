@@ -209,7 +209,7 @@ class RouteService:
                 cluster_radius_km=3.0,  # Радиус кластера 3 км
                 critical_threshold_hour=13,  # Критичные окна до 13:00
                 medium_threshold_hour=15,  # Средние окна до 15:00
-                sync_nearby_windows_km=0.8  # Синхронизация окон для адресов ближе 500м
+                sync_nearby_windows_km=1.0  # Синхронизация окон для близких адресов (м. 0.7 км между точками Манчестерской)
             )
             
             logger.info(f"Оптимизация завершена, точек в маршруте: {len(optimized_route.points) if optimized_route.points else 0}")

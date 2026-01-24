@@ -652,8 +652,11 @@ class RouteHandlers:
             
             # Окно из маршрута (после синхронизации близких адресов) переопределяет данные из БД
             order_data_display = dict(order_data)
-            if point_data.get('delivery_time_window'):
-                order_data_display['delivery_time_window'] = point_data['delivery_time_window']
+            route_window = point_data.get('delivery_time_window')
+            if not route_window and point_data.get('delivery_time_start') and point_data.get('delivery_time_end'):
+                route_window = f"{point_data['delivery_time_start']} - {point_data['delivery_time_end']}"
+            if route_window:
+                order_data_display['delivery_time_window'] = route_window
             
             # Преобразуем данные заказа
             try:
