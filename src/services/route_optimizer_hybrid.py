@@ -29,7 +29,8 @@ class HybridRouteOptimizer:
         user_id: int = None,
         cluster_radius_km: float = 3.0,
         critical_threshold_hour: int = 13,
-        medium_threshold_hour: int = 15
+        medium_threshold_hour: int = 15,
+        sync_nearby_windows_km: float = 0.5
     ) -> OptimizedRoute:
         """
         УМНАЯ оптимизация с приоритизацией:
@@ -53,6 +54,7 @@ class HybridRouteOptimizer:
             cluster_radius_km: Радиус кластера (км)
             critical_threshold_hour: Час для критичных окон (по умолчанию 13)
             medium_threshold_hour: Час для средних окон (по умолчанию 15)
+            sync_nearby_windows_km: Радиус для синхронизации окон близких адресов (по умолчанию 0.5 км)
             
         Returns:
             Оптимизированный маршрут
@@ -64,7 +66,7 @@ class HybridRouteOptimizer:
         logger.info(f"⏰ Время старта от базы: {start_time.strftime('%H:%M')}")
         
         # Шаг 0: Синхронизуем временные окна для близких адресов
-        synchronized_orders = self._synchronize_nearby_time_windows(orders, start_time, max_distance_km=0.5)
+        synchronized_orders = self._synchronize_nearby_time_windows(orders, start_time, max_distance_km=sync_nearby_windows_km)
         
         # Шаг 1: Группировка заказов по ПРИОРИТЕТАМ
         priority_groups = self._group_orders_by_priority(synchronized_orders, start_time, critical_threshold_hour, medium_threshold_hour)
@@ -285,10 +287,11 @@ class HybridRouteOptimizer:
                     f"для {len(cluster)} заказов"
                 )
                 
-                # Устанавливаем общее окно всем заказам в кластере
+                # ВАЖНО: Аккуратно обновляем поля SQLAlchemy объектов
                 for order in cluster:
-                    order.delivery_time_start = common_start.time()
-                    order.delivery_time_end = common_end.time()
+                    # Используем сеттеры SQLAlchemy
+                    setattr(order, 'delivery_time_start', common_start.time())
+                    setattr(order, 'delivery_time_end', common_end.time())
                     synchronized.append(order)
             else:
                 # Пересечения нет - берём самое узкое окно
@@ -306,10 +309,10 @@ class HybridRouteOptimizer:
                     f"для {len(cluster)} заказов"
                 )
                 
-                # Устанавливаем самое узкое окно всем
+                # ВАЖНО: Аккуратно обновляем поля SQLAlchemy объектов
                 for order in cluster:
-                    order.delivery_time_start = target_start
-                    order.delivery_time_end = target_end
+                    setattr(order, 'delivery_time_start', target_start)
+                    setattr(order, 'delivery_time_end', target_end)
                     synchronized.append(order)
         
         # Возвращаем все заказы (синхронизированные + остальные)
