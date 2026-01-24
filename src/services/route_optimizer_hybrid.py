@@ -146,20 +146,34 @@ class HybridRouteOptimizer:
                 )
                 
                 if group_route and group_route.points:
+                    # КРИТИЧНО: Корректируем времена прибытия с учётом временных окон
+                    corrected_points = self._correct_arrival_times(group_route.points, start_time)
+                    
                     # Добавляем точки из группы
-                    for point in group_route.points:
+                    for point in corrected_points:
                         all_route_points.append(point)
                     
                     # Обновляем текущие параметры
-                    last_point = group_route.points[-1]
+                    last_point = corrected_points[-1]
                     current_location = (last_point.order.latitude, last_point.order.longitude)
-                    current_time = group_route.estimated_completion
+                    current_time = last_point.estimated_arrival
                     
-                    # Добавляем расстояние и время группы
-                    total_distance += group_route.total_distance
-                    total_time += group_route.total_time
+                    # Добавляем время обслуживания последней точки
+                    service_time_minutes = 10
+                    if user_id:
+                        user_settings = self.settings_service.get_settings(user_id)
+                        service_time_minutes = user_settings.service_time_minutes
+                    current_time += timedelta(minutes=service_time_minutes)
                     
-                    logger.info(f"   ✅ Группа обработана: {len(group_route.points)} точек")
+                    # Пересчитываем расстояние и время
+                    group_distance = sum(p.distance_from_previous for p in corrected_points)
+                    group_time = (corrected_points[-1].estimated_arrival - corrected_points[0].estimated_arrival).total_seconds() / 60.0
+                    group_time += service_time_minutes  # Время обслуживания последней точки
+                    
+                    total_distance += group_distance
+                    total_time += group_time
+                    
+                    logger.info(f"   ✅ Группа обработана: {len(corrected_points)} точек")
                 else:
                     logger.warning(f"   ⚠️ OR-Tools не смог оптимизировать группу, пропускаем")
         
@@ -259,6 +273,68 @@ class HybridRouteOptimizer:
             logger.info(f"   ⚪ Приоритет 4 (Без ограничений): {len(no_window_orders)} заказов")
         
         return result
+    
+    def _correct_arrival_times(
+        self,
+        points: List[RoutePoint],
+        start_time: datetime
+    ) -> List[RoutePoint]:
+        """
+        Корректирует времена прибытия, чтобы не приезжать раньше начала временного окна.
+        
+        Если первая точка группы имеет окно 10:00-13:00, но OR-Tools выдал прибытие 09:32,
+        сдвигаем ВСЕ точки группы на +28 минут.
+        
+        Args:
+            points: Список точек маршрута от OR-Tools
+            start_time: Время старта маршрута
+            
+        Returns:
+            Скорректированные точки
+        """
+        if not points:
+            return points
+        
+        # Находим самую раннюю точку с временным окном
+        earliest_window_point = None
+        earliest_window_start = None
+        
+        for point in points:
+            order = point.order
+            if order.delivery_time_start and order.delivery_time_end:
+                order_date = start_time.date()
+                window_start = datetime.combine(order_date, order.delivery_time_start)
+                
+                if earliest_window_start is None or window_start < earliest_window_start:
+                    earliest_window_start = window_start
+                    earliest_window_point = point
+        
+        # Если нет окон, возвращаем как есть
+        if not earliest_window_point:
+            return points
+        
+        # Проверяем, приезжаем ли мы раньше начала окна
+        first_arrival = earliest_window_point.estimated_arrival
+        if first_arrival >= earliest_window_start:
+            # Всё ОК, не приезжаем раньше
+            return points
+        
+        # Вычисляем сдвиг (сколько нужно ждать)
+        time_shift = earliest_window_start - first_arrival
+        logger.info(f"   ⏰ Сдвигаю все времена на {time_shift.total_seconds() / 60:.0f} мин, чтобы не приехать раньше окна")
+        
+        # Сдвигаем ВСЕ точки
+        corrected_points = []
+        for point in points:
+            corrected_point = RoutePoint(
+                order=point.order,
+                estimated_arrival=point.estimated_arrival + time_shift,
+                distance_from_previous=point.distance_from_previous,
+                time_from_previous=point.time_from_previous
+            )
+            corrected_points.append(corrected_point)
+        
+        return corrected_points
     
     def _haversine_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         """Расстояние между двумя точками по формуле Haversine (км)"""
