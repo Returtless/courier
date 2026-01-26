@@ -46,9 +46,9 @@ class RouteService:
         self.route_optimizer = RouteOptimizer(maps_service)
         self.settings_service = UserSettingsService()
         
-        # Инициализируем гибридный оптимизатор
-        from src.services.route_optimizer_hybrid import HybridRouteOptimizer
-        self.hybrid_optimizer = HybridRouteOptimizer(maps_service, self.route_optimizer)
+        # Инициализируем генетический оптимизатор
+        from src.services.route_optimizer_genetic import GeneticRouteOptimizer
+        self.genetic_optimizer = GeneticRouteOptimizer(maps_service)
     
     def optimize_route(
         self,
@@ -198,10 +198,10 @@ class RouteService:
                     order.manual_arrival_time = None
             
             # Оптимизируем маршрут
-            logger.info(f"Запускаю ГИБРИДНУЮ оптимизацию маршрута для {len(orders)} заказов")
+            logger.info(f"Запускаю ГЕНЕТИЧЕСКУЮ оптимизацию маршрута для {len(orders)} заказов")
             
-            # ВАЖНО: Используем гибридную оптимизацию для группировки близких точек
-            optimized_route = self.hybrid_optimizer.optimize_route_hybrid(
+            # ВАЖНО: Используем генетический алгоритм для оптимизации маршрута
+            optimized_route = self.genetic_optimizer.optimize_route_sync(
                 orders=orders,
                 start_location=start_location,
                 start_time=start_time,
