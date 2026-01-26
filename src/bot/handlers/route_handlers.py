@@ -995,9 +995,25 @@ class RouteHandlers:
         
         call_schedule = route_data.get('call_schedule', [])
         
+        # Если графика звонков нет, но маршрут оптимизирован - строим график
         if not call_schedule:
-            self.bot.reply_to(message, "❌ График звонков не найден", reply_markup=self.parent._route_menu_markup())
-            return
+            route_points_data = route_data.get('route_points_data', [])
+            if route_points_data:
+                logger.info(f"📞 График звонков не найден, но маршрут есть. Строю график из {len(route_points_data)} точек...")
+                call_schedule = self._build_call_schedule_from_route_points(route_points_data, user_id, today)
+                
+                if call_schedule:
+                    # Сохраняем график звонков в БД
+                    self._save_call_schedule_to_db(user_id, today, call_schedule, route_data)
+                    # Обновляем route_data для дальнейшей обработки
+                    route_data['call_schedule'] = call_schedule
+                    logger.info(f"✅ График звонков построен и сохранен: {len(call_schedule)} записей")
+                else:
+                    self.bot.reply_to(message, "❌ Не удалось построить график звонков. Проверьте, что у всех точек маршрута указано время прибытия.", reply_markup=self.parent._route_menu_markup())
+                    return
+            else:
+                self.bot.reply_to(message, "❌ График звонков не найден", reply_markup=self.parent._route_menu_markup())
+                return
         
         # Формируем текст с графиком звонков
         text = "<b>📞 График звонков</b>\n\n"
@@ -1042,6 +1058,122 @@ class RouteHandlers:
                     self.bot.send_message(message.chat.id, chunk, parse_mode='HTML')
         else:
             self.bot.reply_to(message, text, parse_mode='HTML', reply_markup=self.parent._route_menu_markup())
+    
+    def _build_call_schedule_from_route_points(
+        self,
+        route_points_data: List[Dict],
+        user_id: int,
+        order_date: date
+    ) -> List[Dict]:
+        """
+        Построить график звонков из точек маршрута
+        
+        Args:
+            route_points_data: Список точек маршрута
+            user_id: ID пользователя
+            order_date: Дата маршрута
+            
+        Returns:
+            Список записей графика звонков
+        """
+        from datetime import timedelta
+        from src.services.user_settings_service import UserSettingsService
+        
+        call_schedule = []
+        settings_service = UserSettingsService()
+        user_settings = settings_service.get_settings(user_id)
+        call_advance_minutes = user_settings.call_advance_minutes if user_settings else 10
+        
+        # Получаем информацию о заказах для добавления phone и customer_name
+        from src.database.connection import get_db_session
+        from src.models.order import OrderDB
+        
+        orders_dict = {}
+        try:
+            with get_db_session() as session:
+                for point_data in route_points_data:
+                    order_number = point_data.get('order_number')
+                    if order_number and order_number not in orders_dict:
+                        order_db = session.query(OrderDB).filter(
+                            OrderDB.user_id == user_id,
+                            OrderDB.order_number == order_number,
+                            OrderDB.order_date == order_date
+                        ).first()
+                        if order_db:
+                            orders_dict[order_number] = {
+                                'phone': order_db.phone or 'Не указан',
+                                'customer_name': order_db.customer_name or ''
+                            }
+        except Exception as e:
+            logger.warning(f"Ошибка получения данных заказов для графика звонков: {e}")
+        
+        for point_data in route_points_data:
+            estimated_arrival_str = point_data.get('estimated_arrival')
+            if not estimated_arrival_str:
+                continue
+            
+            try:
+                if isinstance(estimated_arrival_str, str):
+                    estimated_arrival = datetime.fromisoformat(estimated_arrival_str)
+                else:
+                    estimated_arrival = estimated_arrival_str
+                
+                # Рассчитываем время звонка
+                call_time = estimated_arrival - timedelta(minutes=call_advance_minutes)
+                
+                order_number = point_data.get('order_number')
+                order_info = orders_dict.get(order_number, {})
+                
+                call_schedule.append({
+                    "order_number": order_number,
+                    "call_time": call_time.isoformat(),
+                    "arrival_time": estimated_arrival.isoformat(),
+                    "phone": order_info.get('phone', 'Не указан'),
+                    "customer_name": order_info.get('customer_name', '')
+                })
+            except Exception as e:
+                logger.warning(f"Ошибка обработки точки маршрута для графика звонков: {e}")
+                continue
+        
+        return call_schedule
+    
+    def _save_call_schedule_to_db(
+        self,
+        user_id: int,
+        order_date: date,
+        call_schedule: List[Dict],
+        route_data: Dict
+    ):
+        """
+        Сохранить график звонков в БД
+        
+        Args:
+            user_id: ID пользователя
+            order_date: Дата маршрута
+            call_schedule: График звонков
+            route_data: Данные маршрута
+        """
+        from src.database.connection import get_db_session
+        from src.models.order import RouteDataDB
+        from sqlalchemy.orm.attributes import flag_modified
+        
+        try:
+            with get_db_session() as session:
+                route_db = session.query(RouteDataDB).filter(
+                    RouteDataDB.user_id == user_id,
+                    RouteDataDB.route_date == order_date
+                ).first()
+                
+                if route_db:
+                    # Обновляем call_schedule
+                    route_db.call_schedule = call_schedule
+                    flag_modified(route_db, 'call_schedule')
+                    session.commit()
+                    logger.info(f"✅ График звонков сохранен в БД для user_id={user_id}, date={order_date}")
+                else:
+                    logger.warning(f"⚠️ Маршрут не найден в БД для сохранения графика звонков")
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения графика звонков в БД: {e}", exc_info=True)
     
     # ==================== ПЕРЕСЧЕТ БЕЗ РУЧНЫХ ВРЕМЕН ====================
     
