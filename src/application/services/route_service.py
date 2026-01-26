@@ -205,9 +205,7 @@ class RouteService:
                 orders=orders,
                 start_location=start_location,
                 start_time=start_time,
-                user_id=user_id,
-                cluster_radius_km=3.0,
-                sync_nearby_windows_km=1.0,
+                user_id=user_id
             )
             
             logger.info(f"Оптимизация завершена, точек в маршруте: {len(optimized_route.points) if optimized_route.points else 0}")
