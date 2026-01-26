@@ -29,6 +29,9 @@ class RoutePointDTO(BaseModel):
     customer_name: Optional[str] = None
     phone: Optional[str] = None
     comment: Optional[str] = None
+    delivery_time_start: Optional[str] = None   # "HH:MM" — из маршрута (в т.ч. после синхронизации)
+    delivery_time_end: Optional[str] = None
+    delivery_time_window: Optional[str] = None  # "HH:MM - HH:MM"
 
 
 class RouteDTO(BaseModel):

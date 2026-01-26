@@ -206,8 +206,8 @@ class RouteService:
                 start_location=start_location,
                 start_time=start_time,
                 user_id=user_id,
-                vehicle_capacity=50,  # Не используется, но для совместимости
-                use_fallback=False  # Не используется
+                cluster_radius_km=3.0,
+                sync_nearby_windows_km=1.0,
             )
             
             logger.info(f"Оптимизация завершена, точек в маршруте: {len(optimized_route.points) if optimized_route.points else 0}")
@@ -478,13 +478,12 @@ class RouteService:
                 if isinstance(route_summary[0], dict):
                     # Новый формат
                     for point_dict in route_summary:
-                        # Пропускаем метаданные (элементы с ключом _current_index)
                         if '_current_index' in point_dict and len(point_dict) == 1:
                             continue
-                        # Убеждаемся, что address присутствует (может отсутствовать в старых данных)
-                        if 'address' not in point_dict:
-                            point_dict['address'] = ""
-                        route_points.append(RoutePointDTO(**point_dict))
+                        pd = {k: v for k, v in point_dict.items() if k != '_current_index'}
+                        if 'address' not in pd:
+                            pd['address'] = ""
+                        route_points.append(RoutePointDTO(**pd))
         
         call_schedule = route_db.call_schedule or []
         if isinstance(call_schedule, list) and len(call_schedule) > 0:
@@ -718,21 +717,28 @@ class RouteService:
         return call_schedule
     
     def _route_point_to_dict(self, point, call_advance_minutes: int = 10) -> Dict:
-        """Преобразовать RoutePoint в словарь"""
-        # Рассчитываем call_time для сохранения в БД
+        """Преобразовать RoutePoint в словарь. Сохраняем окно доставки (в т.ч. после синхронизации)."""
+        from datetime import timedelta
         call_time = None
         if point.estimated_arrival:
-            from datetime import timedelta
             call_time = point.estimated_arrival - timedelta(minutes=call_advance_minutes)
-        
-        return {
-            "order_number": point.order.order_number,
-            "address": point.order.address or "",  # Добавляем адрес для RoutePointDTO (может быть None)
+        o = point.order
+        out = {
+            "order_number": o.order_number,
+            "address": o.address or "",
             "estimated_arrival": point.estimated_arrival.isoformat() if point.estimated_arrival else None,
-            "call_time": call_time.isoformat() if call_time else None,  # Добавляем call_time
+            "call_time": call_time.isoformat() if call_time else None,
             "distance_from_previous": point.distance_from_previous,
             "time_from_previous": point.time_from_previous
         }
+        if o.delivery_time_start and o.delivery_time_end:
+            out["delivery_time_start"] = o.delivery_time_start.strftime("%H:%M")
+            out["delivery_time_end"] = o.delivery_time_end.strftime("%H:%M")
+        if getattr(o, "delivery_time_window", None):
+            out["delivery_time_window"] = o.delivery_time_window
+        elif o.delivery_time_start and o.delivery_time_end:
+            out["delivery_time_window"] = f"{o.delivery_time_start.strftime('%H:%M')} - {o.delivery_time_end.strftime('%H:%M')}"
+        return out
     
     def _create_call_statuses(
         self,
