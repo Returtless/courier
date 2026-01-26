@@ -21,12 +21,12 @@ class GeneticRouteOptimizer:
     """
     
     # Параметры генетического алгоритма
-    POPULATION_SIZE = 60
-    MAX_GENERATIONS = 150
+    POPULATION_SIZE = 80  # Увеличено для лучшего поиска
+    MAX_GENERATIONS = 200  # Увеличено для лучшей сходимости
     TOURNAMENT_SIZE = 3
     CROSSOVER_RATE = 0.8
-    MUTATION_RATE = 0.15
-    ELITISM_COUNT = 8
+    MUTATION_RATE = 0.2  # Увеличено для большего разнообразия
+    ELITISM_COUNT = 10  # Увеличено для сохранения лучших решений
     MAX_DELAY_MINUTES = 10  # Максимальное опоздание
     MANUAL_TIME_TOLERANCE = 7  # Допуск для manual_arrival_time ±7 минут
     CLUSTER_RADIUS_KM = 1.0  # Радиус кластеризации
@@ -462,7 +462,7 @@ class GeneticRouteOptimizer:
                 
                 # Мутация
                 if random.random() < self.MUTATION_RATE:
-                    child = self._mutate(child)
+                    child = self._mutate(child, orders, start_time)
                 
                 # Проверка валидности
                 if self._is_valid_chromosome(child, num_orders):
@@ -547,9 +547,27 @@ class GeneticRouteOptimizer:
                 chromosome[i], chromosome[j] = chromosome[j], chromosome[i]
             population.append(chromosome)
         
-        # Стратегия 3: Greedy nearest neighbor (25%)
-        for _ in range(self.POPULATION_SIZE - len(population)):
-            chromosome = self._greedy_nearest_neighbor(orders, start_location)
+        # Стратегия 3: Сортировка по концу временного окна (для предотвращения опозданий)
+        for _ in range(self.POPULATION_SIZE // 8):
+            order_date = start_time.date()
+            sorted_indices = sorted(
+                range(num_orders),
+                key=lambda i: (
+                    datetime.combine(order_date, orders[i].delivery_time_end).timestamp()
+                    if orders[i].delivery_time_end else float('inf')
+                )
+            )
+            # Добавляем небольшую случайность
+            chromosome = sorted_indices.copy()
+            for _ in range(random.randint(0, num_orders // 4)):
+                i, j = random.sample(range(num_orders), 2)
+                chromosome[i], chromosome[j] = chromosome[j], chromosome[i]
+            population.append(chromosome)
+        
+        # Стратегия 4: Greedy nearest neighbor с учетом временных окон
+        remaining_count = self.POPULATION_SIZE - len(population)
+        for _ in range(remaining_count):
+            chromosome = self._greedy_nearest_neighbor(orders, start_location, start_time)
             population.append(chromosome)
         
         return population
@@ -557,14 +575,16 @@ class GeneticRouteOptimizer:
     def _greedy_nearest_neighbor(
         self,
         orders: List[Order],
-        start_location: Tuple[float, float]
+        start_location: Tuple[float, float],
+        start_time: datetime = None
     ) -> List[int]:
         """
-        Greedy алгоритм ближайшего соседа для генерации начальной популяции
+        Greedy алгоритм ближайшего соседа с учетом временных окон для генерации начальной популяции
         
         Args:
             orders: Список заказов
             start_location: Точка старта
+            start_time: Время старта (для учета временных окон)
             
         Returns:
             Хромосома (список индексов)
@@ -576,10 +596,12 @@ class GeneticRouteOptimizer:
         chromosome = []
         remaining = set(range(num_orders))
         current_location = start_location
+        current_time = start_time if start_time else datetime.now()
+        order_date = current_time.date()
         
         while remaining:
             best_idx = None
-            best_distance = float('inf')
+            best_score = float('inf')
             
             for idx in remaining:
                 order = orders[idx]
@@ -588,8 +610,18 @@ class GeneticRouteOptimizer:
                     order.latitude, order.longitude
                 )
                 
-                if distance < best_distance:
-                    best_distance = distance
+                # Базовый score = расстояние
+                score = distance
+                
+                # Бонус за ранние окна (приоритет заказам с ранними окнами)
+                if order.delivery_time_end and start_time:
+                    window_end = datetime.combine(order_date, order.delivery_time_end)
+                    # Если окно заканчивается рано (< 13:00), уменьшаем score
+                    if window_end.hour < 13:
+                        score *= 0.5  # Приоритет ранним окнам
+                
+                if score < best_score:
+                    best_score = score
                     best_idx = idx
             
             if best_idx is not None:
@@ -677,10 +709,12 @@ class GeneticRouteOptimizer:
                 if arrival_time > window_end:
                     violations += 1
                     delay = (arrival_time - window_end).total_seconds() / 60.0
+                    # Критическое опоздание > 10 минут - очень большой штраф
                     if delay > self.MAX_DELAY_MINUTES:
-                        # Превышение максимального опоздания
-                        total_delay += delay
+                        # Экспоненциальный штраф за критические опоздания
+                        total_delay += delay * (1 + (delay - self.MAX_DELAY_MINUTES) * 10)
                     else:
+                        # Обычное опоздание
                         total_delay += delay
             
             # Проверка manual_arrival_time
@@ -699,11 +733,12 @@ class GeneticRouteOptimizer:
             current_time = arrival_time + timedelta(minutes=service_time_minutes)
         
         # Фитнес = взвешенная сумма всех факторов
+        # КРИТИЧНО: Увеличиваем штрафы за опоздания, особенно за критические (>10 мин)
         fitness = (
-            total_distance * 0.3 +                    # Расстояние (30%)
-            total_time * 0.2 +                        # Время (20%)
-            violations * 10000 +                       # Штраф за нарушения окон (очень большой вес!)
-            total_delay * 100 +                        # Штраф за опоздания (100x)
+            total_distance * 0.2 +                    # Расстояние (20%)
+            total_time * 0.1 +                        # Время (10%)
+            violations * 50000 +                      # Штраф за нарушения окон (очень большой вес!)
+            total_delay * 1000 +                       # Штраф за опоздания (1000x, было 100x)
             early_arrivals * 5000 +                    # Штраф за ранние прибытия (5000x)
             manual_time_violations * 2000              # Штраф за нарушение manual_arrival_time (2000x)
         )
@@ -773,12 +808,19 @@ class GeneticRouteOptimizer:
         
         return child
     
-    def _mutate(self, chromosome: List[int]) -> List[int]:
+    def _mutate(
+        self,
+        chromosome: List[int],
+        orders: List[Order] = None,
+        start_time: datetime = None
+    ) -> List[int]:
         """
         Мутация хромосомы
         
         Args:
             chromosome: Хромосома для мутации
+            orders: Список заказов (для умной мутации)
+            start_time: Время старта (для умной мутации)
             
         Returns:
             Мутированная хромосома
@@ -788,8 +830,12 @@ class GeneticRouteOptimizer:
         
         mutation_type = random.random()
         
-        if mutation_type < 0.6:
-            # Swap Mutation (60%)
+        # Умная мутация для исправления опозданий (20%)
+        if mutation_type < 0.2 and orders and start_time:
+            return self._smart_mutation_for_delays(chromosome, orders, start_time)
+        
+        elif mutation_type < 0.6:
+            # Swap Mutation (40%)
             i, j = random.sample(range(len(chromosome)), 2)
             mutated = chromosome.copy()
             mutated[i], mutated[j] = mutated[j], mutated[i]
@@ -815,6 +861,56 @@ class GeneticRouteOptimizer:
                 return mutated
         
         return chromosome.copy()
+    
+    def _smart_mutation_for_delays(
+        self,
+        chromosome: List[int],
+        orders: List[Order],
+        start_time: datetime
+    ) -> List[int]:
+        """
+        Умная мутация: перемещает заказы с опозданиями ближе к началу маршрута
+        
+        Args:
+            chromosome: Хромосома
+            orders: Список заказов
+            start_time: Время старта
+            
+        Returns:
+            Мутированная хромосома
+        """
+        if len(chromosome) <= 1:
+            return chromosome.copy()
+        
+        mutated = chromosome.copy()
+        order_date = start_time.date()
+        
+        # Находим заказы с ранними окнами (которые могут опоздать)
+        early_window_orders = []
+        for idx in chromosome:
+            if idx < len(orders):
+                order = orders[idx]
+                if order.delivery_time_end:
+                    window_end = datetime.combine(order_date, order.delivery_time_end)
+                    # Окна, которые заканчиваются до 13:00 - приоритетные
+                    if window_end.hour < 13:
+                        early_window_orders.append((idx, window_end))
+        
+        if early_window_orders:
+            # Сортируем по времени окончания окна
+            early_window_orders.sort(key=lambda x: x[1])
+            
+            # Перемещаем первые 1-2 заказа с ранними окнами ближе к началу
+            for order_idx, _ in early_window_orders[:min(2, len(early_window_orders))]:
+                if order_idx in mutated:
+                    # Удаляем из текущей позиции
+                    current_pos = mutated.index(order_idx)
+                    mutated.pop(current_pos)
+                    # Вставляем ближе к началу (но не в самое начало, чтобы сохранить разнообразие)
+                    new_pos = random.randint(0, min(3, len(mutated)))
+                    mutated.insert(new_pos, order_idx)
+        
+        return mutated
     
     def _is_valid_chromosome(self, chromosome: List[int], num_orders: int) -> bool:
         """
@@ -925,9 +1021,9 @@ class GeneticRouteOptimizer:
                     if arrival_time > window_end:
                         delay = (arrival_time - window_end).total_seconds() / 60.0
                         if delay > self.MAX_DELAY_MINUTES:
-                            logger.warning(f"   ⚠️ Заказ {order.order_number}: опоздание {delay:.0f} мин (превышает максимум)")
-                        else:
-                            logger.debug(f"   ⚠️ Заказ {order.order_number}: опоздание {delay:.0f} мин")
+                            logger.error(f"   🚨 КРИТИЧЕСКОЕ ОПОЗДАНИЕ: Заказ {order.order_number}: опоздание {delay:.0f} мин (превышает максимум {self.MAX_DELAY_MINUTES} мин)")
+                        elif delay > 0:
+                            logger.warning(f"   ⚠️ Заказ {order.order_number}: опоздание {delay:.0f} мин")
                 
                 # Создаем точку маршрута
                 point = RoutePoint(
@@ -952,6 +1048,27 @@ class GeneticRouteOptimizer:
         
         if not points:
             return OptimizedRoute(points=[], total_distance=0, total_time=0, estimated_completion=start_time)
+        
+        # Финальная проверка опозданий
+        critical_delays = 0
+        total_delays = 0
+        for point in points:
+            order = point.order
+            if order.delivery_time_start and order.delivery_time_end:
+                order_date = start_time.date()
+                window_end = datetime.combine(order_date, order.delivery_time_end)
+                if point.estimated_arrival > window_end:
+                    delay = (point.estimated_arrival - window_end).total_seconds() / 60.0
+                    total_delays += delay
+                    if delay > self.MAX_DELAY_MINUTES:
+                        critical_delays += 1
+        
+        if critical_delays > 0:
+            logger.error(f"🚨 КРИТИЧНО: В маршруте {critical_delays} заказов с опозданием > {self.MAX_DELAY_MINUTES} мин")
+        elif total_delays > 0:
+            logger.warning(f"⚠️ В маршруте есть опоздания (общее: {total_delays:.1f} мин)")
+        else:
+            logger.info(f"✅ Все заказы в пределах временных окон")
         
         return OptimizedRoute(
             points=points,
