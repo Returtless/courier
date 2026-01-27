@@ -524,14 +524,14 @@ class GeneticRouteOptimizer:
         num_orders = len(orders)
         population = []
         
-        # Стратегия 1: Случайные перестановки (30%)
-        for _ in range(int(self.POPULATION_SIZE * 0.3)):
+        # Стратегия 1: Случайные перестановки (40%) - увеличено для разнообразия
+        for _ in range(int(self.POPULATION_SIZE * 0.4)):
             chromosome = list(range(num_orders))
             random.shuffle(chromosome)
             population.append(chromosome)
         
-        # Стратегия 2: Сортировка по началу временного окна (20%)
-        for _ in range(int(self.POPULATION_SIZE * 0.2)):
+        # Стратегия 2: Сортировка по началу временного окна (15%)
+        for _ in range(int(self.POPULATION_SIZE * 0.15)):
             order_date = start_time.date()
             sorted_indices = sorted(
                 range(num_orders),
@@ -547,8 +547,8 @@ class GeneticRouteOptimizer:
                 chromosome[i], chromosome[j] = chromosome[j], chromosome[i]
             population.append(chromosome)
         
-        # Стратегия 3: Сортировка по концу временного окна (для предотвращения опозданий) (12.5%)
-        for _ in range(int(self.POPULATION_SIZE * 0.125)):
+        # Стратегия 3: Сортировка по концу временного окна (для предотвращения опозданий) (10%)
+        for _ in range(int(self.POPULATION_SIZE * 0.1)):
             order_date = start_time.date()
             sorted_indices = sorted(
                 range(num_orders),
@@ -564,8 +564,8 @@ class GeneticRouteOptimizer:
                 chromosome[i], chromosome[j] = chromosome[j], chromosome[i]
             population.append(chromosome)
         
-        # Стратегия 4: Приоритет ранних окон (25%) - НОВАЯ СТРАТЕГИЯ
-        for _ in range(int(self.POPULATION_SIZE * 0.25)):
+        # Стратегия 4: Приоритет ранних окон (10%) - уменьшено с 25%
+        for _ in range(int(self.POPULATION_SIZE * 0.1)):
             order_date = start_time.date()
             sorted_indices = sorted(
                 range(num_orders),
@@ -583,7 +583,7 @@ class GeneticRouteOptimizer:
                 chromosome[i], chromosome[j] = chromosome[j], chromosome[i]
             population.append(chromosome)
         
-        # Стратегия 5: Greedy nearest neighbor с учетом временных окон
+        # Стратегия 5: Greedy nearest neighbor с учетом временных окон (25%)
         remaining_count = self.POPULATION_SIZE - len(population)
         for _ in range(remaining_count):
             chromosome = self._greedy_nearest_neighbor(orders, start_location, start_time)
@@ -632,18 +632,18 @@ class GeneticRouteOptimizer:
                 # Базовый score = расстояние
                 score = distance
                 
-                # Приоритет заказам с ранними окнами (коэффициенты приоритета)
+                # Приоритет заказам с ранними окнами (более мягкие коэффициенты)
                 if order.delivery_time_end and start_time:
                     window_end = datetime.combine(order_date, order.delivery_time_end)
                     window_end_hour = window_end.hour
                     
-                    # Коэффициенты приоритета по времени окончания окна
+                    # Более мягкие коэффициенты приоритета по времени окончания окна
                     if window_end_hour < 13:
-                        # Окна, заканчивающиеся до 13:00 - максимальный приоритет
-                        score *= 0.3  # Сильный приоритет
+                        # Окна, заканчивающиеся до 13:00 - умеренный приоритет
+                        score *= 0.6  # Умеренный приоритет (было 0.3 - слишком агрессивно)
                     elif window_end_hour < 15:
-                        # Окна 13:00-15:00 - средний приоритет
-                        score *= 0.7  # Средний приоритет
+                        # Окна 13:00-15:00 - небольшой приоритет
+                        score *= 0.85  # Небольшой приоритет (было 0.7)
                     # Окна после 15:00 - обычный приоритет (score *= 1.0)
                 
                 if score < best_score:
@@ -861,18 +861,18 @@ class GeneticRouteOptimizer:
         
         mutation_type = random.random()
         
-        # Умная мутация для исправления опозданий (30%)
-        if mutation_type < 0.3 and orders and start_time:
+        # Умная мутация для исправления опозданий (15%) - уменьшено с 30%
+        if mutation_type < 0.15 and orders and start_time:
             return self._smart_mutation_for_delays(chromosome, orders, start_time)
         
-        elif mutation_type < 0.5:
-            # Swap Mutation (20%)
+        elif mutation_type < 0.4:
+            # Swap Mutation (25%)
             i, j = random.sample(range(len(chromosome)), 2)
             mutated = chromosome.copy()
             mutated[i], mutated[j] = mutated[j], mutated[i]
             return mutated
         
-        elif mutation_type < 0.8:
+        elif mutation_type < 0.7:
             # Inversion Mutation (30%)
             if len(chromosome) >= 2:
                 start = random.randint(0, len(chromosome) - 2)
@@ -882,7 +882,7 @@ class GeneticRouteOptimizer:
                 return mutated
         
         else:
-            # Insertion Mutation (20%)
+            # Insertion Mutation (30%)
             if len(chromosome) >= 2:
                 mutated = chromosome.copy()
                 idx = random.randint(0, len(mutated) - 1)
@@ -916,35 +916,35 @@ class GeneticRouteOptimizer:
         mutated = chromosome.copy()
         order_date = start_time.date()
         
-        # Находим заказы с ранними окнами (которые могут опоздать)
+        # Находим заказы с ранними окнами, которые находятся в конце маршрута (более консервативно)
         early_window_orders = []
         for pos, idx in enumerate(chromosome):
             if idx < len(orders):
                 order = orders[idx]
                 if order.delivery_time_end:
                     window_end = datetime.combine(order_date, order.delivery_time_end)
-                    # Окна, которые заканчиваются до 13:00 - приоритетные
-                    if window_end.hour < 13:
-                        # Приоритет заказам в конце маршрута с ранними окнами
+                    # Окна, которые заканчиваются до 13:00 И находятся в последней половине маршрута
+                    if window_end.hour < 13 and pos > len(chromosome) / 2:
+                        # Приоритет заказам в самом конце маршрута с ранними окнами
                         priority = pos / len(chromosome)  # Чем дальше в маршруте, тем выше приоритет
                         early_window_orders.append((idx, window_end, pos, priority))
         
         if early_window_orders:
             # Сортируем по приоритету (позиция в маршруте) и времени окончания окна
-            early_window_orders.sort(key=lambda x: (x[3], x[1]))  # Сначала по позиции, потом по времени
+            early_window_orders.sort(key=lambda x: (x[3], x[1]), reverse=True)  # Сначала по позиции (самые дальние), потом по времени
             
-            # Перемещаем первые 1-3 заказа с ранними окнами ближе к началу
-            for order_idx, _, current_pos, _ in early_window_orders[:min(3, len(early_window_orders))]:
+            # Перемещаем только 1-2 самых проблемных заказа (было 1-3)
+            for order_idx, _, current_pos, _ in early_window_orders[:min(2, len(early_window_orders))]:
                 if order_idx in mutated:
                     # Удаляем из текущей позиции
                     mutated_pos = mutated.index(order_idx)
                     mutated.pop(mutated_pos)
-                    # Вставляем ближе к началу
-                    # Если заказ был в последней трети маршрута - перемещаем в первую треть
-                    if current_pos > len(chromosome) * 2 / 3:
-                        new_pos = random.randint(0, max(1, len(chromosome) // 3))
+                    # Вставляем ближе к началу, но не в самое начало (более консервативно)
+                    # Перемещаем в первую треть маршрута, но не в первые 2 позиции
+                    if len(mutated) > 2:
+                        new_pos = random.randint(2, max(3, len(chromosome) // 3))
                     else:
-                        new_pos = random.randint(0, min(5, len(mutated)))
+                        new_pos = random.randint(0, len(mutated))
                     mutated.insert(new_pos, order_idx)
         
         return mutated
