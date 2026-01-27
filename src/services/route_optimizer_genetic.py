@@ -664,12 +664,27 @@ class GeneticRouteOptimizer:
         total_delay = 0.0  # Общее опоздание (минуты)
         critical_delays = 0  # Количество критических опозданий (>10 мин)
         critical_delay_minutes = 0.0  # Сумма минут критических опозданий
-        early_arrivals = 0  # Количество ранних прибытий
+        early_arrivals = 0  # Количество ранних прибытий (для статистики, не для сильного штрафа)
         manual_time_violations = 0  # Нарушения manual_arrival_time
+        tail_usage_score = 0.0  # Насколько часто и глубоко используем «хвост» окон
         
         current_location = start_location
         current_time = start_time
         order_date = start_time.date()
+
+        # Глобальное самое раннее начало окна и начало окна первого обслуживаемого заказа
+        global_earliest_start: Optional[datetime] = None
+        first_order_start: Optional[datetime] = None
+        for idx in chromosome:
+            if idx >= len(orders):
+                continue
+            order = orders[idx]
+            if order.delivery_time_start:
+                start_dt = datetime.combine(order_date, order.delivery_time_start)
+                if global_earliest_start is None or start_dt < global_earliest_start:
+                    global_earliest_start = start_dt
+                if first_order_start is None:
+                    first_order_start = start_dt
         
         # Время обслуживания
         service_time_minutes = 10
@@ -702,10 +717,10 @@ class GeneticRouteOptimizer:
                 window_start = datetime.combine(order_date, order.delivery_time_start)
                 window_end = datetime.combine(order_date, order.delivery_time_end)
                 
-                # Раннее прибытие - КРИТИЧЕСКОЕ нарушение
+                # Раннее прибытие: считаем как ожидание (увеличивает total_time),
+                # но больше не считаем это жёстким нарушением
                 if arrival_time < window_start:
                     early_arrivals += 1
-                    # Ждем до начала окна
                     wait_time = (window_start - arrival_time).total_seconds() / 60.0
                     arrival_time = window_start
                     total_time += wait_time
@@ -722,6 +737,14 @@ class GeneticRouteOptimizer:
                     else:
                         # Обычное опоздание
                         total_delay += delay
+                else:
+                    # Прибытие внутри окна — накапливаем, насколько мы близко к его концу
+                    window_duration_sec = (window_end - window_start).total_seconds()
+                    if window_duration_sec > 0:
+                        relative_tail = (arrival_time - window_start).total_seconds() / window_duration_sec
+                        # Ограничиваем [0;1] и аккумулируем по маршруту
+                        relative_tail = max(0.0, min(1.0, relative_tail))
+                        tail_usage_score += relative_tail
             
             # Проверка manual_arrival_time
             if order.manual_arrival_time:
@@ -738,16 +761,29 @@ class GeneticRouteOptimizer:
             current_location = (order.latitude, order.longitude)
             current_time = arrival_time + timedelta(minutes=service_time_minutes)
         
+        # Мягкий штраф за слишком позднее использование первого окна
+        late_first_start_penalty = 0.0
+        if global_earliest_start and first_order_start:
+            diff_minutes = (first_order_start - global_earliest_start).total_seconds() / 60.0
+            threshold_minutes = 60.0  # допускаем до 1 часа сдвига
+            if diff_minutes > threshold_minutes:
+                # Чем позже старт первого окна относительно самого раннего, тем больше штраф
+                K_FIRST = 50.0
+                late_first_start_penalty = (diff_minutes - threshold_minutes) * K_FIRST
+        
         # Фитнес = взвешенная сумма всех факторов
-        # КРИТИЧНО: Увеличиваем штрафы за опоздания, особенно за критические (>10 мин)
+        # КРИТИЧНО: Увеличиваем штрафы за опоздания, но делаем ранние прибытия мягкими,
+        # и добавляем штраф за систематическое использование хвостов окон
+        K_TAIL = 100.0  # штраф за суммарное использование хвостов окон
         fitness = (
-            total_distance * 0.2 +                    # Расстояние (20%)
-            total_time * 0.1 +                        # Время (10%)
-            violations * 50000 +                      # Штраф за нарушения окон (очень большой вес!)
+            total_distance * 0.2 +                     # Расстояние (20%)
+            total_time * 0.1 +                         # Время (10%)
+            violations * 50000 +                       # Штраф за нарушения окон (очень большой вес!)
             total_delay * 1000 +                       # Штраф за опоздания (1000x)
             critical_delays * 100000 +                 # Очень большой штраф за критические опоздания
-            critical_delay_minutes * 5000 +             # Дополнительный штраф за минуты критических опозданий
-            early_arrivals * 5000 +                    # Штраф за ранние прибытия (5000x)
+            critical_delay_minutes * 5000 +            # Дополнительный штраф за минуты критических опозданий
+            tail_usage_score * K_TAIL +                # Штраф за систематические приезды к концу окон
+            late_first_start_penalty +                 # Штраф за слишком поздний первый интервал
             manual_time_violations * 2000              # Штраф за нарушение manual_arrival_time (2000x)
         )
         
@@ -1124,7 +1160,7 @@ class GeneticRouteOptimizer:
         if not route or not route.points:
             return None
         
-        # Находим заказы с критическими опозданиями
+        # Находим заказы с КРИТИЧЕСКИМИ опозданиями
         order_date = start_time.date()
         delayed_orders = []
         
@@ -1147,7 +1183,8 @@ class GeneticRouteOptimizer:
         
         # Создаем список точек для перестановки
         points_list = list(route.points)
-        max_iterations = 3
+        # Делаем постобработку максимально легкой: ограничиваемся одной итерацией
+        max_iterations = 1
         improved = False
         
         for iteration in range(max_iterations):
