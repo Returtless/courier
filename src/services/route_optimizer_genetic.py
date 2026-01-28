@@ -610,18 +610,8 @@ class GeneticRouteOptimizer:
                     order.latitude, order.longitude
                 )
                 
-                # Базовый score = расстояние
+                # Базовый score = расстояние (все окна равны, без приоритета по времени)
                 score = distance
-                
-                # Приоритет заказам с ранними окнами (упрощенная логика)
-                if order.delivery_time_start and start_time:
-                    window_start = datetime.combine(order_date, order.delivery_time_start)
-                    # Небольшой бонус за ранние окна, но не слишком агрессивно
-                    if window_start.hour < 11:
-                        score *= 0.8  # Небольшой приоритет для очень ранних окон
-                    elif window_start.hour < 13:
-                        score *= 0.9  # Очень небольшой приоритет
-                    # Остальные - обычный приоритет
                 
                 if score < best_score:
                     best_score = score
@@ -904,25 +894,21 @@ class GeneticRouteOptimizer:
         mutated = chromosome.copy()
         order_date = start_time.date()
         
-        # Находим заказы с ранними окнами, которые находятся в конце маршрута (более консервативно)
-        early_window_orders = []
+        # Заказы во второй половине маршрута (все окна равны, без приоритета по часу)
+        late_route_orders = []
+        half = len(chromosome) / 2
         for pos, idx in enumerate(chromosome):
-            if idx < len(orders):
+            if idx < len(orders) and pos > half:
                 order = orders[idx]
                 if order.delivery_time_end:
                     window_end = datetime.combine(order_date, order.delivery_time_end)
-                    # Окна, которые заканчиваются до 13:00 И находятся в последней половине маршрута
-                    if window_end.hour < 13 and pos > len(chromosome) / 2:
-                        # Приоритет заказам в самом конце маршрута с ранними окнами
-                        priority = pos / len(chromosome)  # Чем дальше в маршруте, тем выше приоритет
-                        early_window_orders.append((idx, window_end, pos, priority))
+                    late_route_orders.append((idx, window_end, pos))
         
-        if early_window_orders:
-            # Сортируем по приоритету (позиция в маршруте) и времени окончания окна
-            early_window_orders.sort(key=lambda x: (x[3], x[1]), reverse=True)  # Сначала по позиции (самые дальние), потом по времени
+        if late_route_orders:
+            # Сортируем: дальние в маршруте первыми, при равной позиции — раньше кончающиеся окна
+            late_route_orders.sort(key=lambda x: (x[2], -x[1].timestamp()), reverse=True)
             
-            # Перемещаем только 1-2 самых проблемных заказа (было 1-3)
-            for order_idx, _, current_pos, _ in early_window_orders[:min(2, len(early_window_orders))]:
+            for order_idx, _, _ in late_route_orders[:min(2, len(late_route_orders))]:
                 if order_idx in mutated:
                     # Удаляем из текущей позиции
                     mutated_pos = mutated.index(order_idx)
@@ -1140,45 +1126,40 @@ class GeneticRouteOptimizer:
         # Начинаем с текущего порядка точек
         points_list = list(route.points)
         moves_done = 0
-        max_moves = 3  # ограничиваем количество локальных перестановок
+        max_moves = 5  # больше перестановок — лучше шанс убрать опоздания
 
         while moves_done < max_moves:
             current_route = self._recalculate_route_times(points_list, orders, start_location, start_time, user_id)
             if not current_route:
                 break
 
-            # Ищем заказы с критическими опозданиями по любым окнам
+            # Ищем заказы с любым опозданием (delay > 0), не только критические
             delayed_points: List[Tuple[int, RoutePoint, float]] = []
             for idx, point in enumerate(current_route.points):
                 order = point.order
                 if order.delivery_time_start and order.delivery_time_end:
-                    window_start = datetime.combine(order_date, order.delivery_time_start)
                     window_end = datetime.combine(order_date, order.delivery_time_end)
                     if point.estimated_arrival > window_end:
                         delay = (point.estimated_arrival - window_end).total_seconds() / 60.0
-                        if delay > self.MAX_DELAY_MINUTES:
+                        if delay > 0:
                             delayed_points.append((idx, point, delay))
 
             if not delayed_points:
-                # Нет критических опозданий — возвращаем улучшенный маршрут
                 return current_route
 
-            # Берём самый проблемный заказ по опозданию
             delayed_points.sort(key=lambda x: x[2], reverse=True)
             idx, delayed_point, current_delay = delayed_points[0]
             order = delayed_point.order
             logger.info(
-                f"🔧 Локальный поиск для заказа {order.order_number}: текущее опоздание по раннему окну {current_delay:.0f} мин"
+                f"🔧 Локальный поиск для заказа {order.order_number}: опоздание {current_delay:.0f} мин"
             )
 
             best_points = None
             best_delay = current_delay
 
-            # Кандидаты позиций в пределах локального окна индексов [idx-3, idx+3]
+            # Кандидаты: все позиции кроме текущей (приоритет — более ранние, чтобы убрать опоздания)
             n = len(points_list)
-            left = max(0, idx - 3)
-            right = min(n - 1, idx + 3)
-            candidates = [pos for pos in range(left, right + 1) if pos != idx]
+            candidates = [p for p in range(n) if p != idx]
 
             for new_pos in candidates:
                 base_points = list(points_list)
@@ -1215,10 +1196,32 @@ class GeneticRouteOptimizer:
                 if has_critical_others:
                     continue
 
-                # Принимаем только улучшение по опозданию для этого заказа
                 if trial_delay < best_delay:
                     best_delay = trial_delay
                     best_points = base_points
+
+                # Дополнительно пробуем swap с более ранней позицией (иногда лучше, чем move)
+                if new_pos < idx:
+                    swap_points = list(points_list)
+                    swap_points[idx], swap_points[new_pos] = swap_points[new_pos], swap_points[idx]
+                    swap_route = self._recalculate_route_times(swap_points, orders, start_location, start_time, user_id)
+                    if swap_route:
+                        swap_delay = 0.0
+                        swap_critical = False
+                        for p in swap_route.points:
+                            o = p.order
+                            if o.delivery_time_start and o.delivery_time_end:
+                                we = datetime.combine(order_date, o.delivery_time_end)
+                                if p.estimated_arrival > we:
+                                    d = (p.estimated_arrival - we).total_seconds() / 60.0
+                                    if o.order_number == order.order_number:
+                                        swap_delay = d
+                                    elif d > self.MAX_DELAY_MINUTES:
+                                        swap_critical = True
+                                        break
+                        if not swap_critical and swap_delay < best_delay:
+                            best_delay = swap_delay
+                            best_points = swap_points
 
             if best_points is None or best_delay >= current_delay:
                 # Улучшить не удалось — выходим
