@@ -1096,6 +1096,31 @@ class GeneticRouteOptimizer:
                 return fixed_route
         
         return route
+
+    def _route_delay_stats(
+        self,
+        route: OptimizedRoute,
+        order_date
+    ) -> Tuple[float, int, bool]:
+        """
+        (total_delay_min, count_delayed, has_critical) по маршруту.
+        """
+        total = 0.0
+        count = 0
+        has_critical = False
+        for p in route.points:
+            o = p.order
+            if not (o.delivery_time_start and o.delivery_time_end):
+                continue
+            we = datetime.combine(order_date, o.delivery_time_end)
+            if p.estimated_arrival <= we:
+                continue
+            d = (p.estimated_arrival - we).total_seconds() / 60.0
+            total += d
+            count += 1
+            if d > self.MAX_DELAY_MINUTES:
+                has_critical = True
+        return (total, count, has_critical)
     
     def _fix_delays_in_route(
         self,
@@ -1106,54 +1131,43 @@ class GeneticRouteOptimizer:
         user_id: int = None
     ) -> Optional[OptimizedRoute]:
         """
-        Постобработка маршрута: исправление критических опозданий путем перемещения заказов
-        
-        Args:
-            route: Исходный маршрут
-            orders: Список заказов
-            start_location: Точка старта
-            start_time: Время старта
-            user_id: ID пользователя
-            
-        Returns:
-            Исправленный маршрут или None, если исправление невозможно
+        Постобработка маршрута: исправление опозданий путём перемещения/обмена заказов.
+        Принимаем ход, если уменьшается суммарное опоздание (total delay) и нет новых
+        критических опозданий у других заказов.
         """
         if not route or not route.points:
             return None
         
         order_date = start_time.date()
-
-        # Начинаем с текущего порядка точек
         points_list = list(route.points)
         moves_done = 0
-        max_moves = 5  # больше перестановок — лучше шанс убрать опоздания
+        max_moves = 8
 
         while moves_done < max_moves:
             current_route = self._recalculate_route_times(points_list, orders, start_location, start_time, user_id)
             if not current_route:
                 break
 
-            delayed_points: List[Tuple[int, RoutePoint, float]] = []
-            for idx, point in enumerate(current_route.points):
-                order = point.order
-                if order.delivery_time_start and order.delivery_time_end:
-                    window_end = datetime.combine(order_date, order.delivery_time_end)
-                    if point.estimated_arrival > window_end:
-                        delay = (point.estimated_arrival - window_end).total_seconds() / 60.0
-                        if delay > 0:
-                            delayed_points.append((idx, point, delay))
-
-            if not delayed_points:
+            total_now, count_now, _ = self._route_delay_stats(current_route, order_date)
+            if count_now == 0:
                 return current_route
 
-            delayed_points.sort(key=lambda x: x[2], reverse=True)
-            improved = False
+            delayed_points: List[Tuple[int, RoutePoint, float]] = []
+            for idx, point in enumerate(current_route.points):
+                o = point.order
+                if o.delivery_time_start and o.delivery_time_end:
+                    we = datetime.combine(order_date, o.delivery_time_end)
+                    if point.estimated_arrival > we:
+                        d = (point.estimated_arrival - we).total_seconds() / 60.0
+                        if d > 0:
+                            delayed_points.append((idx, point, d))
 
-            for idx, delayed_point, current_delay in delayed_points:
-                order = delayed_point.order
-                best_points = None
-                best_delay = current_delay
-                n = len(points_list)
+            best_points = None
+            best_total = total_now
+            best_count = count_now
+            n = len(points_list)
+
+            for idx, delayed_point, _ in delayed_points:
                 candidates = [p for p in range(n) if p != idx]
 
                 for new_pos in candidates:
@@ -1165,59 +1179,37 @@ class GeneticRouteOptimizer:
                     trial_route = self._recalculate_route_times(base_points, orders, start_location, start_time, user_id)
                     if not trial_route:
                         continue
-
-                    trial_delay = 0.0
-                    has_critical_others = False
-                    for p in trial_route.points:
-                        o = p.order
-                        if o.delivery_time_start and o.delivery_time_end:
-                            we = datetime.combine(order_date, o.delivery_time_end)
-                            if p.estimated_arrival > we:
-                                d = (p.estimated_arrival - we).total_seconds() / 60.0
-                                if o.order_number == order.order_number:
-                                    trial_delay = d
-                                elif d > self.MAX_DELAY_MINUTES:
-                                    has_critical_others = True
-                                    break
-                    if has_critical_others:
+                    t_total, t_count, t_critical = self._route_delay_stats(trial_route, order_date)
+                    if t_critical:
                         continue
-                    if trial_delay < best_delay:
-                        best_delay = trial_delay
+                    if (t_total, -t_count) < (best_total, -best_count):
+                        best_total = t_total
+                        best_count = t_count
                         best_points = base_points
 
                     if new_pos < idx:
                         swap_points = list(points_list)
                         swap_points[idx], swap_points[new_pos] = swap_points[new_pos], swap_points[idx]
                         swap_route = self._recalculate_route_times(swap_points, orders, start_location, start_time, user_id)
-                        if swap_route:
-                            swap_delay = 0.0
-                            swap_critical = False
-                            for p in swap_route.points:
-                                o = p.order
-                                if o.delivery_time_start and o.delivery_time_end:
-                                    we = datetime.combine(order_date, o.delivery_time_end)
-                                    if p.estimated_arrival > we:
-                                        d = (p.estimated_arrival - we).total_seconds() / 60.0
-                                        if o.order_number == order.order_number:
-                                            swap_delay = d
-                                        elif d > self.MAX_DELAY_MINUTES:
-                                            swap_critical = True
-                                            break
-                            if not swap_critical and swap_delay < best_delay:
-                                best_delay = swap_delay
-                                best_points = swap_points
+                        if not swap_route:
+                            continue
+                        s_total, s_count, s_critical = self._route_delay_stats(swap_route, order_date)
+                        if s_critical:
+                            continue
+                        if (s_total, -s_count) < (best_total, -best_count):
+                            best_total = s_total
+                            best_count = s_count
+                            best_points = swap_points
 
-                if best_points is not None and best_delay < current_delay:
-                    logger.info(
-                        f"✅ Локально улучшили заказ {order.order_number}: опоздание {current_delay:.0f} → {best_delay:.0f} мин"
-                    )
-                    points_list = best_points
-                    moves_done += 1
-                    improved = True
-                    break
-
-            if not improved:
+            if best_points is None or not (best_total < total_now or (best_total == total_now and best_count < count_now)):
                 break
+
+            logger.info(
+                f"✅ Локально улучшили: total delay {total_now:.0f}→{best_total:.0f} мин, "
+                f"опозданий {count_now}→{best_count}"
+            )
+            points_list = best_points
+            moves_done += 1
 
         final_route = self._recalculate_route_times(points_list, orders, start_location, start_time, user_id)
         return final_route if final_route else route
