@@ -664,29 +664,12 @@ class GeneticRouteOptimizer:
         total_delay = 0.0  # Общее опоздание (минуты)
         critical_delays = 0  # Количество критических опозданий (>10 мин)
         critical_delay_minutes = 0.0  # Сумма минут критических опозданий
-        early_window_delay = 0.0  # Сумма опозданий по ранним окнам (например, старт < 11:00)
-        early_window_critical = 0  # Количество критических опозданий по ранним окнам
-        early_arrivals = 0  # Количество ранних прибытий (для статистики, не для сильного штрафа)
+        early_arrivals = 0  # Количество ранних прибытий (для статистики)
         manual_time_violations = 0  # Нарушения manual_arrival_time
-        tail_usage_score = 0.0  # Насколько часто и глубоко используем «хвост» окон
         
         current_location = start_location
         current_time = start_time
         order_date = start_time.date()
-
-        # Глобальное самое раннее начало окна и начало окна первого обслуживаемого заказа
-        global_earliest_start: Optional[datetime] = None
-        first_order_start: Optional[datetime] = None
-        for idx in chromosome:
-            if idx >= len(orders):
-                continue
-            order = orders[idx]
-            if order.delivery_time_start:
-                start_dt = datetime.combine(order_date, order.delivery_time_start)
-                if global_earliest_start is None or start_dt < global_earliest_start:
-                    global_earliest_start = start_dt
-                if first_order_start is None:
-                    first_order_start = start_dt
         
         # Время обслуживания
         service_time_minutes = 10
@@ -739,20 +722,6 @@ class GeneticRouteOptimizer:
                     else:
                         # Обычное опоздание
                         total_delay += delay
-
-                    # Дополнительно: усиливаем штраф за опоздания по ранним окнам (например, старт < 11:00)
-                    if order.delivery_time_start and order.delivery_time_start.hour < 11:
-                        early_window_delay += delay
-                        if delay > self.MAX_DELAY_MINUTES:
-                            early_window_critical += 1
-                else:
-                    # Прибытие внутри окна — накапливаем, насколько мы близко к его концу
-                    window_duration_sec = (window_end - window_start).total_seconds()
-                    if window_duration_sec > 0:
-                        relative_tail = (arrival_time - window_start).total_seconds() / window_duration_sec
-                        # Ограничиваем [0;1] и аккумулируем по маршруту
-                        relative_tail = max(0.0, min(1.0, relative_tail))
-                        tail_usage_score += relative_tail
             
             # Проверка manual_arrival_time
             if order.manual_arrival_time:
@@ -769,34 +738,28 @@ class GeneticRouteOptimizer:
             current_location = (order.latitude, order.longitude)
             current_time = arrival_time + timedelta(minutes=service_time_minutes)
         
-        # Мягкий штраф за слишком позднее использование первого окна
-        late_first_start_penalty = 0.0
-        if global_earliest_start and first_order_start:
-            diff_minutes = (first_order_start - global_earliest_start).total_seconds() / 60.0
-            threshold_minutes = 60.0  # допускаем до 1 часа сдвига
-            if diff_minutes > threshold_minutes:
-                # Чем позже старт первого окна относительно самого раннего, тем больше штраф
-                K_FIRST = 50.0
-                late_first_start_penalty = (diff_minutes - threshold_minutes) * K_FIRST
+        # Фитнес: сначала окна, затем мягкие ограничения, затем качество маршрута
+        # 1) Сильные штрафы за нарушения окон
+        K_VIOL = 1_000_000.0      # любое нарушение окна очень дорого
+        K_DELAY = 5_000.0         # минуты опоздания важнее километража
+        K_CRIT_COUNT = 200_000.0  # за каждый заказ с критическим опозданием
+        K_CRIT_MIN = 10_000.0     # за минуты критического опоздания
         
-        # Фитнес = взвешенная сумма всех факторов
-        # КРИТИЧНО: Увеличиваем штрафы за опоздания, но делаем ранние прибытия мягкими,
-        # и добавляем штраф за систематическое использование хвостов окон и ранние окна
-        K_TAIL = 100.0          # штраф за суммарное использование хвостов окон
-        K_EARLY_DELAY = 3000.0  # усиленный штраф за опоздания по ранним окнам
-        K_EARLY_CRIT = 150000.0 # дополнительный штраф за критические опоздания по ранним окнам
+        # 2) Мягкие ограничения
+        K_MANUAL = 2_000.0        # нарушения manual_arrival_time
+        
+        # 3) Качество маршрута при равных окнах
+        K_DIST = 10.0             # вклад расстояния
+        K_TIME = 5.0              # вклад общего времени
+        
         fitness = (
-            total_distance * 0.2 +                     # Расстояние (20%)
-            total_time * 0.1 +                         # Время (10%)
-            violations * 50000 +                       # Штраф за нарушения окон (очень большой вес!)
-            total_delay * 1000 +                       # Штраф за опоздания (1000x)
-            critical_delays * 100000 +                 # Очень большой штраф за критические опоздания
-            critical_delay_minutes * 5000 +            # Дополнительный штраф за минуты критических опозданий
-            tail_usage_score * K_TAIL +                # Штраф за систематические приезды к концу окон
-            early_window_delay * K_EARLY_DELAY +       # Сильный штраф за опоздания по ранним окнам
-            early_window_critical * K_EARLY_CRIT +     # Сверхштраф за критические опоздания по ранним окнам
-            late_first_start_penalty +                 # Штраф за слишком поздний первый интервал
-            manual_time_violations * 2000              # Штраф за нарушение manual_arrival_time (2000x)
+            violations * K_VIOL +
+            total_delay * K_DELAY +
+            critical_delays * K_CRIT_COUNT +
+            critical_delay_minutes * K_CRIT_MIN +
+            manual_time_violations * K_MANUAL +
+            total_distance * K_DIST +
+            total_time * K_TIME
         )
         
         return fitness
@@ -1184,8 +1147,8 @@ class GeneticRouteOptimizer:
             if not current_route:
                 break
 
-            # Ищем опаздывающие заказы по «ранним» окнам (например, старт < 11:00) с критическим опозданием
-            delayed_early: List[Tuple[int, RoutePoint, float]] = []
+            # Ищем заказы с критическими опозданиями по любым окнам
+            delayed_points: List[Tuple[int, RoutePoint, float]] = []
             for idx, point in enumerate(current_route.points):
                 order = point.order
                 if order.delivery_time_start and order.delivery_time_end:
@@ -1193,16 +1156,16 @@ class GeneticRouteOptimizer:
                     window_end = datetime.combine(order_date, order.delivery_time_end)
                     if point.estimated_arrival > window_end:
                         delay = (point.estimated_arrival - window_end).total_seconds() / 60.0
-                        if delay > self.MAX_DELAY_MINUTES and order.delivery_time_start.hour < 11:
-                            delayed_early.append((idx, point, delay))
+                        if delay > self.MAX_DELAY_MINUTES:
+                            delayed_points.append((idx, point, delay))
 
-            if not delayed_early:
-                # Нет проблемных ранних окон — возвращаем улучшенный маршрут
+            if not delayed_points:
+                # Нет критических опозданий — возвращаем улучшенный маршрут
                 return current_route
 
-            # Берём самый проблемный заказ по раннему окну
-            delayed_early.sort(key=lambda x: x[2], reverse=True)
-            idx, delayed_point, current_delay = delayed_early[0]
+            # Берём самый проблемный заказ по опозданию
+            delayed_points.sort(key=lambda x: x[2], reverse=True)
+            idx, delayed_point, current_delay = delayed_points[0]
             order = delayed_point.order
             logger.info(
                 f"🔧 Локальный поиск для заказа {order.order_number}: текущее опоздание по раннему окну {current_delay:.0f} мин"
