@@ -1180,7 +1180,7 @@ class GeneticRouteOptimizer:
                     if not trial_route:
                         continue
                     t_total, t_count, t_critical = self._route_delay_stats(trial_route, order_date)
-                    if t_critical:
+                    if t_critical or t_count > count_now:
                         continue
                     if (t_total, -t_count) < (best_total, -best_count):
                         best_total = t_total
@@ -1194,7 +1194,7 @@ class GeneticRouteOptimizer:
                         if not swap_route:
                             continue
                         s_total, s_count, s_critical = self._route_delay_stats(swap_route, order_date)
-                        if s_critical:
+                        if s_critical or s_count > count_now:
                             continue
                         if (s_total, -s_count) < (best_total, -best_count):
                             best_total = s_total
