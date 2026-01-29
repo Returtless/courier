@@ -31,7 +31,8 @@ class GeneticRouteOptimizer:
     MAX_DELAY_MINUTES = 10  # Максимальное опоздание
     MANUAL_TIME_TOLERANCE = 7  # Допуск для manual_arrival_time ±7 минут
     CLUSTER_RADIUS_KM = 1.0  # Радиус кластеризации
-    
+    GREEDY_EST_KM_PER_MIN = 0.5  # Оценка скорости для greedy (~30 км/ч), время = км / это
+
     def __init__(self, maps_service: MapsService):
         self.maps_service = maps_service
         self.settings_service = UserSettingsService()
@@ -571,13 +572,13 @@ class GeneticRouteOptimizer:
         
         # Стратегия 3b: Строго по ужесточению окна (тот же ключ, без перемешивания)
         strict_by_window = sorted(range(num_orders), key=_end_and_width)
-        for _ in range(min(5, self.POPULATION_SIZE // 8)):
+        for _ in range(min(12, self.POPULATION_SIZE // 4)):
             population.append(strict_by_window.copy())
         
         # Стратегия 4: Greedy nearest neighbor с учетом временных окон
         remaining_count = self.POPULATION_SIZE - len(population)
         for _ in range(remaining_count):
-            chromosome = self._greedy_nearest_neighbor(orders, start_location, start_time)
+            chromosome = self._greedy_nearest_neighbor(orders, start_location, start_time, user_id)
             population.append(chromosome)
         
         return population
@@ -586,15 +587,18 @@ class GeneticRouteOptimizer:
         self,
         orders: List[Order],
         start_location: Tuple[float, float],
-        start_time: datetime = None
+        start_time: datetime = None,
+        user_id: int = None
     ) -> List[int]:
         """
-        Greedy алгоритм ближайшего соседа с учетом временных окон для генерации начальной популяции
+        Greedy алгоритм ближайшего соседа: расстояние + оценка времени прибытия.
+        Кандидаты, при поезде к которым «сейчас» приедем после конца окна, сильно штрафуются.
         
         Args:
             orders: Список заказов
             start_location: Точка старта
-            start_time: Время старта (для учета временных окон)
+            start_time: Время старта
+            user_id: ID пользователя (для service_time_minutes)
             
         Returns:
             Хромосома (список индексов)
@@ -602,6 +606,14 @@ class GeneticRouteOptimizer:
         num_orders = len(orders)
         if num_orders == 0:
             return []
+        
+        service_time_minutes = 10
+        if user_id is not None:
+            try:
+                user_settings = self.settings_service.get_settings(user_id)
+                service_time_minutes = user_settings.service_time_minutes
+            except Exception:
+                pass
         
         chromosome = []
         remaining = set(range(num_orders))
@@ -612,6 +624,7 @@ class GeneticRouteOptimizer:
         while remaining:
             best_idx = None
             best_score = (float('inf'), float('inf'))
+            best_distance = 0.0
             
             for idx in remaining:
                 order = orders[idx]
@@ -619,22 +632,39 @@ class GeneticRouteOptimizer:
                     current_location[0], current_location[1],
                     order.latitude, order.longitude
                 )
+                travel_est_min = distance / self.GREEDY_EST_KM_PER_MIN
+                arrival_est = current_time + timedelta(minutes=travel_est_min)
                 
-                # Приоритет: расстояние; при равных — раньше конец окна
+                # Штраф: если при поезде «сейчас» приедем после конца окна — сильно понижаем приоритет
+                late_penalty = 0.0
+                if order.delivery_time_end:
+                    window_end = datetime.combine(order_date, order.delivery_time_end)
+                    if arrival_est > window_end:
+                        late_penalty = 1e6
+                
                 end_ts = (
                     datetime.combine(order_date, order.delivery_time_end).timestamp()
                     if order.delivery_time_end else float('inf')
                 )
-                score = (distance, end_ts)
+                score = (late_penalty + distance, end_ts)
                 
                 if score < best_score:
                     best_score = score
                     best_idx = idx
+                    best_distance = distance
             
             if best_idx is not None:
+                order = orders[best_idx]
                 chromosome.append(best_idx)
                 remaining.remove(best_idx)
-                current_location = (orders[best_idx].latitude, orders[best_idx].longitude)
+                current_location = (order.latitude, order.longitude)
+                travel_est_min = best_distance / self.GREEDY_EST_KM_PER_MIN
+                arrival_est = current_time + timedelta(minutes=travel_est_min)
+                if order.delivery_time_start and order.delivery_time_end:
+                    window_start = datetime.combine(order_date, order.delivery_time_start)
+                    if arrival_est < window_start:
+                        arrival_est = window_start
+                current_time = arrival_est + timedelta(minutes=service_time_minutes)
         
         return chromosome
     
@@ -742,8 +772,12 @@ class GeneticRouteOptimizer:
             current_location = (order.latitude, order.longitude)
             current_time = arrival_time + timedelta(minutes=service_time_minutes)
         
-        # Фитнес: сначала окна, затем мягкие ограничения, затем качество маршрута
-        # 1) Сильные штрафы за нарушения окон
+        # Фитнес: маршруты без опозданий всегда лучше любых с опозданиями (явный ярус)
+        FEASIBLE_TIER = 0.0           # нет опозданий
+        INFEASIBLE_TIER = 1_000_000_000.0  # хотя бы одно опоздание
+        tier = INFEASIBLE_TIER if (violations > 0 or total_delay > 0) else FEASIBLE_TIER
+        
+        # 1) Штрафы за нарушения окон (внутри яруса)
         K_VIOL = 1_000_000.0      # любое нарушение окна очень дорого
         K_DELAY = 5_000.0         # минуты опоздания важнее километража
         K_CRIT_COUNT = 200_000.0  # за каждый заказ с критическим опозданием
@@ -757,6 +791,7 @@ class GeneticRouteOptimizer:
         K_TIME = 5.0              # вклад общего времени
         
         fitness = (
+            tier +
             violations * K_VIOL +
             total_delay * K_DELAY +
             critical_delays * K_CRIT_COUNT +
