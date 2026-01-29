@@ -1090,13 +1090,24 @@ class GeneticRouteOptimizer:
         )
         
         # Постобработка: исправление критических опозданий
+        route_after_fix = route
         if critical_delays > 0:
             logger.info(f"🔧 Запускаю постобработку для исправления {critical_delays} критических опозданий...")
             fixed_route = self._fix_delays_in_route(route, orders, start_location, start_time, user_id)
-            if fixed_route:
-                return fixed_route
+            if fixed_route and fixed_route.points:
+                route_after_fix = fixed_route
         
-        return route
+        # Фаза спасения достижимости: если всё ещё есть опоздания, пытаемся
+        # перестроить небольшой подмаршрут вокруг проблемных заказов
+        rescued_route = self._rescue_feasibility(route_after_fix, orders, start_location, start_time, user_id)
+        if rescued_route and rescued_route.points:
+            # После спасения можно слегка подправить хвост тем же локальным поиском
+            final_fixed = self._fix_delays_in_route(rescued_route, orders, start_location, start_time, user_id)
+            if final_fixed and final_fixed.points:
+                return final_fixed
+            return rescued_route
+        
+        return route_after_fix
 
     def _tail_indices(self, n: int, K: int) -> List[int]:
         """Индексы последних K точек: [n-K, ..., n-1]."""
@@ -1435,6 +1446,222 @@ class GeneticRouteOptimizer:
 
         final_route = self._recalculate_route_times(points_list, orders, start_location, start_time, user_id)
         return final_route if final_route else route
+    
+    def _optimize_subroute_by_time_windows(
+        self,
+        rescue_orders: List[Order],
+        start_location: Tuple[float, float],
+        start_time: datetime,
+        order_date,
+        user_id: Optional[int] = None
+    ) -> Optional[List[Order]]:
+        """
+        Специализированная оптимизация небольшого подмаршрута по временным окнам.
+        Полный перебор с отсечением по суммарному опозданию для 5–7 заказов.
+        """
+        if not rescue_orders:
+            return None
+        
+        max_exact = 8
+        n = len(rescue_orders)
+        
+        service_time_minutes = 10
+        if user_id:
+            try:
+                user_settings = self.settings_service.get_settings(user_id)
+                service_time_minutes = user_settings.service_time_minutes
+            except Exception:
+                pass
+        
+        def eval_sequence(seq: List[Order]) -> Tuple[float, float]:
+            current_location = start_location
+            current_time = start_time
+            total_delay = 0.0
+            total_distance = 0.0
+            
+            for order in seq:
+                try:
+                    distance, travel_time = self.maps_service.get_route_sync(
+                        current_location[0], current_location[1],
+                        order.latitude, order.longitude,
+                        user_id=user_id
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка маршрута для rescue-заказа {order.order_number}: {e}")
+                    return float("inf"), float("inf")
+                
+                arrival_time = current_time + timedelta(minutes=travel_time)
+                
+                if order.delivery_time_start and order.delivery_time_end:
+                    window_start = datetime.combine(order_date, order.delivery_time_start)
+                    window_end = datetime.combine(order_date, order.delivery_time_end)
+                    
+                    if arrival_time < window_start:
+                        arrival_time = window_start
+                    if arrival_time > window_end:
+                        delay = (arrival_time - window_end).total_seconds() / 60.0
+                        total_delay += delay
+                
+                total_distance += distance
+                current_location = (order.latitude, order.longitude)
+                current_time = arrival_time + timedelta(minutes=service_time_minutes)
+            
+            return total_delay, total_distance
+        
+        best_seq: Optional[List[Order]] = None
+        best_total_delay = float("inf")
+        best_distance = float("inf")
+        
+        if n <= max_exact:
+            for perm in itertools.permutations(rescue_orders):
+                total_delay, total_distance = eval_sequence(list(perm))
+                if total_delay < best_total_delay or (
+                    total_delay == best_total_delay and total_distance < best_distance
+                ):
+                    best_total_delay = total_delay
+                    best_distance = total_distance
+                    best_seq = list(perm)
+        else:
+            # Эвристика для больших подмножеств: сортировка по концу окна и локальный порядок
+            heuristic_seq = sorted(
+                rescue_orders,
+                key=lambda o: (
+                    datetime.combine(order_date, o.delivery_time_end).timestamp()
+                    if o.delivery_time_end else float("inf")
+                )
+            )
+            total_delay, total_distance = eval_sequence(heuristic_seq)
+            if total_delay < float("inf"):
+                best_seq = heuristic_seq
+                best_total_delay = total_delay
+                best_distance = total_distance
+        
+        return best_seq
+    
+    def _rescue_feasibility(
+        self,
+        route: OptimizedRoute,
+        orders: List[Order],
+        start_location: Tuple[float, float],
+        start_time: datetime,
+        user_id: Optional[int] = None
+    ) -> OptimizedRoute:
+        """
+        Фаза спасения достижимости: перестраиваем небольшой подмаршрут вокруг
+        устойчиво опаздывающих заказов, почти игнорируя километраж.
+        """
+        if not route or not route.points:
+            return route
+        
+        order_date = start_time.date()
+        total_now, count_now, _ = self._route_delay_stats(route, order_date)
+        if count_now == 0:
+            return route
+        
+        # Собираем опаздывающие заказы
+        late_points: List[Tuple[int, RoutePoint, float]] = []
+        for idx, point in enumerate(route.points):
+            o = point.order
+            if o.delivery_time_start and o.delivery_time_end:
+                we = datetime.combine(order_date, o.delivery_time_end)
+                if point.estimated_arrival > we:
+                    d = (point.estimated_arrival - we).total_seconds() / 60.0
+                    if d > 0:
+                        late_points.append((idx, point, d))
+        
+        if not late_points:
+            return route
+        
+        late_points.sort(key=lambda x: x[2], reverse=True)
+        
+        n = len(route.points)
+        max_rescue = 8
+        rescue_indices: set[int] = set()
+        
+        # Добавляем опаздывающие и соседей по маршруту
+        for idx, _, _ in late_points:
+            for offset in range(-2, 3):
+                j = idx + offset
+                if 0 <= j < n:
+                    rescue_indices.add(j)
+                if len(rescue_indices) >= max_rescue:
+                    break
+            if len(rescue_indices) >= max_rescue:
+                break
+        
+        if not rescue_indices:
+            return route
+        
+        rescue_indices_sorted = sorted(rescue_indices)
+        prefix_end = rescue_indices_sorted[0]
+        
+        prefix_points = route.points[:prefix_end]
+        rescue_orders = [route.points[i].order for i in rescue_indices_sorted]
+        tail_points = [
+            route.points[i]
+            for i in range(prefix_end, n)
+            if i not in rescue_indices
+        ]
+        
+        # Определяем старт для rescue-подмаршрута
+        if prefix_points:
+            last_prefix = prefix_points[-1]
+            sub_start_location = (last_prefix.order.latitude, last_prefix.order.longitude)
+            service_time_minutes = 10
+            if user_id:
+                try:
+                    user_settings = self.settings_service.get_settings(user_id)
+                    service_time_minutes = user_settings.service_time_minutes
+                except Exception:
+                    pass
+            sub_start_time = last_prefix.estimated_arrival + timedelta(minutes=service_time_minutes)
+        else:
+            sub_start_location = start_location
+            sub_start_time = start_time
+        
+        best_seq = self._optimize_subroute_by_time_windows(
+            rescue_orders, sub_start_location, sub_start_time, order_date, user_id
+        )
+        if not best_seq:
+            return route
+        
+        # Собираем общий порядок заказов: префикс + rescue + хвост
+        combined_orders: List[Order] = []
+        for p in prefix_points:
+            combined_orders.append(p.order)
+        combined_orders.extend(best_seq)
+        for p in tail_points:
+            combined_orders.append(p.order)
+        
+        # Оборачиваем в временные точки для пересчёта
+        dummy_points = [
+            RoutePoint(order=o, estimated_arrival=start_time, distance_from_previous=0.0, time_from_previous=0.0)
+            for o in combined_orders
+        ]
+        new_route = self._recalculate_route_times(dummy_points, orders, start_location, start_time, user_id)
+        if not new_route or not new_route.points:
+            return route
+        
+        new_total, new_count, new_critical = self._route_delay_stats(new_route, order_date)
+        if new_critical:
+            return route
+        
+        if new_count == 0 and count_now > 0:
+            logger.info(
+                f"✅ Rescue: полностью устранили опоздания ({count_now}→0, total {total_now:.0f}→0 мин)"
+            )
+            return new_route
+        
+        if new_count <= count_now and (
+            new_total < total_now or (new_total == total_now and new_count < count_now)
+        ):
+            logger.info(
+                f"✅ Rescue: улучшили опоздания count {count_now}→{new_count}, "
+                f"total {total_now:.0f}→{new_total:.0f} мин"
+            )
+            return new_route
+        
+        return route
     
     def _recalculate_route_times(
         self,
