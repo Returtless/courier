@@ -31,7 +31,7 @@ class GeneticRouteOptimizer:
     MAX_DELAY_MINUTES = 10  # Максимальное опоздание
     MANUAL_TIME_TOLERANCE = 7  # Допуск для manual_arrival_time ±7 минут
     WINDOW_END_TOLERANCE_MINUTES = 1  # Прибытие в конец окна ±1 мин считаем вовремя
-    CLUSTER_RADIUS_KM = 1.5  # Радиус кластеризации (цепочки A–B–C при 1.5 км)
+    CLUSTER_RADIUS_KM = 0.8  # Радиус кластеризации (800 м)
     GREEDY_EST_KM_PER_MIN = 0.5  # Оценка скорости для greedy (~30 км/ч), время = км / это
 
     def __init__(self, maps_service: MapsService):
@@ -172,20 +172,15 @@ class GeneticRouteOptimizer:
                     datetime.combine(order_date, seed.delivery_time_end),
                 )
             
-            # Ищем близкие заказы с пересекающимся временным окном.
-            # Расстояние до любой точки кластера (не только до сида): цепочки A–B, B–C дают один кластер.
+            # Ищем близкие заказы с пересекающимся временным окном
             i = 0
             while i < len(remaining):
                 order = remaining[i]
-                min_dist = min(
-                    self._haversine_distance(
-                        o.latitude, o.longitude,
-                        order.latitude, order.longitude
-                    )
-                    for o in cluster
-                    if o.latitude is not None and o.longitude is not None
+                distance = self._haversine_distance(
+                    seed.latitude, seed.longitude,
+                    order.latitude, order.longitude
                 )
-                if min_dist > self.CLUSTER_RADIUS_KM:
+                if distance > self.CLUSTER_RADIUS_KM:
                     i += 1
                     continue
                 # Проверка пересечения окон: в один кластер только если окна пересекаются
@@ -217,9 +212,6 @@ class GeneticRouteOptimizer:
                         min(c_start, order_start),
                         max(c_end, order_end),
                     )
-                # Перепроверяем оставшихся с начала: новый элемент мог «связать» кого-то ещё (A–B–C)
-                i = 0
-                continue
             
             clusters.append(cluster)
         
