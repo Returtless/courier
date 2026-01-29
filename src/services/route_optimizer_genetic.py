@@ -111,7 +111,9 @@ class GeneticRouteOptimizer:
         
         # Этап 1: Кластеризация и синхронизация окон
         logger.info(f"🔗 Этап 1: Кластеризация заказов (радиус {self.CLUSTER_RADIUS_KM} км)")
-        clustered_orders = self._cluster_and_synchronize_orders(orders_with_coords, start_time)
+        clustered_orders = self._cluster_and_synchronize_orders(
+            orders_with_coords, start_time, start_location
+        )
         
         # Этап 2: Генетический алгоритм
         logger.info(f"🧬 Этап 2: Генетический алгоритм ({self.POPULATION_SIZE} особей, {self.MAX_GENERATIONS} поколений)")
@@ -131,7 +133,8 @@ class GeneticRouteOptimizer:
     def _cluster_and_synchronize_orders(
         self,
         orders: List[Order],
-        start_time: datetime
+        start_time: datetime,
+        start_location: Optional[Tuple[float, float]] = None,
     ) -> List[Order]:
         """
         Кластеризация заказов по расстоянию и синхронизация временных окон внутри кластеров
@@ -139,6 +142,7 @@ class GeneticRouteOptimizer:
         Args:
             orders: Список заказов
             start_time: Время старта (для определения даты)
+            start_location: Точка старта (lat, lon) для сортировки по удалённости
             
         Returns:
             Список заказов с синхронизированными окнами
@@ -228,18 +232,24 @@ class GeneticRouteOptimizer:
                 single_cluster_count += 1
         
         # Важно: заказы из одиночных кластеров (дальние) не должны автоматически оказываться в хвосте.
-        # Сортируем весь список по концу окна (и ширине), чтобы порядок индексов для ГА не зависел
-        # от порядка обхода кластеров — ранние дедлайны получают меньшие индексы.
+        # Сортируем по: конец окна → уже окно раньше → при одинаковом окне — дальние от старта раньше,
+        # чтобы «трудные» 10–13 заказы получали меньшие индексы и не оказывались в конце маршрута.
         def _order_window_key(o: Order):
             if not o.delivery_time_end:
-                return (float("inf"), 0)
+                return (float("inf"), 0, 0)
             end_ts = datetime.combine(order_date, o.delivery_time_end).timestamp()
             if not o.delivery_time_start:
-                return (end_ts, 0)
-            start_dt = datetime.combine(order_date, o.delivery_time_start)
-            end_dt = datetime.combine(order_date, o.delivery_time_end)
-            duration_min = (end_dt - start_dt).total_seconds() / 60.0
-            return (end_ts, -duration_min)
+                duration_min = 0
+            else:
+                start_dt = datetime.combine(order_date, o.delivery_time_start)
+                end_dt = datetime.combine(order_date, o.delivery_time_end)
+                duration_min = (end_dt - start_dt).total_seconds() / 60.0
+            dist = 0.0
+            if start_location and o.latitude is not None and o.longitude is not None:
+                dist = self._haversine_distance(
+                    start_location[0], start_location[1], o.latitude, o.longitude
+                )
+            return (end_ts, -duration_min, -dist)
         
         synchronized_orders.sort(key=_order_window_key)
         if single_cluster_count > 0:
