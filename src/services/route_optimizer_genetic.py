@@ -33,6 +33,7 @@ class GeneticRouteOptimizer:
     WINDOW_END_TOLERANCE_MINUTES = 1  # Прибытие в конец окна ±1 мин считаем вовремя
     CLUSTER_RADIUS_KM = 0.8  # Радиус кластеризации (800 м)
     GREEDY_EST_KM_PER_MIN = 0.5  # Оценка скорости для greedy (~30 км/ч), время = км / это
+    EARLY_WINDOW_END_THRESHOLD = time(13, 0)  # Окна до этого времени «ранние», их не ставим после поздних
 
     def __init__(self, maps_service: MapsService):
         self.maps_service = maps_service
@@ -974,12 +975,14 @@ class GeneticRouteOptimizer:
     ) -> None:
         """
         Исправляем порядок по концу окна: заказ с более ранним концом окна
-        не должен стоять после заказа с более поздним (не «10–13 после 12–15/13–16»).
+        не должен стоять после заказа с более поздним, только если «ранний» —
+        конец окна не позже EARLY_WINDOW_END_THRESHOLD (10–13 защищаем; 12–15 и 13–16 можно в любом порядке).
         Повторяем проходы по соседним парам до отсутствия нарушений. Меняет chromosome in-place.
         """
         if len(chromosome) < 2:
             return
         order_date = start_time.date()
+        threshold_dt = datetime.combine(order_date, self.EARLY_WINDOW_END_THRESHOLD)
         n = len(chromosome)
         total_swaps = 0
         while True:
@@ -991,7 +994,7 @@ class GeneticRouteOptimizer:
                     continue
                 we_i = datetime.combine(order_date, o_i.delivery_time_end)
                 we_j = datetime.combine(order_date, o_j.delivery_time_end)
-                if we_i > we_j:
+                if we_i > we_j and we_j <= threshold_dt:
                     chromosome[i], chromosome[i + 1] = chromosome[i + 1], chromosome[i]
                     swapped = True
                     total_swaps += 1
@@ -1401,14 +1404,13 @@ class GeneticRouteOptimizer:
         # Фаза спасения достижимости: если всё ещё есть опоздания, пытаемся
         # перестроить небольшой подмаршрут вокруг проблемных заказов
         rescued_route = self._rescue_feasibility(route_after_fix, orders, start_location, start_time, user_id)
+        result = route_after_fix
         if rescued_route and rescued_route.points:
-            # После спасения можно слегка подправить хвост тем же локальным поиском
             final_fixed = self._fix_delays_in_route(rescued_route, orders, start_location, start_time, user_id)
-            if final_fixed and final_fixed.points:
-                return final_fixed
-            return rescued_route
-        
-        return route_after_fix
+            result = final_fixed if (final_fixed and final_fixed.points) else rescued_route
+        # Полировка по расстоянию: обмен соседних заказов с одинаковым концом окна, если маршрут короче
+        polished = self._polish_route_by_distance(result, orders, start_location, start_time, user_id)
+        return polished if polished and polished.points else result
 
     def _tail_indices(self, n: int, K: int) -> List[int]:
         """Индексы последних K точек: [n-K, ..., n-1]."""
@@ -1660,6 +1662,63 @@ class GeneticRouteOptimizer:
             if d > self.MAX_DELAY_MINUTES:
                 has_critical = True
         return (total, count, has_critical)
+    
+    def _polish_route_by_distance(
+        self,
+        route: OptimizedRoute,
+        orders: List[Order],
+        start_location: Tuple[float, float],
+        start_time: datetime,
+        user_id: Optional[int] = None,
+    ) -> Optional[OptimizedRoute]:
+        """
+        Полировка по расстоянию: для соседних заказов с одинаковым концом окна
+        пробуем обмен — если общая длина маршрута уменьшается и опозданий нет, принимаем.
+        (Порядок 3320572 → 3319085 → 3319655 может стать 3320572 → 3319655 → 3319085, если так короче.)
+        """
+        if not route or len(route.points) < 2:
+            return route
+        order_date = start_time.date()
+        tol = timedelta(minutes=self.WINDOW_END_TOLERANCE_MINUTES)
+        points_list = list(route.points)
+        improved = True
+        while improved:
+            improved = False
+            current = self._recalculate_route_times(
+                points_list, orders, start_location, start_time, user_id
+            )
+            if not current:
+                break
+            total_delay, count_delay, has_critical = self._route_delay_stats(current, order_date)
+            if count_delay > 0 or has_critical:
+                break
+            dist_now = current.total_distance
+            for i in range(len(points_list) - 1):
+                p_i, p_j = points_list[i], points_list[i + 1]
+                o_i, o_j = p_i.order, p_j.order
+                if not (o_i.delivery_time_end and o_j.delivery_time_end):
+                    continue
+                we_i = datetime.combine(order_date, o_i.delivery_time_end)
+                we_j = datetime.combine(order_date, o_j.delivery_time_end)
+                if we_i != we_j:
+                    continue
+                swapped = list(points_list)
+                swapped[i], swapped[i + 1] = swapped[i + 1], swapped[i]
+                trial = self._recalculate_route_times(
+                    swapped, orders, start_location, start_time, user_id
+                )
+                if not trial or trial.total_distance >= dist_now:
+                    continue
+                t_total, t_count, t_critical = self._route_delay_stats(trial, order_date)
+                if t_count > 0 or t_critical:
+                    continue
+                points_list = swapped
+                improved = True
+                break
+        result = self._recalculate_route_times(
+            points_list, orders, start_location, start_time, user_id
+        )
+        return result if result else route
     
     def _fix_delays_in_route(
         self,
