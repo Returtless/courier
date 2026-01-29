@@ -734,7 +734,7 @@ class RouteHandlers:
 
                     if estimated_arrival < window_start:
                         arrival_status = f" ⚠️ Раньше окна"
-                    elif estimated_arrival > window_end:
+                    elif estimated_arrival > window_end + timedelta(minutes=1):
                         arrival_status = f" 🚨 Позже окна"
                     else:
                         arrival_status = f" ✅"

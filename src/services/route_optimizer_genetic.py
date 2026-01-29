@@ -30,6 +30,7 @@ class GeneticRouteOptimizer:
     ELITISM_COUNT = 10  # Увеличено для сохранения лучших решений
     MAX_DELAY_MINUTES = 10  # Максимальное опоздание
     MANUAL_TIME_TOLERANCE = 7  # Допуск для manual_arrival_time ±7 минут
+    WINDOW_END_TOLERANCE_MINUTES = 1  # Прибытие в конец окна ±1 мин считаем вовремя
     CLUSTER_RADIUS_KM = 1.0  # Радиус кластеризации
     GREEDY_EST_KM_PER_MIN = 0.5  # Оценка скорости для greedy (~30 км/ч), время = км / это
 
@@ -465,7 +466,10 @@ class GeneticRouteOptimizer:
                 # Мутация
                 if random.random() < self.MUTATION_RATE:
                     child = self._mutate(child, orders, start_time)
-                
+
+                # Ремонт порядка по концу окна: не допускаем «10–13 после 12–15/13–16»
+                self._repair_window_order(child, orders, start_time)
+
                 # Проверка валидности
                 if self._is_valid_chromosome(child, num_orders):
                     new_population.append(child)
@@ -526,14 +530,35 @@ class GeneticRouteOptimizer:
         num_orders = len(orders)
         population = []
         
-        # Стратегия 1: Случайные перестановки (50%) - основная стратегия
-        for _ in range(self.POPULATION_SIZE // 2):
+        # Стратегия 1: Случайные перестановки (меньше доля — чтобы не плодить «10–13 после 12–15»)
+        for _ in range(self.POPULATION_SIZE // 4):
             chromosome = list(range(num_orders))
             random.shuffle(chromosome)
             population.append(chromosome)
-        
-        # Стратегия 2: Сортировка по началу временного окна (25%)
+
+        # Стратегия 1b: Группа по концу окна — внутри группы случайный порядок (10–13 всегда перед 12–15/13–16)
+        order_date = start_time.date()
+        def _window_end_key(i):
+            o = orders[i]
+            if not o.delivery_time_end:
+                return (float('inf'), 0)
+            return (datetime.combine(order_date, o.delivery_time_end).timestamp(), i)
+        indices_by_end: Dict[float, List[int]] = {}
+        for i in range(num_orders):
+            k = _window_end_key(i)[0]
+            if k not in indices_by_end:
+                indices_by_end[k] = []
+            indices_by_end[k].append(i)
         for _ in range(self.POPULATION_SIZE // 4):
+            chromosome = []
+            for end_ts in sorted(indices_by_end.keys()):
+                group = indices_by_end[end_ts].copy()
+                random.shuffle(group)
+                chromosome.extend(group)
+            population.append(chromosome)
+
+        # Стратегия 2: Сортировка по началу временного окна
+        for _ in range(self.POPULATION_SIZE // 8):
             order_date = start_time.date()
             sorted_indices = sorted(
                 range(num_orders),
@@ -622,11 +647,27 @@ class GeneticRouteOptimizer:
         order_date = current_time.date()
         
         while remaining:
+            # Сначала обслуживаем заказы с самым ранним концом окна — никогда не ставим 10–13 после 12–15/13–16
+            min_window_end_ts = float('inf')
+            for idx in remaining:
+                o = orders[idx]
+                if o.delivery_time_end:
+                    ts = datetime.combine(order_date, o.delivery_time_end).timestamp()
+                    if ts < min_window_end_ts:
+                        min_window_end_ts = ts
+            candidates = [
+                idx for idx in remaining
+                if not orders[idx].delivery_time_end
+                or datetime.combine(order_date, orders[idx].delivery_time_end).timestamp() <= min_window_end_ts
+            ]
+            if not candidates:
+                candidates = list(remaining)
+
             best_idx = None
             best_score = (float('inf'), float('inf'))
             best_distance = 0.0
-            
-            for idx in remaining:
+
+            for idx in candidates:
                 order = orders[idx]
                 distance = self._haversine_distance(
                     current_location[0], current_location[1],
@@ -634,25 +675,24 @@ class GeneticRouteOptimizer:
                 )
                 travel_est_min = distance / self.GREEDY_EST_KM_PER_MIN
                 arrival_est = current_time + timedelta(minutes=travel_est_min)
-                
-                # Штраф: если при поезде «сейчас» приедем после конца окна — сильно понижаем приоритет
+
                 late_penalty = 0.0
                 if order.delivery_time_end:
                     window_end = datetime.combine(order_date, order.delivery_time_end)
                     if arrival_est > window_end:
                         late_penalty = 1e6
-                
+
                 end_ts = (
                     datetime.combine(order_date, order.delivery_time_end).timestamp()
                     if order.delivery_time_end else float('inf')
                 )
                 score = (late_penalty + distance, end_ts)
-                
+
                 if score < best_score:
                     best_score = score
                     best_idx = idx
                     best_distance = distance
-            
+
             if best_idx is not None:
                 order = orders[best_idx]
                 chromosome.append(best_idx)
@@ -823,6 +863,36 @@ class GeneticRouteOptimizer:
         winner_idx = tournament_indices[min(range(len(tournament_fitness)), key=lambda i: tournament_fitness[i])]
         return population[winner_idx].copy()
     
+    def _repair_window_order(
+        self,
+        chromosome: List[int],
+        orders: List[Order],
+        start_time: datetime
+    ) -> None:
+        """
+        Исправляем порядок по концу окна: заказ с более ранним концом окна
+        не должен стоять после заказа с более поздним (не «10–13 после 12–15/13–16»).
+        Повторяем проходы по соседним парам до отсутствия нарушений. Меняет chromosome in-place.
+        """
+        if len(chromosome) < 2:
+            return
+        order_date = start_time.date()
+        n = len(chromosome)
+        while True:
+            swapped = False
+            for i in range(n - 1):
+                o_i = orders[chromosome[i]]
+                o_j = orders[chromosome[i + 1]]
+                if not o_i.delivery_time_end or not o_j.delivery_time_end:
+                    continue
+                we_i = datetime.combine(order_date, o_i.delivery_time_end)
+                we_j = datetime.combine(order_date, o_j.delivery_time_end)
+                if we_i > we_j:
+                    chromosome[i], chromosome[i + 1] = chromosome[i + 1], chromosome[i]
+                    swapped = True
+            if not swapped:
+                break
+
     def _order_crossover(
         self,
         parent1: List[int],
@@ -1187,14 +1257,15 @@ class GeneticRouteOptimizer:
         if count_now == 0:
             return (None, False)
 
+        tol = timedelta(minutes=self.WINDOW_END_TOLERANCE_MINUTES)
         delayed: List[Tuple[int, RoutePoint, float]] = []
         for idx, point in enumerate(route.points):
             o = point.order
             if o.delivery_time_start and o.delivery_time_end:
                 we = datetime.combine(order_date, o.delivery_time_end)
-                if point.estimated_arrival > we:
+                if point.estimated_arrival > we + tol:
                     d = (point.estimated_arrival - we).total_seconds() / 60.0
-                    if d > 0:
+                    if d > self.WINDOW_END_TOLERANCE_MINUTES:
                         delayed.append((idx, point, d))
         delayed.sort(key=lambda x: x[2], reverse=True)
 
@@ -1217,13 +1288,67 @@ class GeneticRouteOptimizer:
                         continue
                     if p.order.delivery_time_start and p.order.delivery_time_end:
                         we = datetime.combine(order_date, p.order.delivery_time_end)
-                        if p.estimated_arrival > we:
+                        if p.estimated_arrival > we + tol:
                             moved_on_time = False
                             break
                     break
                 if not moved_on_time:
                     continue
                 return (base, True)
+        return (None, False)
+
+    def _try_swap_with_later_window(
+        self,
+        points_list: List[RoutePoint],
+        orders: List[Order],
+        start_location: Tuple[float, float],
+        start_time: datetime,
+        user_id: Optional[int],
+        order_date,
+        total_now: float,
+        count_now: int,
+    ) -> Tuple[Optional[List[RoutePoint]], bool]:
+        """
+        Обмен опаздывающего заказа (узкое/раннее окно) с более ранним заказом,
+        у которого окно заканчивается позже — чтобы узкое окно попало в ранний слот.
+        """
+        route = self._recalculate_route_times(points_list, orders, start_location, start_time, user_id)
+        if not route:
+            return (None, False)
+        delayed: List[Tuple[int, RoutePoint, float]] = []
+        tol = timedelta(minutes=self.WINDOW_END_TOLERANCE_MINUTES)
+        for idx, point in enumerate(route.points):
+            o = point.order
+            if o.delivery_time_start and o.delivery_time_end:
+                we = datetime.combine(order_date, o.delivery_time_end)
+                if point.estimated_arrival > we + tol:
+                    d = (point.estimated_arrival - we).total_seconds() / 60.0
+                    if d > self.WINDOW_END_TOLERANCE_MINUTES:
+                        delayed.append((idx, point, d))
+        if not delayed:
+            return (None, False)
+        n = len(points_list)
+        delayed.sort(key=lambda x: x[2], reverse=True)
+        for idx, delayed_point, _ in delayed:
+            o_late = delayed_point.order
+            we_late = datetime.combine(order_date, o_late.delivery_time_end) if o_late.delivery_time_end else None
+            if we_late is None:
+                continue
+            for k in range(0, idx):
+                o_early = points_list[k].order
+                we_early = datetime.combine(order_date, o_early.delivery_time_end) if o_early.delivery_time_end else None
+                if we_early is None or we_early <= we_late:
+                    continue
+                swap_points = list(points_list)
+                swap_points[idx], swap_points[k] = swap_points[k], swap_points[idx]
+                trial = self._recalculate_route_times(swap_points, orders, start_location, start_time, user_id)
+                if not trial:
+                    continue
+                t_total, t_count, t_critical = self._route_delay_stats(trial, order_date)
+                if t_critical or t_count > count_now:
+                    continue
+                if t_total < total_now or (t_total == total_now and t_count < count_now):
+                    return (swap_points, True)
         return (None, False)
 
     def _try_tail_permutation(
@@ -1242,7 +1367,7 @@ class GeneticRouteOptimizer:
         при улучшении, (None, False) иначе.
         """
         n = len(points_list)
-        K = min(5, n)
+        K = min(6, n)
         tail_idx = self._tail_indices(n, K)
         prefix = [points_list[i] for i in range(n - K)]
         best_points = None
@@ -1336,16 +1461,18 @@ class GeneticRouteOptimizer:
     ) -> Tuple[float, int, bool]:
         """
         (total_delay_min, count_delayed, has_critical) по маршруту.
+        Прибытие в конец окна в пределах WINDOW_END_TOLERANCE_MINUTES считаем вовремя.
         """
         total = 0.0
         count = 0
         has_critical = False
+        tol = timedelta(minutes=self.WINDOW_END_TOLERANCE_MINUTES)
         for p in route.points:
             o = p.order
             if not (o.delivery_time_start and o.delivery_time_end):
                 continue
             we = datetime.combine(order_date, o.delivery_time_end)
-            if p.estimated_arrival <= we:
+            if p.estimated_arrival <= we + tol:
                 continue
             d = (p.estimated_arrival - we).total_seconds() / 60.0
             total += d
@@ -1385,13 +1512,14 @@ class GeneticRouteOptimizer:
                 return current_route
 
             delayed_points: List[Tuple[int, RoutePoint, float]] = []
+            tol = timedelta(minutes=self.WINDOW_END_TOLERANCE_MINUTES)
             for idx, point in enumerate(current_route.points):
                 o = point.order
                 if o.delivery_time_start and o.delivery_time_end:
                     we = datetime.combine(order_date, o.delivery_time_end)
-                    if point.estimated_arrival > we:
+                    if point.estimated_arrival > we + tol:
                         d = (point.estimated_arrival - we).total_seconds() / 60.0
-                        if d > 0:
+                        if d > self.WINDOW_END_TOLERANCE_MINUTES:
                             delayed_points.append((idx, point, d))
 
             improved = False
@@ -1402,6 +1530,16 @@ class GeneticRouteOptimizer:
             if efp_ok and efp_points is not None:
                 logger.info("✅ EFP: перенесли опаздывающего в раннюю feasible-позицию")
                 points_list = efp_points
+                moves_done += 1
+                improved = True
+                continue
+
+            swap_points, swap_ok = self._try_swap_with_later_window(
+                points_list, orders, start_location, start_time, user_id, order_date, total_now, count_now
+            )
+            if swap_ok and swap_points is not None:
+                logger.info("✅ Swap: обмен опаздывающего с заказом с более поздним окном")
+                points_list = swap_points
                 moves_done += 1
                 improved = True
                 continue
