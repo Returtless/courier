@@ -244,7 +244,8 @@ class GeneticRouteOptimizer:
         
         clusters = sorted(clusters, key=_cluster_key)
         for idx, cluster in enumerate(clusters, 1):
-            logger.info(f"   Кластер {idx}: {len(cluster)} заказов")
+            nums = ", ".join(o.order_number or "?" for o in cluster)
+            logger.info(f"   Кластер {idx} ({len(cluster)} заказов): №{nums}")
         
         # Синхронизация окон внутри кластеров
         synchronized_orders = []
@@ -1002,7 +1003,7 @@ class GeneticRouteOptimizer:
             if not swapped:
                 break
         if total_swaps > 0:
-            logger.info("   🔧 Ремонт порядка по окнам: выполнено %d обменов", total_swaps)
+            logger.debug("   🔧 Ремонт порядка по окнам: выполнено %d обменов", total_swaps)
 
     def _order_crossover(
         self,
