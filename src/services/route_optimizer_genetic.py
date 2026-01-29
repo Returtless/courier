@@ -216,6 +216,33 @@ class GeneticRouteOptimizer:
             clusters.append(cluster)
         
         logger.info(f"   📊 Создано {len(clusters)} кластеров")
+        
+        # Порядок кластеров влияет на последующую оптимизацию (объединение и сортировка).
+        # Сортируем кластеры по: ранний дедлайн → уже окно → дальние от старта первыми.
+        def _cluster_key(cl: List[Order]):
+            end_ts = float("inf")
+            min_duration = float("inf")
+            max_dist = 0.0
+            for o in cl:
+                if o.delivery_time_end:
+                    et = datetime.combine(order_date, o.delivery_time_end).timestamp()
+                    end_ts = min(end_ts, et)
+                if o.delivery_time_start and o.delivery_time_end:
+                    sd = datetime.combine(order_date, o.delivery_time_start)
+                    ed = datetime.combine(order_date, o.delivery_time_end)
+                    min_duration = min(
+                        min_duration,
+                        (ed - sd).total_seconds() / 60.0,
+                    )
+                if start_location and o.latitude is not None and o.longitude is not None:
+                    d = self._haversine_distance(
+                        start_location[0], start_location[1], o.latitude, o.longitude
+                    )
+                    max_dist = max(max_dist, d)
+            dur = -min_duration if min_duration != float("inf") else 0
+            return (end_ts, dur, -max_dist)
+        
+        clusters = sorted(clusters, key=_cluster_key)
         for idx, cluster in enumerate(clusters, 1):
             logger.info(f"   Кластер {idx}: {len(cluster)} заказов")
         
@@ -236,7 +263,7 @@ class GeneticRouteOptimizer:
         # чтобы «трудные» 10–13 заказы получали меньшие индексы и не оказывались в конце маршрута.
         def _order_window_key(o: Order):
             if not o.delivery_time_end:
-                return (float("inf"), 0, 0)
+                return (float("inf"), 0, 0, getattr(o, "order_number", "") or "")
             end_ts = datetime.combine(order_date, o.delivery_time_end).timestamp()
             if not o.delivery_time_start:
                 duration_min = 0
@@ -249,7 +276,7 @@ class GeneticRouteOptimizer:
                 dist = self._haversine_distance(
                     start_location[0], start_location[1], o.latitude, o.longitude
                 )
-            return (end_ts, -duration_min, -dist)
+            return (end_ts, -duration_min, -dist, getattr(o, "order_number", "") or "")
         
         synchronized_orders.sort(key=_order_window_key)
         if single_cluster_count > 0:
