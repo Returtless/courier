@@ -620,8 +620,12 @@ class GeneticRouteOptimizer:
                     order.latitude, order.longitude
                 )
                 
-                # Базовый score = расстояние (все окна равны, без приоритета по времени)
-                score = distance
+                # Приоритет: расстояние; при равных — раньше конец окна
+                end_ts = (
+                    datetime.combine(order_date, order.delivery_time_end).timestamp()
+                    if order.delivery_time_end else float('inf')
+                )
+                score = (distance, end_ts)
                 
                 if score < best_score:
                     best_score = score
