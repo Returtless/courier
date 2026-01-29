@@ -2,6 +2,7 @@
 Генетический алгоритм оптимизации маршрутов
 Использует эволюционный подход для построения оптимальных маршрутов с учетом временных окон
 """
+import itertools
 import logging
 import random
 from typing import List, Tuple, Optional, Dict
@@ -1097,6 +1098,175 @@ class GeneticRouteOptimizer:
         
         return route
 
+    def _tail_indices(self, n: int, K: int) -> List[int]:
+        """Индексы последних K точек: [n-K, ..., n-1]."""
+        K = min(K, n)
+        return list(range(n - K, n))
+
+    def _try_efp_for_delayed(
+        self,
+        points_list: List[RoutePoint],
+        orders: List[Order],
+        start_location: Tuple[float, float],
+        start_time: datetime,
+        user_id: Optional[int],
+        order_date,
+    ) -> Tuple[Optional[List[RoutePoint]], bool]:
+        """
+        Earliest feasible position: для каждого опаздывающего ищем самую раннюю
+        позицию k, куда можно перенести заказ без новых критических опозданий
+        и без увеличения числа опаздывающих. Применяем первый найденный ход.
+        Возвращает (updated_points_list, True) при успехе, (None, False) иначе.
+        """
+        route = self._recalculate_route_times(points_list, orders, start_location, start_time, user_id)
+        if not route:
+            return (None, False)
+        total_now, count_now, _ = self._route_delay_stats(route, order_date)
+        if count_now == 0:
+            return (None, False)
+
+        delayed: List[Tuple[int, RoutePoint, float]] = []
+        for idx, point in enumerate(route.points):
+            o = point.order
+            if o.delivery_time_start and o.delivery_time_end:
+                we = datetime.combine(order_date, o.delivery_time_end)
+                if point.estimated_arrival > we:
+                    d = (point.estimated_arrival - we).total_seconds() / 60.0
+                    if d > 0:
+                        delayed.append((idx, point, d))
+        delayed.sort(key=lambda x: x[2], reverse=True)
+
+        n = len(points_list)
+        for idx, delayed_point, _ in delayed:
+            for k in range(0, idx):
+                base = list(points_list)
+                removed = base.pop(idx)
+                base.insert(k, removed)
+                trial = self._recalculate_route_times(base, orders, start_location, start_time, user_id)
+                if not trial:
+                    continue
+                t_total, t_count, t_critical = self._route_delay_stats(trial, order_date)
+                if t_critical or t_count > count_now:
+                    continue
+                moved_order_num = delayed_point.order.order_number
+                moved_on_time = True
+                for p in trial.points:
+                    if p.order.order_number != moved_order_num:
+                        continue
+                    if p.order.delivery_time_start and p.order.delivery_time_end:
+                        we = datetime.combine(order_date, p.order.delivery_time_end)
+                        if p.estimated_arrival > we:
+                            moved_on_time = False
+                            break
+                    break
+                if not moved_on_time:
+                    continue
+                return (base, True)
+        return (None, False)
+
+    def _try_tail_permutation(
+        self,
+        points_list: List[RoutePoint],
+        orders: List[Order],
+        start_location: Tuple[float, float],
+        start_time: datetime,
+        user_id: Optional[int],
+        order_date,
+        total_now: float,
+        count_now: int,
+    ) -> Tuple[Optional[List[RoutePoint]], bool]:
+        """
+        Перебор перестановок последних K точек. Возвращает (best_candidate, True)
+        при улучшении, (None, False) иначе.
+        """
+        n = len(points_list)
+        K = min(5, n)
+        tail_idx = self._tail_indices(n, K)
+        prefix = [points_list[i] for i in range(n - K)]
+        best_points = None
+        best_total = total_now
+        best_count = count_now
+
+        for perm in itertools.permutations(tail_idx):
+            candidate = prefix + [points_list[i] for i in perm]
+            trial = self._recalculate_route_times(candidate, orders, start_location, start_time, user_id)
+            if not trial:
+                continue
+            t_total, t_count, t_critical = self._route_delay_stats(trial, order_date)
+            if t_critical or t_count > count_now:
+                continue
+            if (t_total, -t_count) < (best_total, -best_count):
+                best_total = t_total
+                best_count = t_count
+                best_points = candidate
+
+        if best_points is None or not (best_total < total_now or (best_total == total_now and best_count < count_now)):
+            return (None, False)
+        return (best_points, True)
+
+    def _try_block_move(
+        self,
+        points_list: List[RoutePoint],
+        orders: List[Order],
+        start_location: Tuple[float, float],
+        start_time: datetime,
+        user_id: Optional[int],
+        order_date,
+        total_now: float,
+        count_now: int,
+        delayed_points: List[Tuple[int, RoutePoint, float]],
+    ) -> Tuple[Optional[List[RoutePoint]], bool]:
+        """
+        Блочные ходы: перенос блоков 2–3 подряд идущих заказов (включая опаздывающего)
+        в более раннюю позицию. Возвращает (best_candidate, True) при улучшении.
+        """
+        n = len(points_list)
+        best_points = None
+        best_total = total_now
+        best_count = count_now
+        delayed_idx = {idx for idx, _, _ in delayed_points}
+
+        def blocks_for(idx: int):
+            out = []
+            for start, end in [
+                (idx - 1, idx),
+                (idx, idx + 1),
+                (idx - 2, idx),
+                (idx - 1, idx + 1),
+                (idx, idx + 2),
+            ]:
+                if start < 0 or end >= n or end <= start:
+                    continue
+                block = list(range(start, end + 1))
+                if any(i in delayed_idx for i in block):
+                    out.append(block)
+            return out
+
+        for idx, _, _ in delayed_points:
+            for block in blocks_for(idx):
+                insert_max = min(block)
+                for pos in range(0, insert_max):
+                    base = list(points_list)
+                    removed = [base[i] for i in block]
+                    for i in sorted(block, reverse=True):
+                        base.pop(i)
+                    for i, pt in enumerate(removed):
+                        base.insert(pos + i, pt)
+                    trial = self._recalculate_route_times(base, orders, start_location, start_time, user_id)
+                    if not trial:
+                        continue
+                    t_total, t_count, t_critical = self._route_delay_stats(trial, order_date)
+                    if t_critical or t_count > count_now:
+                        continue
+                    if (t_total, -t_count) < (best_total, -best_count):
+                        best_total = t_total
+                        best_count = t_count
+                        best_points = base
+
+        if best_points is None or not (best_total < total_now or (best_total == total_now and best_count < count_now)):
+            return (None, False)
+        return (best_points, True)
+
     def _route_delay_stats(
         self,
         route: OptimizedRoute,
@@ -1131,13 +1301,13 @@ class GeneticRouteOptimizer:
         user_id: int = None
     ) -> Optional[OptimizedRoute]:
         """
-        Постобработка маршрута: исправление опозданий путём перемещения/обмена заказов.
-        Принимаем ход, если уменьшается суммарное опоздание (total delay) и нет новых
-        критических опозданий у других заказов.
+        Постобработка: EFP → tail permutation → move/swap → block move.
+        Принимаем ход только при улучшении (total_delay, count_delayed) и без новых
+        критических опозданий / роста числа опаздывающих.
         """
         if not route or not route.points:
             return None
-        
+
         order_date = start_time.date()
         points_list = list(route.points)
         moves_done = 0
@@ -1162,6 +1332,35 @@ class GeneticRouteOptimizer:
                         if d > 0:
                             delayed_points.append((idx, point, d))
 
+            improved = False
+
+            efp_points, efp_ok = self._try_efp_for_delayed(
+                points_list, orders, start_location, start_time, user_id, order_date
+            )
+            if efp_ok and efp_points is not None:
+                logger.info("✅ EFP: перенесли опаздывающего в раннюю feasible-позицию")
+                points_list = efp_points
+                moves_done += 1
+                improved = True
+                continue
+
+            tail_points, tail_ok = self._try_tail_permutation(
+                points_list, orders, start_location, start_time, user_id, order_date, total_now, count_now
+            )
+            if tail_ok and tail_points is not None:
+                t_total, t_count, _ = self._route_delay_stats(
+                    self._recalculate_route_times(tail_points, orders, start_location, start_time, user_id),
+                    order_date,
+                )
+                logger.info(
+                    f"✅ Tail permutation: total delay {total_now:.0f}→{t_total:.0f} мин, "
+                    f"опозданий {count_now}→{t_count}"
+                )
+                points_list = tail_points
+                moves_done += 1
+                improved = True
+                continue
+
             best_points = None
             best_total = total_now
             best_count = count_now
@@ -1169,14 +1368,14 @@ class GeneticRouteOptimizer:
 
             for idx, delayed_point, _ in delayed_points:
                 candidates = [p for p in range(n) if p != idx]
-
                 for new_pos in candidates:
                     base_points = list(points_list)
                     removed = base_points.pop(idx)
                     new_pos_adj = new_pos - 1 if new_pos > idx else new_pos
                     base_points.insert(new_pos_adj, removed)
-
-                    trial_route = self._recalculate_route_times(base_points, orders, start_location, start_time, user_id)
+                    trial_route = self._recalculate_route_times(
+                        base_points, orders, start_location, start_time, user_id
+                    )
                     if not trial_route:
                         continue
                     t_total, t_count, t_critical = self._route_delay_stats(trial_route, order_date)
@@ -1190,7 +1389,9 @@ class GeneticRouteOptimizer:
                     if new_pos < idx:
                         swap_points = list(points_list)
                         swap_points[idx], swap_points[new_pos] = swap_points[new_pos], swap_points[idx]
-                        swap_route = self._recalculate_route_times(swap_points, orders, start_location, start_time, user_id)
+                        swap_route = self._recalculate_route_times(
+                            swap_points, orders, start_location, start_time, user_id
+                        )
                         if not swap_route:
                             continue
                         s_total, s_count, s_critical = self._route_delay_stats(swap_route, order_date)
@@ -1201,15 +1402,36 @@ class GeneticRouteOptimizer:
                             best_count = s_count
                             best_points = swap_points
 
-            if best_points is None or not (best_total < total_now or (best_total == total_now and best_count < count_now)):
-                break
+            if best_points is not None and (best_total < total_now or (best_total == total_now and best_count < count_now)):
+                logger.info(
+                    f"✅ Move/swap: total delay {total_now:.0f}→{best_total:.0f} мин, "
+                    f"опозданий {count_now}→{best_count}"
+                )
+                points_list = best_points
+                moves_done += 1
+                improved = True
+                continue
 
-            logger.info(
-                f"✅ Локально улучшили: total delay {total_now:.0f}→{best_total:.0f} мин, "
-                f"опозданий {count_now}→{best_count}"
+            block_points, block_ok = self._try_block_move(
+                points_list, orders, start_location, start_time, user_id, order_date,
+                total_now, count_now, delayed_points,
             )
-            points_list = best_points
-            moves_done += 1
+            if block_ok and block_points is not None:
+                b_total, b_count, _ = self._route_delay_stats(
+                    self._recalculate_route_times(block_points, orders, start_location, start_time, user_id),
+                    order_date,
+                )
+                logger.info(
+                    f"✅ Block move: total delay {total_now:.0f}→{b_total:.0f} мин, "
+                    f"опозданий {count_now}→{b_count}"
+                )
+                points_list = block_points
+                moves_done += 1
+                improved = True
+                continue
+
+            if not improved:
+                break
 
         final_route = self._recalculate_route_times(points_list, orders, start_location, start_time, user_id)
         return final_route if final_route else route
