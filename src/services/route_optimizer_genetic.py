@@ -504,7 +504,10 @@ class GeneticRouteOptimizer:
                 break
         
         logger.info(f"   ✅ Генетический алгоритм завершен: поколение {generation}, лучший фитнес = {best_fitness:.2f}")
-        
+
+        # Гарантированно применяем ремонт порядка по окнам к лучшей хромосоме перед построением маршрута
+        self._repair_window_order(best_chromosome, orders, start_time)
+
         # Построение финального маршрута
         return self._build_route_from_chromosome(best_chromosome, orders, start_location, start_time, user_id)
     
@@ -605,7 +608,12 @@ class GeneticRouteOptimizer:
         for _ in range(remaining_count):
             chromosome = self._greedy_nearest_neighbor(orders, start_location, start_time, user_id)
             population.append(chromosome)
-        
+
+        # Ремонт порядка по концу окна для всей начальной популяции (чтобы не было 10–13 после 12–15/13–16)
+        for chromosome in population:
+            self._repair_window_order(chromosome, orders, start_time)
+        logger.info(f"   📋 Начальная популяция: применён ремонт порядка по окнам ко всем {len(population)} хромосомам")
+
         return population
     
     def _greedy_nearest_neighbor(
@@ -878,6 +886,7 @@ class GeneticRouteOptimizer:
             return
         order_date = start_time.date()
         n = len(chromosome)
+        total_swaps = 0
         while True:
             swapped = False
             for i in range(n - 1):
@@ -890,8 +899,16 @@ class GeneticRouteOptimizer:
                 if we_i > we_j:
                     chromosome[i], chromosome[i + 1] = chromosome[i + 1], chromosome[i]
                     swapped = True
+                    total_swaps += 1
+                    logger.debug(
+                        "   🔧 Repair swap: №%s (окно до %s) ↔ №%s (окно до %s)",
+                        o_i.order_number, o_i.delivery_time_end,
+                        o_j.order_number, o_j.delivery_time_end,
+                    )
             if not swapped:
                 break
+        if total_swaps > 0:
+            logger.info("   🔧 Ремонт порядка по окнам: выполнено %d обменов", total_swaps)
 
     def _order_crossover(
         self,
@@ -1084,7 +1101,40 @@ class GeneticRouteOptimizer:
         """
         if not chromosome:
             return OptimizedRoute(points=[], total_distance=0, total_time=0, estimated_completion=start_time)
-        
+
+        # Лог порядка хромосомы по номерам заказов и концам окон (для отладки «10–13 после 12–15/13–16»)
+        order_date = start_time.date()
+        route_order_debug = []
+        for pos, order_idx in enumerate(chromosome):
+            if order_idx < len(orders):
+                o = orders[order_idx]
+                we_str = o.delivery_time_end.strftime("%H:%M") if o.delivery_time_end else "—"
+                route_order_debug.append((pos + 1, o.order_number, we_str))
+        logger.info(
+            "   📍 Порядок маршрута (поз, №заказа, конец окна): %s",
+            ", ".join(f"{p}.№{n}(до {w})" for p, n, w in route_order_debug[:15])
+            + (" ..." if len(route_order_debug) > 15 else ""),
+        )
+        # Проверка: заказ с окном до 13:00 не должен стоять ПОСЛЕ заказа с окном до 15:00/16:00
+        we_13 = datetime.combine(order_date, time(13, 0))
+        for pos in range(len(chromosome) - 1):
+            i, j = chromosome[pos], chromosome[pos + 1]
+            if i >= len(orders) or j >= len(orders):
+                continue
+            o_i = orders[i]
+            o_j = orders[j]
+            if not o_i.delivery_time_end or not o_j.delivery_time_end:
+                continue
+            we_i = datetime.combine(order_date, o_i.delivery_time_end)
+            we_j = datetime.combine(order_date, o_j.delivery_time_end)
+            # Нарушение: на позиции pos окно позже (15/16), на pos+1 — раньше (10–13)
+            if we_i > we_13 and we_j <= we_13:
+                logger.warning(
+                    "   ⚠️ Нарушение порядка окон: заказ №%s (окно до %s) на позиции %d, за ним №%s (окно до %s) на позиции %d — заказ 10–13 не должен идти после 12–15/13–16",
+                    o_i.order_number, o_i.delivery_time_end, pos + 1,
+                    o_j.order_number, o_j.delivery_time_end, pos + 2,
+                )
+
         points = []
         total_distance = 0.0
         total_time = 0.0
