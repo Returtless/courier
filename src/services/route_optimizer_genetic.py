@@ -548,22 +548,31 @@ class GeneticRouteOptimizer:
                 chromosome[i], chromosome[j] = chromosome[j], chromosome[i]
             population.append(chromosome)
         
-        # Стратегия 3: Сортировка по концу временного окна (для предотвращения опозданий) (12.5%)
+        # Стратегия 3: По концу окна и ширине (раньше конец, уже окно — раньше в маршруте) (12.5%)
+        order_date = start_time.date()
+        def _end_and_width(i):
+            o = orders[i]
+            if not o.delivery_time_end:
+                return (float('inf'), 0)
+            end_ts = datetime.combine(order_date, o.delivery_time_end).timestamp()
+            if not o.delivery_time_start:
+                return (end_ts, 0)
+            start_dt = datetime.combine(order_date, o.delivery_time_start)
+            end_dt = datetime.combine(order_date, o.delivery_time_end)
+            duration_min = (end_dt - start_dt).total_seconds() / 60.0
+            return (end_ts, -duration_min)
         for _ in range(self.POPULATION_SIZE // 8):
-            order_date = start_time.date()
-            sorted_indices = sorted(
-                range(num_orders),
-                key=lambda i: (
-                    datetime.combine(order_date, orders[i].delivery_time_end).timestamp()
-                    if orders[i].delivery_time_end else float('inf')
-                )
-            )
-            # Добавляем небольшую случайность
+            sorted_indices = sorted(range(num_orders), key=_end_and_width)
             chromosome = sorted_indices.copy()
             for _ in range(random.randint(0, num_orders // 4)):
                 i, j = random.sample(range(num_orders), 2)
                 chromosome[i], chromosome[j] = chromosome[j], chromosome[i]
             population.append(chromosome)
+        
+        # Стратегия 3b: Строго по ужесточению окна (тот же ключ, без перемешивания)
+        strict_by_window = sorted(range(num_orders), key=_end_and_width)
+        for _ in range(min(5, self.POPULATION_SIZE // 8)):
+            population.append(strict_by_window.copy())
         
         # Стратегия 4: Greedy nearest neighbor с учетом временных окон
         remaining_count = self.POPULATION_SIZE - len(population)
@@ -602,7 +611,7 @@ class GeneticRouteOptimizer:
         
         while remaining:
             best_idx = None
-            best_score = float('inf')
+            best_score = (float('inf'), float('inf'))
             
             for idx in remaining:
                 order = orders[idx]
@@ -1089,10 +1098,13 @@ class GeneticRouteOptimizer:
             estimated_completion=current_time
         )
         
-        # Постобработка: исправление критических опозданий
+        # Постобработка: исправление любых опозданий (не только критических),
+        # чтобы порядок по ужесточению окон мог быть найден локальным поиском
         route_after_fix = route
-        if critical_delays > 0:
-            logger.info(f"🔧 Запускаю постобработку для исправления {critical_delays} критических опозданий...")
+        if total_delays > 0:
+            logger.info(
+                f"🔧 Запускаю постобработку (опозданий: total {total_delays:.0f} мин, критических {critical_delays})..."
+            )
             fixed_route = self._fix_delays_in_route(route, orders, start_location, start_time, user_id)
             if fixed_route and fixed_route.points:
                 route_after_fix = fixed_route
@@ -1522,14 +1534,18 @@ class GeneticRouteOptimizer:
                     best_distance = total_distance
                     best_seq = list(perm)
         else:
-            # Эвристика для больших подмножеств: сортировка по концу окна и локальный порядок
-            heuristic_seq = sorted(
-                rescue_orders,
-                key=lambda o: (
-                    datetime.combine(order_date, o.delivery_time_end).timestamp()
-                    if o.delivery_time_end else float("inf")
-                )
-            )
+            # Эвристика: раньше конец окна, уже окно — раньше в последовательности
+            def _rescue_order_key(o):
+                if not o.delivery_time_end:
+                    return (float("inf"), 0)
+                end_ts = datetime.combine(order_date, o.delivery_time_end).timestamp()
+                if not o.delivery_time_start:
+                    return (end_ts, 0)
+                start_dt = datetime.combine(order_date, o.delivery_time_start)
+                end_dt = datetime.combine(order_date, o.delivery_time_end)
+                duration_min = (end_dt - start_dt).total_seconds() / 60.0
+                return (end_ts, -duration_min)
+            heuristic_seq = sorted(rescue_orders, key=_rescue_order_key)
             total_delay, total_distance = eval_sequence(heuristic_seq)
             if total_delay < float("inf"):
                 best_seq = heuristic_seq
@@ -1578,16 +1594,36 @@ class GeneticRouteOptimizer:
         max_rescue = 8
         rescue_indices: set[int] = set()
         
-        # Добавляем опаздывающие и соседей по маршруту
+        # Опаздывающие и соседи по маршруту
         for idx, _, _ in late_points:
             for offset in range(-2, 3):
                 j = idx + offset
                 if 0 <= j < n:
                     rescue_indices.add(j)
-                if len(rescue_indices) >= max_rescue:
-                    break
-            if len(rescue_indices) >= max_rescue:
-                break
+        
+        # Опаздывающие с более ранним концом окна: включаем все заказы с тем же или более
+        # ранним window_end, чтобы переставить подмаршрут (узкие/ранние окна — вовремя)
+        latest_late_window_end = None
+        for idx, point, _ in late_points:
+            o = point.order
+            if o.delivery_time_end:
+                we = datetime.combine(order_date, o.delivery_time_end)
+                if latest_late_window_end is None or we < latest_late_window_end:
+                    latest_late_window_end = we
+        if latest_late_window_end is not None:
+            for idx in range(n):
+                o = route.points[idx].order
+                if o.delivery_time_end:
+                    we = datetime.combine(order_date, o.delivery_time_end)
+                    if we <= latest_late_window_end:
+                        rescue_indices.add(idx)
+        
+        # Ограничиваем размер; при расширении по window_end разрешаем до 12
+        max_rescue_after_expand = 12
+        if len(rescue_indices) > max_rescue_after_expand:
+            rescue_indices = set(sorted(rescue_indices)[:max_rescue_after_expand])
+        elif len(rescue_indices) > max_rescue:
+            pass  # оставляем все (важнее охватить заказы с тем же/ранним концом окна)
         
         if not rescue_indices:
             return route
