@@ -152,15 +152,23 @@ class GeneticRouteOptimizer:
         if not orders_with_coords:
             return orders
         
-        # Greedy кластеризация
+        # Greedy кластеризация: по расстоянию и по пересечению временных окон.
+        # Заказы с непересекающимися окнами (например 10–13 и 14–17) не объединяем в один кластер.
         clusters = []
         remaining = orders_with_coords.copy()
         
         while remaining:
             seed = remaining.pop(0)
             cluster = [seed]
+            # Окно кластера — объединение окон уже добавленных заказов (для проверки пересечения с новыми)
+            cluster_window: Optional[Tuple[datetime, datetime]] = None
+            if seed.delivery_time_start and seed.delivery_time_end:
+                cluster_window = (
+                    datetime.combine(order_date, seed.delivery_time_start),
+                    datetime.combine(order_date, seed.delivery_time_end),
+                )
             
-            # Ищем близкие заказы
+            # Ищем близкие заказы с пересекающимся временным окном
             i = 0
             while i < len(remaining):
                 order = remaining[i]
@@ -168,12 +176,38 @@ class GeneticRouteOptimizer:
                     seed.latitude, seed.longitude,
                     order.latitude, order.longitude
                 )
-                
-                if distance <= self.CLUSTER_RADIUS_KM:
-                    cluster.append(order)
-                    remaining.pop(i)
-                else:
+                if distance > self.CLUSTER_RADIUS_KM:
                     i += 1
+                    continue
+                # Проверка пересечения окон: в один кластер только если окна пересекаются
+                if order.delivery_time_start and order.delivery_time_end:
+                    order_start = datetime.combine(order_date, order.delivery_time_start)
+                    order_end = datetime.combine(order_date, order.delivery_time_end)
+                    if cluster_window is not None:
+                        c_start, c_end = cluster_window
+                        # пересечение: [c_start, c_end] и [order_start, order_end]
+                        if not (c_start < order_end and order_start < c_end):
+                            logger.debug(
+                                "   Кластер: заказ №%s не добавлен — окно %s–%s не пересекается с окном кластера",
+                                order.order_number,
+                                order.delivery_time_start.strftime("%H:%M") if order.delivery_time_start else "—",
+                                order.delivery_time_end.strftime("%H:%M") if order.delivery_time_end else "—",
+                            )
+                            i += 1
+                            continue
+                    else:
+                        cluster_window = (order_start, order_end)
+                # Добавляем в кластер и расширяем окно кластера (объединение)
+                cluster.append(order)
+                remaining.pop(i)
+                if order.delivery_time_start and order.delivery_time_end and cluster_window is not None:
+                    order_start = datetime.combine(order_date, order.delivery_time_start)
+                    order_end = datetime.combine(order_date, order.delivery_time_end)
+                    c_start, c_end = cluster_window
+                    cluster_window = (
+                        min(c_start, order_start),
+                        max(c_end, order_end),
+                    )
             
             clusters.append(cluster)
         
@@ -183,6 +217,7 @@ class GeneticRouteOptimizer:
         
         # Синхронизация окон внутри кластеров
         synchronized_orders = []
+        single_cluster_count = 0
         for cluster in clusters:
             if len(cluster) > 1:
                 # Синхронизируем окна
@@ -190,6 +225,28 @@ class GeneticRouteOptimizer:
                 synchronized_orders.extend(synchronized_cluster)
             else:
                 synchronized_orders.extend(cluster)
+                single_cluster_count += 1
+        
+        # Важно: заказы из одиночных кластеров (дальние) не должны автоматически оказываться в хвосте.
+        # Сортируем весь список по концу окна (и ширине), чтобы порядок индексов для ГА не зависел
+        # от порядка обхода кластеров — ранние дедлайны получают меньшие индексы.
+        def _order_window_key(o: Order):
+            if not o.delivery_time_end:
+                return (float("inf"), 0)
+            end_ts = datetime.combine(order_date, o.delivery_time_end).timestamp()
+            if not o.delivery_time_start:
+                return (end_ts, 0)
+            start_dt = datetime.combine(order_date, o.delivery_time_start)
+            end_dt = datetime.combine(order_date, o.delivery_time_end)
+            duration_min = (end_dt - start_dt).total_seconds() / 60.0
+            return (end_ts, -duration_min)
+        
+        synchronized_orders.sort(key=_order_window_key)
+        if single_cluster_count > 0:
+            logger.info(
+                f"   📐 После кластеризации: {single_cluster_count} одиночных кластеров; "
+                "список отсортирован по концу окна (ранние дедлайны — первые индексы)"
+            )
         
         return synchronized_orders
     
@@ -1242,6 +1299,41 @@ class GeneticRouteOptimizer:
                     total_delays += delay
                     if delay > self.MAX_DELAY_MINUTES:
                         critical_delays += 1
+        
+        # Диагностика: при опозданиях — полный порядок маршрута и по каждому опаздывающему: поз, окно, приезд, кто перед ним
+        order_date = start_time.date()
+        if total_delays > 0:
+            full_order_str = ", ".join(
+                f"{p}.№{n}(до {w})" for p, n, w in route_order_debug
+            )
+            logger.info("   📍 Полный порядок маршрута при опозданиях: %s", full_order_str)
+        for pos, point in enumerate(points):
+            order = point.order
+            if not (order.delivery_time_start and order.delivery_time_end):
+                continue
+            we = datetime.combine(order_date, order.delivery_time_end)
+            if point.estimated_arrival <= we:
+                continue
+            delay_min = (point.estimated_arrival - we).total_seconds() / 60.0
+            we_str = order.delivery_time_end.strftime("%H:%M") if order.delivery_time_end else "—"
+            ws_str = order.delivery_time_start.strftime("%H:%M") if order.delivery_time_start else "—"
+            arr_str = point.estimated_arrival.strftime("%H:%M") if point.estimated_arrival else "—"
+            logger.warning(
+                "   📊 ОПОЗДАНИЕ: поз.%d №%s окно %s–%s, приезд %s, опоздание %.0f мин",
+                pos + 1, order.order_number, ws_str, we_str, arr_str, delay_min,
+            )
+            if delay_min > self.MAX_DELAY_MINUTES and pos > 0:
+                prev_info = []
+                for k in range(max(0, pos - 2), pos):
+                    p_prev = points[k]
+                    o_prev = p_prev.order
+                    we_prev = o_prev.delivery_time_end.strftime("%H:%M") if o_prev.delivery_time_end else "—"
+                    arr_prev = p_prev.estimated_arrival.strftime("%H:%M") if p_prev.estimated_arrival else "—"
+                    prev_info.append(f"№{o_prev.order_number}(до {we_prev}, приезд {arr_prev})")
+                logger.error(
+                    "   🔍 Перед опаздывающим №%s идут: %s — возможно, №%s должен стоять перед ними (если окно у него раньше)?",
+                    order.order_number, ", ".join(prev_info), order.order_number,
+                )
         
         if critical_delays > 0:
             logger.error(f"🚨 КРИТИЧНО: В маршруте {critical_delays} заказов с опозданием > {self.MAX_DELAY_MINUTES} мин")
