@@ -1,0 +1,95 @@
+{
+  "description": "Time window parity: route_types.Order parsing + get_time_window_minutes",
+  "cases": [
+    {
+      "id": "window_spaced",
+      "note": "10:00 - 13:00",
+      "expect_start_h": 10,
+      "expect_start_m": 0,
+      "expect_end_h": 13,
+      "expect_end_m": 0,
+      "expect_min_from_midnight_start": 600,
+      "expect_min_from_midnight_end": 780,
+      "delivery_time_window": "10:00 - 13:00"
+    },
+    {
+      "id": "window_no_space_around_dash",
+      "note": "9:05-12:30",
+      "expect_start_h": 9,
+      "expect_start_m": 5,
+      "expect_end_h": 12,
+      "expect_end_m": 30,
+      "expect_min_from_midnight_start": 545,
+      "expect_min_from_midnight_end": 750,
+      "delivery_time_window": "9:05-12:30"
+    },
+    {
+      "id": "window_extra_text",
+      "note": "Доставка с 14:00 - 18:00 сегодня",
+      "expect_start_h": 14,
+      "expect_start_m": 0,
+      "expect_end_h": 18,
+      "expect_end_m": 0,
+      "expect_min_from_midnight_start": 840,
+      "expect_min_from_midnight_end": 1080,
+      "delivery_time_window": "Доставка с 14:00 - 18:00 сегодня"
+    },
+    {
+      "id": "window_single_digit_hours",
+      "note": "8:00 - 9:15",
+      "expect_start_h": 8,
+      "expect_start_m": 0,
+      "expect_end_h": 9,
+      "expect_end_m": 15,
+      "expect_min_from_midnight_start": 480,
+      "expect_min_from_midnight_end": 555,
+      "delivery_time_window": "8:00 - 9:15"
+    },
+    {
+      "id": "no_fields",
+      "note": "",
+      "expect_start_h": null,
+      "expect_start_m": null,
+      "expect_end_h": null,
+      "expect_end_m": null,
+      "expect_min_from_midnight_start": 0,
+      "expect_min_from_midnight_end": 1440,
+      "delivery_time_window": null
+    },
+    {
+      "id": "explicit_times_no_string",
+      "note": "",
+      "expect_start_h": 11,
+      "expect_start_m": 45,
+      "expect_end_h": 16,
+      "expect_end_m": 0,
+      "expect_min_from_midnight_start": 705,
+      "expect_min_from_midnight_end": 960,
+      "delivery_time_window": null,
+      "explicit_start": "11:45",
+      "explicit_end": "16:00"
+    },
+    {
+      "id": "invalid_clock_values",
+      "note": "",
+      "expect_start_h": null,
+      "expect_start_m": null,
+      "expect_end_h": null,
+      "expect_end_m": null,
+      "expect_min_from_midnight_start": 0,
+      "expect_min_from_midnight_end": 1440,
+      "delivery_time_window": "25:00 - 26:00"
+    },
+    {
+      "id": "no_regex_match",
+      "note": "",
+      "expect_start_h": null,
+      "expect_start_m": null,
+      "expect_end_h": null,
+      "expect_end_m": null,
+      "expect_min_from_midnight_start": 0,
+      "expect_min_from_midnight_end": 1440,
+      "delivery_time_window": "весь день"
+    }
+  ]
+}

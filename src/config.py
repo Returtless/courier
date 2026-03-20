@@ -1,6 +1,11 @@
 import os
 from typing import Optional
-from pydantic_settings import BaseSettings
+
+# Сервер: pydantic-settings + Pydantic 2. Android (Chaquopy): только Pydantic 1.x, там BaseSettings в pydantic.
+try:
+    from pydantic_settings import BaseSettings
+except ImportError:  # pragma: no cover - Chaquopy
+    from pydantic import BaseSettings
 
 
 class Settings(BaseSettings):

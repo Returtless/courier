@@ -4,20 +4,20 @@ import logging
 from typing import List, Tuple, Optional
 from datetime import datetime, timedelta
 from src.config import settings
-from src.models.order import Order
+from src.models.route_types import Order
 from src.database.connection import get_db_session
 
 logger = logging.getLogger(__name__)
 
 try:
-    import aiohttp
+    import aiohttp  # type: ignore[import-not-found]
     AIOHTTP_AVAILABLE = True
 except ImportError:
     AIOHTTP_AVAILABLE = False
 
 try:
-    from geopy.geocoders import Nominatim
-    from geopy.distance import geodesic
+    from geopy.geocoders import Nominatim  # type: ignore[import-not-found]
+    from geopy.distance import geodesic  # type: ignore[import-not-found]
     GEOPY_AVAILABLE = True
 except ImportError:
     GEOPY_AVAILABLE = False
@@ -146,7 +146,7 @@ class MapsService:
         return self.geocode_address_sync(address)
 
     def geocode_address_sync(self, address: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
-        """Синхронное геокодирование с fallback на 2GIS → Yandex → geopy. Возврат: lat, lon, gis_id"""
+        """Синхронное геокодирование с fallback на Yandex → 2GIS → geopy. Возврат: lat, lon, gis_id"""
         # Проверяем, что адрес не пустой
         if not address or not address.strip():
             logger.warning("⚠️ Попытка геокодирования пустого адреса")
@@ -177,33 +177,7 @@ class MapsService:
         except Exception as e:
             logger.warning(f"Ошибка проверки БД кэша: {e}")
         
-        # 1) 2GIS
-        if self.two_gis_api_key:
-            try:
-                url = "https://catalog.api.2gis.com/3.0/items"
-                params = {
-                    "key": self.two_gis_api_key,
-                    "q": address,
-                    "fields": "items.point"
-                }
-                response = requests.get(url, params=params, timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    items = data.get("result", {}).get("items", [])
-                    if items and items[0].get("point"):
-                        point = items[0]["point"]
-                        lat = float(point.get("lat"))
-                        lon = float(point.get("lon"))
-                        gid = items[0].get("id")
-                        result = (lat, lon, gid)
-                        # Сохраняем в кэши
-                        self._geocode_cache[address_key] = result
-                        self._save_to_db_cache(address_key, lat, lon, gid)
-                        return result
-            except Exception as e:
-                logger.warning(f"2GIS geocoding error: {e}")
-
-        # 2) Yandex
+        # 1) Yandex
         if self.yandex_api_key:
             try:
                 url = "https://geocode-maps.yandex.ru/1.x/"
@@ -228,6 +202,32 @@ class MapsService:
                             return result
             except Exception as e:
                 logger.warning(f"Yandex geocoding error: {e}")
+
+        # 2) 2GIS
+        if self.two_gis_api_key:
+            try:
+                url = "https://catalog.api.2gis.com/3.0/items"
+                params = {
+                    "key": self.two_gis_api_key,
+                    "q": address,
+                    "fields": "items.point"
+                }
+                response = requests.get(url, params=params, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    items = data.get("result", {}).get("items", [])
+                    if items and items[0].get("point"):
+                        point = items[0]["point"]
+                        lat = float(point.get("lat"))
+                        lon = float(point.get("lon"))
+                        gid = items[0].get("id")
+                        result = (lat, lon, gid)
+                        # Сохраняем в кэши
+                        self._geocode_cache[address_key] = result
+                        self._save_to_db_cache(address_key, lat, lon, gid)
+                        return result
+            except Exception as e:
+                logger.warning(f"2GIS geocoding error: {e}")
 
         # Fallback to geopy
         if GEOPY_AVAILABLE:
@@ -323,8 +323,8 @@ class MapsService:
         
         logger.info(f"🌐 API запрос: ({start_lat:.5f}, {start_lon:.5f}) → ({end_lat:.5f}, {end_lon:.5f})")
         
-        # 1) 2GIS Routing API с учетом дорожной сети (traffic_mode=jam при наличии тарифа)
-        if self.two_gis_api_key and self._should_try_provider('2gis', user_id):
+        # 1) 2GIS Routing API — временно выключено (заглушка на будущее)
+        if False and self.two_gis_api_key and self._should_try_provider('2gis', user_id):
             try:
                 # Используем версию 7.0.0, как в рабочем примере Postman
                 url = "https://routing.api.2gis.com/routing/7.0.0/global"
@@ -425,8 +425,8 @@ class MapsService:
                 logger.warning(f"❌ OSRM route error: {e}")
                 logger.debug(f"Traceback: {traceback.format_exc()}")
 
-        # 3) Yandex (если есть ключ)
-        if self.yandex_api_key and self._should_try_provider('yandex', user_id):
+        # 3) Yandex Routing API — временно выключено (заглушка на будущее)
+        if False and self.yandex_api_key and self._should_try_provider('yandex', user_id):
             # Логируем первые и последние символы ключа для отладки
             key_preview = f"{self.yandex_api_key[:8]}...{self.yandex_api_key[-4:]}" if len(self.yandex_api_key) > 12 else "***"
             logger.info(f"🔄 Yandex API: ({start_lat:.5f}, {start_lon:.5f}) → ({end_lat:.5f}, {end_lon:.5f}) [ключ: {key_preview}]")
@@ -656,7 +656,7 @@ class MapsService:
         Возвращает словарь {provider: is_available}
         """
         import time
-        from src.models.order import ApiStatusDB
+        from src.models.order_db import ApiStatusDB
         
         logger.info(f"🔍 Проверяю доступность API провайдеров для user_id={user_id}")
         results = {}
@@ -718,7 +718,7 @@ class MapsService:
         Получить кэшированный статус API провайдеров из БД.
         Если данных нет или они старше max_age_hours, возвращает None для провайдера.
         """
-        from src.models.order import ApiStatusDB
+        from src.models.order_db import ApiStatusDB
         
         results = {}
         with get_db_session() as session:
@@ -759,7 +759,7 @@ class MapsService:
             # Провайдер доступен - пытаемся
             return True
 
-    def _check_yandex_api(self, lat1: float, lon1: float, lat2: float, lon2: float) -> tuple[bool, str]:
+    def _check_yandex_api(self, lat1: float, lon1: float, lat2: float, lon2: float) -> Tuple[bool, Optional[str]]:
         """Проверить доступность Yandex Maps API"""
         if not self.yandex_api_key:
             return False, "API ключ не настроен"
@@ -792,7 +792,7 @@ class MapsService:
         except Exception as e:
             return False, str(e)
 
-    def _check_2gis_api(self, lat1: float, lon1: float, lat2: float, lon2: float) -> tuple[bool, str]:
+    def _check_2gis_api(self, lat1: float, lon1: float, lat2: float, lon2: float) -> Tuple[bool, Optional[str]]:
         """Проверить доступность 2GIS API"""
         if not self.two_gis_api_key:
             return False, "API ключ не настроен"
@@ -824,7 +824,7 @@ class MapsService:
         except Exception as e:
             return False, str(e)
 
-    def _check_osrm_api(self, lat1: float, lon1: float, lat2: float, lon2: float) -> tuple[bool, str]:
+    def _check_osrm_api(self, lat1: float, lon1: float, lat2: float, lon2: float) -> Tuple[bool, Optional[str]]:
         """Проверить доступность OSRM API"""
         try:
             # Используем HTTPS сервер (порт 80 может быть заблокирован)

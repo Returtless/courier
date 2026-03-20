@@ -1,0 +1,29 @@
+{
+  "route_points": [
+    {
+      "order_number": "A1",
+      "estimated_arrival_iso": "2026-01-29T10:00:00+03:00",
+      "distance_from_previous_km": 2.0,
+      "time_from_previous_min": 5.0,
+      "is_late": false,
+      "window_start": "10:00",
+      "window_end": "18:00"
+    },
+    {
+      "order_number": "B2",
+      "estimated_arrival_iso": "2026-01-29T10:14:00+03:00",
+      "distance_from_previous_km": 1.5,
+      "time_from_previous_min": 4.0,
+      "is_late": false,
+      "window_start": "10:00",
+      "window_end": "18:00"
+    }
+  ],
+  "total_distance_km": 3.5,
+  "total_time_min": 29.0,
+  "estimated_completion_iso": "2026-01-29T10:24:00+03:00",
+  "meta": {
+    "rng_seed": 42,
+    "fixture": "tiny_two_orders"
+  }
+}

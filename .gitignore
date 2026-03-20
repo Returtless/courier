@@ -79,3 +79,6 @@ tests/e2e/
 # Alembic
 # (keep migrations, but ignore generated files if any)
 
+# Chaquopy pre-downloaded wheels (large binaries; keep README in repo)
+android/app/chaquopy-local-wheels/*.whl
+

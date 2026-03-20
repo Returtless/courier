@@ -1,0 +1,20 @@
+{
+  "description": "After _cluster_and_synchronize_orders (genetic.py)",
+  "start_time_iso": "2026-01-29T09:20:00+03:00",
+  "orders_out": [
+    {
+      "order_number": "B2",
+      "window_start": "10:00",
+      "window_end": "18:00",
+      "lat": 59.92,
+      "lon": 30.33
+    },
+    {
+      "order_number": "A1",
+      "window_start": "10:00",
+      "window_end": "18:00",
+      "lat": 59.91,
+      "lon": 30.32
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "description": "Haversine km; must match GeneticRouteOptimizer._haversine_distance and Kotlin Haversine.distanceKm",
+  "cases": [
+    {
+      "id": "spb_near",
+      "lat1": 59.9,
+      "lon1": 30.31,
+      "lat2": 59.91,
+      "lon2": 30.32,
+      "distance_km": 1.2439116020200383
+    },
+    {
+      "id": "same_point",
+      "lat1": 59.9,
+      "lon1": 30.31,
+      "lat2": 59.9,
+      "lon2": 30.31,
+      "distance_km": 0.0
+    },
+    {
+      "id": "equator_one_degree_lon",
+      "lat1": 0.0,
+      "lon1": 0.0,
+      "lat2": 0.0,
+      "lon2": 1.0,
+      "distance_km": 111.19492664455873
+    },
+    {
+      "id": "sydney_paris",
+      "lat1": -33.86,
+      "lon1": 151.21,
+      "lat2": 48.86,
+      "lon2": 2.35,
+      "distance_km": 16959.89588020204
+    },
+    {
+      "id": "moscow_spb",
+      "lat1": 55.75,
+      "lon1": 37.62,
+      "lat2": 59.93,
+      "lon2": 30.33,
+      "distance_km": 633.4958999247513
+    }
+  ]
+}

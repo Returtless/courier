@@ -17,6 +17,7 @@ class GeocodeCacheDB(Base):
     
     __table_args__ = (
         Index('idx_address', 'address'),
+        {"extend_existing": True},
     )
 
 
@@ -36,5 +37,6 @@ class RouteCacheDB(Base):
     
     __table_args__ = (
         Index('idx_route_coords', 'start_lat', 'start_lon', 'end_lat', 'end_lon'),
+        {"extend_existing": True},
     )
 
