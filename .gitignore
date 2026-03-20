@@ -81,4 +81,5 @@ tests/e2e/
 
 # Chaquopy pre-downloaded wheels (large binaries; keep README in repo)
 android/app/chaquopy-local-wheels/*.whl
+android/.gradle/
 
