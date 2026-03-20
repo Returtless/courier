@@ -4,14 +4,14 @@
 """
 import itertools
 import logging
-import random
-from typing import List, Tuple, Optional, Dict, Set
+from typing import Any, List, Tuple, Optional, Dict, Set
 from datetime import datetime, time, timedelta
 from math import radians, sin, cos, sqrt, atan2
 
 from src.models.route_types import Order, OptimizedRoute, RoutePoint
 from src.services.maps_service import MapsService
 from src.services.user_settings_service import UserSettingsService
+from src.services.genetic_rng import PythonStdRandomAdapter, SplitMix64Rng
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +35,20 @@ class GeneticRouteOptimizer:
     GREEDY_EST_KM_PER_MIN = 0.5  # Оценка скорости для greedy (~30 км/ч), время = км / это
     EARLY_WINDOW_END_THRESHOLD = time(13, 0)  # Окна до этого времени «ранние», их не ставим после поздних
 
-    def __init__(self, maps_service: MapsService):
+    def __init__(
+        self,
+        maps_service: MapsService,
+        rng: Optional[Any] = None,
+        rng_seed: Optional[int] = None,
+    ):
         self.maps_service = maps_service
         self.settings_service = UserSettingsService()
-        random.seed()  # Инициализация генератора случайных чисел
+        if rng is not None:
+            self._rng = rng
+        elif rng_seed is not None:
+            self._rng = SplitMix64Rng(int(rng_seed))
+        else:
+            self._rng = PythonStdRandomAdapter()
         self._service_time_minutes_override: Optional[int] = None
 
     def _effective_service_minutes(self, user_id: Optional[int]) -> int:
@@ -567,13 +577,13 @@ class GeneticRouteOptimizer:
                 parent2 = self._tournament_selection(population, fitness_scores)
                 
                 # Кроссовер
-                if random.random() < self.CROSSOVER_RATE:
+                if self._rng.random() < self.CROSSOVER_RATE:
                     child = self._order_crossover(parent1, parent2)
                 else:
-                    child = parent1.copy() if random.random() < 0.5 else parent2.copy()
+                    child = parent1.copy() if self._rng.random() < 0.5 else parent2.copy()
                 
                 # Мутация
-                if random.random() < self.MUTATION_RATE:
+                if self._rng.random() < self.MUTATION_RATE:
                     child = self._mutate(child, orders, start_time)
 
                 # Ремонт порядка по концу окна: не допускаем «10–13 после 12–15/13–16»
@@ -645,7 +655,7 @@ class GeneticRouteOptimizer:
         # Стратегия 1: Случайные перестановки (меньше доля — чтобы не плодить «10–13 после 12–15»)
         for _ in range(self.POPULATION_SIZE // 4):
             chromosome = list(range(num_orders))
-            random.shuffle(chromosome)
+            self._rng.shuffle(chromosome)
             population.append(chromosome)
 
         # Стратегия 1b: Группа по концу окна — внутри группы случайный порядок (10–13 всегда перед 12–15/13–16)
@@ -665,7 +675,7 @@ class GeneticRouteOptimizer:
             chromosome = []
             for end_ts in sorted(indices_by_end.keys()):
                 group = indices_by_end[end_ts].copy()
-                random.shuffle(group)
+                self._rng.shuffle(group)
                 chromosome.extend(group)
             population.append(chromosome)
 
@@ -681,8 +691,9 @@ class GeneticRouteOptimizer:
             )
             # Добавляем небольшую случайность
             chromosome = sorted_indices.copy()
-            for _ in range(random.randint(0, num_orders // 3)):
-                i, j = random.sample(range(num_orders), 2)
+            for _ in range(self._rng.rand_int(0, num_orders // 3)):
+                pair = self._rng.sample_range(num_orders, 2)
+                i, j = pair[0], pair[1]
                 chromosome[i], chromosome[j] = chromosome[j], chromosome[i]
             population.append(chromosome)
         
@@ -702,8 +713,9 @@ class GeneticRouteOptimizer:
         for _ in range(self.POPULATION_SIZE // 8):
             sorted_indices = sorted(range(num_orders), key=_end_and_width)
             chromosome = sorted_indices.copy()
-            for _ in range(random.randint(0, num_orders // 4)):
-                i, j = random.sample(range(num_orders), 2)
+            for _ in range(self._rng.rand_int(0, num_orders // 4)):
+                pair = self._rng.sample_range(num_orders, 2)
+                i, j = pair[0], pair[1]
                 chromosome[i], chromosome[j] = chromosome[j], chromosome[i]
             population.append(chromosome)
         
@@ -966,7 +978,7 @@ class GeneticRouteOptimizer:
         Returns:
             Выбранная хромосома
         """
-        tournament_indices = random.sample(range(len(population)), self.TOURNAMENT_SIZE)
+        tournament_indices = self._rng.sample_range(len(population), self.TOURNAMENT_SIZE)
         tournament_fitness = [fitness_scores[i] for i in tournament_indices]
         winner_idx = tournament_indices[min(range(len(tournament_fitness)), key=lambda i: tournament_fitness[i])]
         return population[winner_idx].copy()
@@ -1035,8 +1047,8 @@ class GeneticRouteOptimizer:
             return parent1.copy()
         
         # Выбираем случайный сегмент
-        start = random.randint(0, n - 2)
-        end = random.randint(start + 1, n - 1)
+        start = self._rng.rand_int(0, n - 2)
+        end = self._rng.rand_int(start + 1, n - 1)
         
         # Копируем сегмент из parent1
         child = [None] * n
@@ -1075,7 +1087,7 @@ class GeneticRouteOptimizer:
         if len(chromosome) <= 1:
             return chromosome.copy()
         
-        mutation_type = random.random()
+        mutation_type = self._rng.random()
         
         # Умная мутация для исправления опозданий (10%) - уменьшено
         if mutation_type < 0.1 and orders and start_time:
@@ -1083,7 +1095,8 @@ class GeneticRouteOptimizer:
         
         elif mutation_type < 0.5:
             # Swap Mutation (40%)
-            i, j = random.sample(range(len(chromosome)), 2)
+            pair = self._rng.sample_range(len(chromosome), 2)
+            i, j = pair[0], pair[1]
             mutated = chromosome.copy()
             mutated[i], mutated[j] = mutated[j], mutated[i]
             return mutated
@@ -1091,8 +1104,8 @@ class GeneticRouteOptimizer:
         elif mutation_type < 0.8:
             # Inversion Mutation (30%)
             if len(chromosome) >= 2:
-                start = random.randint(0, len(chromosome) - 2)
-                end = random.randint(start + 1, len(chromosome) - 1)
+                start = self._rng.rand_int(0, len(chromosome) - 2)
+                end = self._rng.rand_int(start + 1, len(chromosome) - 1)
                 mutated = chromosome.copy()
                 mutated[start:end+1] = reversed(mutated[start:end+1])
                 return mutated
@@ -1101,9 +1114,9 @@ class GeneticRouteOptimizer:
             # Insertion Mutation (20%)
             if len(chromosome) >= 2:
                 mutated = chromosome.copy()
-                idx = random.randint(0, len(mutated) - 1)
+                idx = self._rng.rand_int(0, len(mutated) - 1)
                 val = mutated.pop(idx)
-                new_idx = random.randint(0, len(mutated))
+                new_idx = self._rng.rand_int(0, len(mutated))
                 mutated.insert(new_idx, val)
                 return mutated
         
@@ -1154,9 +1167,9 @@ class GeneticRouteOptimizer:
                     # Вставляем ближе к началу, но не в самое начало (более консервативно)
                     # Перемещаем в первую треть маршрута, но не в первые 2 позиции
                     if len(mutated) > 2:
-                        new_pos = random.randint(2, max(3, len(chromosome) // 3))
+                        new_pos = self._rng.rand_int(2, max(3, len(chromosome) // 3))
                     else:
-                        new_pos = random.randint(0, len(mutated))
+                        new_pos = self._rng.rand_int(0, len(mutated))
                     mutated.insert(new_pos, order_idx)
         
         return mutated

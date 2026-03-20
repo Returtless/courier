@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import random
 import sys
 from datetime import datetime, time
 from pathlib import Path
@@ -129,8 +128,7 @@ def run_fixture(fixture_dir: Path, dump_intermediate: bool = False) -> None:
     raw = json.loads(input_path.read_text(encoding="utf-8"))
 
     rng_seed = int(raw.get("rng_seed", 42))
-    random.seed(rng_seed)
-    logger.info("rng_seed=%s", rng_seed)
+    logger.info("rng_seed=%s (SplitMix64 in GeneticRouteOptimizer)", rng_seed)
 
     start_loc = raw["start_location"]
     start_lat, start_lon = float(start_loc["lat"]), float(start_loc["lon"])
@@ -150,7 +148,7 @@ def run_fixture(fixture_dir: Path, dump_intermediate: bool = False) -> None:
     except Exception:
         service_min = 10
 
-    opt = GeneticRouteOptimizer(maps)
+    opt = GeneticRouteOptimizer(maps, rng_seed=rng_seed)
     optimized = opt.optimize_route_sync(
         orders=orders,
         start_location=(start_lat, start_lon),

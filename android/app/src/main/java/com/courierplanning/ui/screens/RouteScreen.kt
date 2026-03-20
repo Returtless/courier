@@ -36,13 +36,14 @@ import com.courierplanning.data.db.CallStatusEntity
 import com.courierplanning.data.db.OrderEntity
 import com.courierplanning.data.db.RouteEntity
 import com.courierplanning.data.db.RoutePointEntity
-import com.courierplanning.optimizer.PythonOptimizer
+import com.courierplanning.optimizer.KotlinOptimizer
 import com.courierplanning.settings.StartLocationPrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.Instant
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.parseToJsonElement
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -229,8 +230,7 @@ private suspend fun buildAndSaveRoute(context: Context, routeDate: String) {
     val startLat = startCfg.startLat
     val startLon = startCfg.startLon
     val payload = buildPayload(orders, startLat, startLon, startTime, settings.serviceTimeMinutes)
-    PythonOptimizer.ensureStarted(context)
-    val result = PythonOptimizer.optimize(payload)
+    val result = json.parseToJsonElement(KotlinOptimizer.optimizeRouteJson(payload)).jsonObject
     val routePointsJson = result["route_points"]!!.jsonArray
     val totalDistanceKm = result["total_distance_km"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0
     val totalTimeMin = result["total_time_min"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0

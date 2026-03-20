@@ -31,8 +31,11 @@ Used to compare **Python** `GeneticRouteOptimizer` (reference) with the future *
 From repository root:
 
 ```bash
-python tools/export_optimizer_golden.py --fixture parity_fixtures/tiny_two_orders
+PYTHONPATH=. python tools/export_optimizer_golden.py --fixture parity_fixtures/tiny_two_orders
+PYTHONPATH=. python tools/export_optimizer_golden.py --fixture parity_fixtures/telegram_spb_route_head5
 ```
+
+`rng_seed` in `input.json` drives **SplitMix64** inside `GeneticRouteOptimizer` (Python) and **KotlinGeneticRouteOptimizer** (Android). After changing GA or RNG, re-export and copy/sync `expected.json` to `android/app/src/test/resources/parity_fixtures/...`.
 
 Set `PYTHONPATH` to repo root if needed (same as running any `src.*` module).
 
