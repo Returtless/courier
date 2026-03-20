@@ -1,5 +1,6 @@
 package com.courierplanning.routeopt.parity
 
+import com.courierplanning.routeopt.core.MatrixRoutingAdapter
 import java.math.BigDecimal
 import java.math.RoundingMode
 
@@ -12,13 +13,13 @@ import java.math.RoundingMode
 class ParityMapsAdapter(
     nodes: List<Pair<Double, Double>>,
     private val matrix: Map<String, Leg>,
-) {
+) : MatrixRoutingAdapter {
     data class Leg(val distanceKm: Double, val travelMin: Double)
 
     private val coordToIdx: Map<Pair<Double, Double>, Int> =
         nodes.mapIndexed { i, p -> round5(p.first) to round5(p.second) to i }.associate { it.first to it.second }
 
-    fun getRouteSync(
+    override fun getRouteSync(
         startLat: Double,
         startLon: Double,
         endLat: Double,

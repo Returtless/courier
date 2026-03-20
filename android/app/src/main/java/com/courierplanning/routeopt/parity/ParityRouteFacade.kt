@@ -1,12 +1,14 @@
 package com.courierplanning.routeopt.parity
 
 import com.courierplanning.routeopt.cluster.ClusterSynchronizer
+import com.courierplanning.routeopt.genetic.KotlinGeneticRouteOptimizer
 import com.courierplanning.routeopt.math.DeliveryTimeWindowParser
+import com.courierplanning.routeopt.rng.SplitMix64Rng
 import java.time.ZonedDateTime
 
 /**
  * Parity pipeline aligned with Python [src.services.route_optimizer_genetic.GeneticRouteOptimizer.optimize_route_sync]:
- * keep only orders with coordinates → cluster + synchronize windows → optimize (exhaustive permutations for small N).
+ * keep only orders with coordinates → cluster + synchronize windows → Kotlin GA ([SplitMix64Rng] + same hyperparameters as Python).
  */
 object ParityRouteFacade {
 
@@ -56,6 +58,22 @@ object ParityRouteFacade {
             )
         }
 
-        return MatrixParityOptimizer.optimizeFromOrders(input, internal)
+        val maps = ParityMapsAdapter(
+            input.nodes.map { it.lat to it.lon },
+            input.routeMatrix.mapValues { (_, c) ->
+                ParityMapsAdapter.Leg(c.distanceKm, c.travelMin)
+            },
+        )
+        val ga = KotlinGeneticRouteOptimizer(
+            SplitMix64Rng(input.rngSeed),
+            input.settings.serviceTimeMinutes.toDouble(),
+        )
+        return ga.optimize(
+            internal,
+            maps,
+            input.startLocation.lat,
+            input.startLocation.lon,
+            startZdt,
+        )
     }
 }
