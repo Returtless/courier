@@ -1,11 +1,21 @@
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from datetime import datetime, time, timedelta
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from ortools.constraint_solver import routing_enums_pb2
-from ortools.constraint_solver import pywrapcp
-from src.models.order import Order, RoutePoint, OptimizedRoute
+
+# OR-Tools недоступен в Chaquopy/Android — тогда используем GeneticRouteOptimizer (как в RouteService бота).
+try:
+    from ortools.constraint_solver import routing_enums_pb2
+    from ortools.constraint_solver import pywrapcp
+
+    ORTOOLS_AVAILABLE = True
+except ImportError:
+    routing_enums_pb2 = None  # type: ignore[assignment]
+    pywrapcp = None  # type: ignore[assignment]
+    ORTOOLS_AVAILABLE = False
+
+from src.models.route_types import Order, OptimizedRoute, RoutePoint
 from src.services.maps_service import MapsService
 from src.services.user_settings_service import UserSettingsService
 
@@ -24,6 +34,7 @@ class RouteOptimizer:
         start_time: datetime,
         vehicle_capacity: int = 50,
         user_id: int = None,  # Добавляем user_id для получения настроек
+        service_time_minutes_override: Optional[int] = None,
         use_fallback: bool = False  # Использовать fallback при ошибке OR-Tools (только после подтверждения пользователя)
     ) -> OptimizedRoute:
         """
@@ -57,8 +68,14 @@ class RouteOptimizer:
 
         # Calculate distance/time matrix
         # Фильтруем заказы с координатами (без координат нельзя построить маршрут)
-        orders_with_coords = [o for o in geocoded_orders if o.latitude and o.longitude]
-        orders_without_coords = [o for o in geocoded_orders if not o.latitude or not o.longitude]
+        orders_with_coords = [
+            o for o in geocoded_orders
+            if o.latitude is not None and o.longitude is not None
+        ]
+        orders_without_coords = [
+            o for o in geocoded_orders
+            if o.latitude is None or o.longitude is None
+        ]
         
         logger.info(f"📊 Результат геокодирования: {len(orders_with_coords)} заказов с координатами, {len(orders_without_coords)} без координат")
         
@@ -72,13 +89,37 @@ class RouteOptimizer:
             logger.error(f"   Всего заказов: {len(orders)}")
             logger.error(f"   Заказов без координат: {len(orders_without_coords)}")
             return OptimizedRoute(points=[], total_distance=0, total_time=0, estimated_completion=start_time)
-        
+
+        if not ORTOOLS_AVAILABLE:
+            logger.info(
+                "OR-Tools недоступен (Chaquopy/Android) — используем генетический оптимизатор, как в Telegram-боте"
+            )
+            from src.services.route_optimizer_genetic import GeneticRouteOptimizer
+
+            genetic = GeneticRouteOptimizer(self.maps_service)
+            return genetic.optimize_route_sync(
+                geocoded_orders,
+                start_location,
+                start_time,
+                vehicle_capacity,
+                user_id,
+                use_fallback,
+                service_time_minutes_override=service_time_minutes_override,
+            )
+
         locations = [start_location] + [(o.latitude, o.longitude) for o in orders_with_coords]
         distance_matrix, time_matrix = self._build_matrices(locations, user_id)
 
         # Create route optimization problem
         # Используем только заказы с координатами для оптимизации
-        route_result = self._solve_vrp(distance_matrix, time_matrix, orders_with_coords, start_time, user_id)
+        route_result = self._solve_vrp(
+            distance_matrix,
+            time_matrix,
+            orders_with_coords,
+            start_time,
+            user_id,
+            service_time_minutes_override=service_time_minutes_override,
+        )
         
         if not route_result:
             logger.error("❌ Не удалось найти решение задачи маршрутизации")
@@ -86,7 +127,13 @@ class RouteOptimizer:
             # Fallback создаст рабочий маршрут, игнорируя ручные времена и жесткие окна
             logger.warning(f"⚠️ Используем fallback: простой порядок заказов с расчетом времени для {len(orders_with_coords)} заказов")
             try:
-                fallback_result = self._build_fallback_route(orders_with_coords, start_location, start_time, user_id)
+                fallback_result = self._build_fallback_route(
+                    orders_with_coords,
+                    start_location,
+                    start_time,
+                    user_id,
+                    service_time_minutes_override=service_time_minutes_override,
+                )
                 if not fallback_result or not fallback_result.points:
                     logger.error(f"❌ КРИТИЧНО: Fallback тоже не создал маршрут! Заказов с координатами: {len(orders_with_coords)}")
                     # Диагностика: проверяем координаты заказов
@@ -103,9 +150,14 @@ class RouteOptimizer:
         route_indices, solution, routing, manager, time_dimension = route_result
 
         # Build optimized route используя решение OR-Tools
-        # Получаем настройки пользователя для времени обслуживания
-        service_time_minutes = 10  # Значение по умолчанию
-        if user_id:
+        # Получаем настройки пользователя для времени обслуживания.
+        # Если override передан (например, из Android), используем его и не лезем в БД.
+        service_time_minutes = (
+            service_time_minutes_override
+            if service_time_minutes_override is not None
+            else 10
+        )
+        if user_id and service_time_minutes_override is None:
             user_settings = self.settings_service.get_settings(user_id)
             service_time_minutes = user_settings.service_time_minutes
         
@@ -232,7 +284,8 @@ class RouteOptimizer:
         orders: List[Order],
         start_location: Tuple[float, float],
         start_time: datetime,
-        user_id: int = None
+        user_id: int = None,
+        service_time_minutes_override: Optional[int] = None,
     ) -> OptimizedRoute:
         """
         Создает простой маршрут в порядке заказов с расчетом времени (fallback).
@@ -242,9 +295,13 @@ class RouteOptimizer:
         if not orders:
             return OptimizedRoute(points=[], total_distance=0, total_time=0, estimated_completion=start_time)
         
-        # Получаем настройки пользователя
-        service_time_minutes = 10
-        if user_id:
+        # Получаем настройки пользователя (или используем override, чтобы не обращаться к БД)
+        service_time_minutes = (
+            service_time_minutes_override
+            if service_time_minutes_override is not None
+            else 10
+        )
+        if user_id and service_time_minutes_override is None:
             user_settings = self.settings_service.get_settings(user_id)
             service_time_minutes = user_settings.service_time_minutes
         
@@ -270,7 +327,7 @@ class RouteOptimizer:
         
         skipped_orders = []
         for idx, order in enumerate(sorted_orders):
-            if not order.latitude or not order.longitude:
+            if order.latitude is None or order.longitude is None:
                 logger.warning(f"⚠️ [{idx+1}/{len(sorted_orders)}] Пропускаем заказ {order.order_number}: нет координат (lat={order.latitude}, lon={order.longitude})")
                 skipped_orders.append(order.order_number)
                 continue
@@ -355,9 +412,12 @@ class RouteOptimizer:
         time_matrix: np.ndarray,
         orders: List[Order],
         start_time: datetime,
-        user_id: int = None
+        user_id: int = None,
+        service_time_minutes_override: Optional[int] = None,
     ) -> tuple:
         """Solve Vehicle Routing Problem using OR-Tools with advanced optimization"""
+        if not ORTOOLS_AVAILABLE or pywrapcp is None:
+            return None
         try:
             manager = pywrapcp.RoutingIndexManager(len(distance_matrix), 1, 0)  # 1 vehicle, depot at 0
             routing = pywrapcp.RoutingModel(manager)
@@ -381,9 +441,13 @@ class RouteOptimizer:
             transit_callback_index = routing.RegisterTransitCallback(distance_callback)
             routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
 
-            # Add delivery time constraints (используем настройку пользователя)
-            service_time_minutes = 10  # Значение по умолчанию
-            if user_id:
+            # Add delivery time constraints (используем override, чтобы не обращаться к БД)
+            service_time_minutes = (
+                service_time_minutes_override
+                if service_time_minutes_override is not None
+                else 10
+            )
+            if user_id and service_time_minutes_override is None:
                 user_settings = self.settings_service.get_settings(user_id)
                 service_time_minutes = user_settings.service_time_minutes
             

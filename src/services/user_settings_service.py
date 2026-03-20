@@ -1,7 +1,8 @@
 import logging
 from typing import Optional
 from src.database.connection import get_db_session
-from src.models.order import UserSettingsDB, UserSettings
+from src.models.order_db import UserSettingsDB
+from src.models.route_types import UserSettings
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,9 @@ class UserSettingsService:
                 session.refresh(settings_db)
                 logger.info(f"✨ Созданы настройки по умолчанию для user_id={user_id}")
             
-            return UserSettings.model_validate(settings_db)
+            if hasattr(UserSettings, "model_validate"):
+                return UserSettings.model_validate(settings_db)
+            return UserSettings.from_orm(settings_db)
     
     def update_setting(self, user_id: int, setting_name: str, value: int) -> bool:
         """

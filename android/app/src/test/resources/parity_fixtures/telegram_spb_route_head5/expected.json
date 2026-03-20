@@ -1,0 +1,56 @@
+{
+  "route_points": [
+    {
+      "order_number": "3383434",
+      "estimated_arrival_iso": "2026-03-14T10:00:00+03:00",
+      "distance_from_previous_km": 14.22815,
+      "time_from_previous_min": 21.34222,
+      "is_late": false,
+      "window_start": "10:00",
+      "window_end": "13:00"
+    },
+    {
+      "order_number": "3385155",
+      "estimated_arrival_iso": "2026-03-14T10:11:08+03:00",
+      "distance_from_previous_km": 0.75723,
+      "time_from_previous_min": 1.13584,
+      "is_late": false,
+      "window_start": "10:00",
+      "window_end": "13:00"
+    },
+    {
+      "order_number": "3385032",
+      "estimated_arrival_iso": "2026-03-14T10:22:41+03:00",
+      "distance_from_previous_km": 1.04255,
+      "time_from_previous_min": 1.56382,
+      "is_late": false,
+      "window_start": "10:00",
+      "window_end": "13:00"
+    },
+    {
+      "order_number": "3383669",
+      "estimated_arrival_iso": "2026-03-14T10:34:43+03:00",
+      "distance_from_previous_km": 1.35329,
+      "time_from_previous_min": 2.02994,
+      "is_late": false,
+      "window_start": "10:00",
+      "window_end": "13:00"
+    },
+    {
+      "order_number": "3384955",
+      "estimated_arrival_iso": "2026-03-14T11:00:00+03:00",
+      "distance_from_previous_km": 0.83894,
+      "time_from_previous_min": 1.2584,
+      "is_late": false,
+      "window_start": "11:00",
+      "window_end": "14:00"
+    }
+  ],
+  "total_distance_km": 18.22016,
+  "total_time_min": 77.33022,
+  "estimated_completion_iso": "2026-03-14T11:10:00+03:00",
+  "meta": {
+    "rng_seed": 42,
+    "fixture": "telegram_spb_route_head5"
+  }
+}

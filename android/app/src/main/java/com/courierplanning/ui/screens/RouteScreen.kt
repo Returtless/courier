@@ -31,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.courierplanning.AppServices
+import com.courierplanning.BuildConfig
 import com.courierplanning.data.db.CallStatusEntity
 import com.courierplanning.data.db.OrderEntity
 import com.courierplanning.data.db.RouteEntity
@@ -305,9 +306,19 @@ private fun buildPayload(
     serviceTimeMinutes: Int,
 ): String {
     val ordersJson = orders.joinToString(",") { o ->
-        """{"order_number":"${o.orderNumber}","address":"${o.address.escapeJson()}","lat":${o.latitude ?: 0.0},"lon":${o.longitude ?: 0.0},"window_start":"${o.deliveryTimeStart ?: ""}","window_end":"${o.deliveryTimeEnd ?: ""}","phone":"${(o.phone ?: "").escapeJson()}","customer_name":"${(o.customerName ?: "").escapeJson()}","manual_arrival_iso":${if (o.manualArrivalTime != null) "\"${o.manualArrivalTime}\"" else "null"}}"""
+        val latJson = if (o.latitude != null) o.latitude.toString() else "null"
+        val lonJson = if (o.longitude != null) o.longitude.toString() else "null"
+
+        val windowStartJson =
+            if (!o.deliveryTimeStart.isNullOrBlank()) "\"${o.deliveryTimeStart!!.escapeJson()}\"" else "null"
+        val windowEndJson =
+            if (!o.deliveryTimeEnd.isNullOrBlank()) "\"${o.deliveryTimeEnd!!.escapeJson()}\"" else "null"
+
+        val manualArrivalJson = if (o.manualArrivalTime != null) "\"${o.manualArrivalTime}\"" else "null"
+
+        """{"order_number":"${o.orderNumber}","address":"${o.address.escapeJson()}","lat":$latJson,"lon":$lonJson,"window_start":$windowStartJson,"window_end":$windowEndJson,"phone":"${(o.phone ?: "").escapeJson()}","customer_name":"${(o.customerName ?: "").escapeJson()}","manual_arrival_iso":$manualArrivalJson}"""
     }
-    return """{"start_location":{"lat":$startLat,"lon":$startLon},"start_time_iso":"$startTimeIso","settings":{"service_time_minutes":$serviceTimeMinutes},"orders":[$ordersJson],"route_matrix":{}}"""
+    return """{"start_location":{"lat":$startLat,"lon":$startLon},"start_time_iso":"$startTimeIso","settings":{"service_time_minutes":$serviceTimeMinutes},"yandex_api_key":"${BuildConfig.YANDEX_MAPS_API_KEY}","two_gis_api_key":"${BuildConfig.TWO_GIS_API_KEY}","orders":[$ordersJson],"route_matrix":{}}"""
 }
 
 private fun String.escapeJson(): String = replace("\\", "\\\\").replace("\"", "\\\"")

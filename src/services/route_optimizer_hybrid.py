@@ -6,7 +6,7 @@ from typing import List, Tuple
 from datetime import datetime, timedelta
 from math import radians, sin, cos, sqrt, atan2
 
-from src.models.order import Order, RoutePoint, OptimizedRoute
+from src.models.route_types import Order, OptimizedRoute, RoutePoint
 from src.services.maps_service import MapsService
 from src.services.user_settings_service import UserSettingsService
 

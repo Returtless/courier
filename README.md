@@ -4,7 +4,7 @@ Telegram бот для оптимизации маршрутов доставк�
 
 ## ✨ Возможности
 
-- 📍 **Оптимизация маршрутов** с учетом реального трафика через 2GIS API
+- 📍 **Оптимизация маршрутов**: OSRM основной провайдер маршрутизации (duration без пробок), геокодинг через Yandex/2GIS
 - ⏰ **Управление временными окнами** доставки
 - 🕐 **Ручное управление временем** - установка точного времени звонка и прибытия для любого заказа с защитой от перезаписи при реоптимизации
 - 📞 **Автоматические уведомления** о звонках с кнопками подтверждения/отклонения
@@ -32,13 +32,84 @@ Telegram бот для оптимизации маршрутов доставк�
 - **pyTelegramBotAPI** - Telegram Bot API
 - **SQLAlchemy** - ORM для базы данных
 - **Alembic** - автоматические миграции базы данных
-- **2GIS API** - карты и маршруты с пробками (основной)
-- **Yandex Maps API** - резервный вариант для геокодирования
+- **OSRM** - основной провайдер маршрутизации (duration без пробок)
+- **Yandex Maps API** - открытый геокодинг (приоритет), резервный вариант
+- **2GIS API** - открытый геокодинг/заглушки для routing “на будущее”
 - **Geopy** - fallback для геокодирования
 - **OR-Tools** - оптимизация маршрутов (VRP/TSP)
 - **PostgreSQL/SQLite** - база данных
 - **Playwright** - автоматизация браузера для импорта заказов из веб-приложений
 - **Cryptography (Fernet)** - шифрование учетных данных пользователей
+
+## 🧭 Структура проекта (для других AI-агентов)
+
+Этот репозиторий содержит 2 части:
+
+1) **Python-бэкенд Telegram-бота** (оптимизация маршрутов, геокодинг/маршрутизация, БД, уведомления).
+2) **Android-клиент** (Jetpack Compose UI + Chaquopy), который дергает Python-оптимизацию локально на устройстве.
+
+### Корень репозитория
+- `main.py` — точка входа Telegram-бота.
+- `src/` — основная логика Python (бот, сервисы, оптимизация, маршрутизация, API).
+- `android/` — Android-приложение (UI, навигация, Chaquopy-bridge).
+- `alembic/` и `alembic.ini` — миграции БД.
+- `docker-compose.yml`, `Dockerfile` — контейнеризация бэкенда.
+- `docs/` — планы/документы по архитектуре и тестированию.
+- `tests/` — unit/integration тесты.
+
+### Python-бэкенд: `src/` (что где лежит)
+- `[src/bot/]` — Telegram-слой:
+  - handlers и сценарии взаимодействия с пользователем (заказы, маршрут, звонки).
+  - вызывает сервисы оптимизации/репозитории.
+- `[src/api/]` — HTTP API (FastAPI), маршруты и DTO/схемы.
+- `[src/application/]` — “сборка” приложения и orchestration (контейнер зависимостей, application services).
+- `[src/models/]` — модели данных (SQLAlchemy + Pydantic), включая Order/Route/CallStatus и кеши.
+- `[src/database/]` — подключение к БД и Session lifecycle.
+- `[src/repositories/]` — работа с БД на уровне репозиториев (OrdersDao/RoutesDao/CallStatusDao и т.п.).
+- `[src/services/]` — бизнес-логика:
+  - `[src/services/maps_service.py]` — геокодинг + построение маршрутов:
+    - геокодинг: сначала **Yandex**, затем **2GIS**, fallback на geopy.
+    - routing: **OSRM основной** (duration без пробок); 2GIS/Yandex routing оставлены как заглушки “на будущее”; общий fallback — haversine + средняя скорость.
+  - `[src/services/route_optimizer.py]` — матрицы расстояний/времени + оптимизация VRP через OR-Tools.
+  - `[src/services/route_optimizer_genetic.py]` — альтернативный/генетический оптимизатор (используется в гибридных пайплайнах).
+  - `[src/services/call_notifier*.py]`, `[src/services/traffic_monitor*.py]` — уведомления и мониторинг (в зависимости от конфигурации).
+- `[src/utils/]` — утилиты: форматирование, обработка ошибок, message_utils.
+
+### Android-клиент: `android/app/`
+- `android/app/src/main/java/com/courierplanning/`
+  - `ui/screens/` — экраны:
+    - `OrdersScreen` (список заказов + переход к импорту/настройкам),
+    - `ImportTextScreen` (импорт заказов текстом),
+    - `RouteScreen` (построение маршрута через Python),
+    - `CallsScreen` (логика звонков и повторов),
+    - `SettingsScreen` (время/координаты старта и параметры маршрута).
+  - `optimizer/PythonOptimizer.kt` — Chaquopy вызов Python модуля `courierpy.optimizer_bridge`.
+  - `settings/StartLocationPrefs.kt` — хранение стартовых координат/времени в SharedPreferences.
+  - `AppServices.kt` — инициализация Room DB и репозитория статусов звонков.
+- `android/app/src/main/python/courierpy/optimizer_bridge.py`
+  - `optimize_route_json(payload_json)` — bridge-эндпоинт для Android:
+    1) забирает API-ключи из payload в env,
+    2) импортирует `src.services.route_optimizer.RouteOptimizer`,
+    3) дергает `RouteOptimizer.optimize_route_sync()`,
+    4) возвращает JSON-ответ в контракте, который ожидает `RouteScreen`.
+  - Важно: `call_time_iso` намеренно не передается, потому что `RouteScreen` вычисляет его как `ETA - callAdvanceMinutes`.
+- `android/app/build.gradle.kts`
+  - настройки Chaquopy, pip-депы для Python-оптимизации,
+  - `buildConfigField` для прокидывания ключей `YANDEX_MAPS_API_KEY`/`TWO_GIS_API_KEY`.
+  - если `:app:generateDebugPythonRequirements` падает с `ReadTimeoutError` на `chaquo.com` — увеличьте `--timeout` в `pip { options(...) }`, повторите сборку; при нестабильном канале помогает VPN или ручная загрузка нужных `.whl` и `install("относительный/путь/к/колесу.whl")` в том же блоке.
+  - задача pip **долгая**: Chaquopy качает зависимости **отдельно для каждого ABI** (arm64 / armeabi-v7a / x86_64) — первый прогон легко 15–40+ мин при медленном интернете. По умолчанию в `android/gradle.properties` задано **`courier.fastAbi=true`** (только телефон arm64). Для эмулятора x86_64 поставьте `false` или удалите строку. В PowerShell нельзя писать `.fastAbi=true` без `-P` — Gradle воспримет это за **имя задачи**; правильно: `gradlew installDebug "-Pcourier.fastAbi=true"`.
+  - **Pydantic:** на Android в Gradle указан **Pydantic 1.x** (без `pydantic-core`/Rust). На сервере/в venv по-прежнему **Pydantic 2** из `requirements.txt`; `src/config.py`, `src/models/order.py` и `user_settings_service` поддерживают обе версии.
+  - **`mergeDebugPythonSources` / MD5 на Windows:** не подключайте в Chaquopy весь корень репозитория (`srcDir("../../")`). В проекте используется задача **`syncChaquopyPythonSources`**: копируется только каталог **`../src`** в `app/build/generated/chaquopyPythonRoot/`, откуда Chaquopy собирает `import src.*`.
+
+### Сквозной поток “Заказы -> Маршрут -> Звонки”
+1. `ImportTextScreen` парсит текст заказов в entities (Room).
+2. `RouteScreen` собирает payload (start time/координаты/окна) и вызывает Chaquopy `optimizer_bridge`.
+3. `optimizer_bridge` вызывает Python `RouteOptimizer`:
+   - при необходимости геокодит адреса,
+   - строит матрицу distance/time через `MapsService` (OSRM-first),
+   - решает VRP (OR-Tools) и формирует `route_points`.
+4. `RouteScreen` сохраняет маршрут в Room и создает `CallStatusEntity` по `callAdvanceMinutes`.
+5. `CallsScreen` показывает статусы и управляет retry-логикой через `CallStatusRepository`.
 
 ## 📦 Установка
 
@@ -385,7 +456,7 @@ docker-compose logs -f bot
 - Бот показывает прогресс в реальном времени
 - Геокодирует все адреса (использует кэш для уже известных адресов)
 - Определяет координаты точки старта (если еще не определены)
-- Строит оптимальный маршрут с учетом пробок через 2GIS API
+- Строит оптимальный маршрут через OSRM (без пробок); 2GIS/Yandex routing временно отключены (заглушки); fallback — расчет по расстоянию/скорости
 - Учитывает временные окна доставки
 - Рассчитывает время звонков (минимум 40 минут до доставки)
 - Сохраняет координаты всех точек для последующих оптимизаций
@@ -435,10 +506,11 @@ docker-compose logs -f bot
 
 ## 🗺️ Работа с картами
 
-- **2GIS API** - основной сервис для построения маршрутов с пробками
-- **Yandex Maps API** - резервный вариант для геокодирования
+- **OSRM** - основной сервис для построения маршрутов (duration без пробок)
+- **Yandex Maps API** - приоритет для геокодирования
+- **2GIS API** - используется для геокодирования (routing оставлен как заглушка “на будущее”)
 - **Geopy** - fallback для геокодирования (OpenStreetMap)
-- **Реальное время** пробок через 2GIS
+- (Пробки) текущий режим использует duration без пробок (OSRM)
 - **Кликабельные ссылки** на маршруты и точки в 2GIS и Яндекс Картах
 
 ## 📊 Оптимизация маршрутов
@@ -447,7 +519,7 @@ docker-compose logs -f bot
 - **VRP (Vehicle Routing Problem)** - оптимизация для нескольких курьеров
 - **TSP (Traveling Salesman Problem)** - оптимизация для одного курьера
 - **Time Windows** - учет временных интервалов доставки
-- **Traffic-aware** - учет пробок в реальном времени
+- **Traffic-aware** - пока режим без пробок (duration от OSRM); пробки планируются через routing провайдеры “на будущее”
 - **Constraint optimization** - ограничения по времени и расстоянию
 - **10 минут на доставку** - учитывается время парковки и подхода к клиенту
 

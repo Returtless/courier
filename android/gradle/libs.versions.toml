@@ -14,6 +14,8 @@ hilt = "2.52"
 chaquopy = "16.0.0"
 mlkitText = "16.0.1"
 securityCrypto = "1.1.0-alpha06"
+junit4 = "4.13.2"
+jsonOrg = "20240303"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
@@ -38,9 +40,15 @@ androidx-security-crypto = { module = "androidx.security:security-crypto", versi
 
 androidx-compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
 
+junit = { module = "junit:junit", version.ref = "junit4" }
+
+# Real org.json for JVM unit tests (android.jar stubs throw "Method ... not mocked").
+jsonObject = { module = "org.json:json", version.ref = "jsonOrg" }
+
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 chaquopy = { id = "com.chaquo.python", version.ref = "chaquopy" }

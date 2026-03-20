@@ -1,0 +1,40 @@
+{
+  "rng_seed": 42,
+  "start_location": { "lat": 59.9, "lon": 30.31 },
+  "start_time_iso": "2026-01-29T09:20:00+03:00",
+  "settings": { "service_time_minutes": 10 },
+  "nodes": [
+    { "lat": 59.9, "lon": 30.31 },
+    { "lat": 59.91, "lon": 30.32 },
+    { "lat": 59.92, "lon": 30.33 }
+  ],
+  "route_matrix": {
+    "0,0": { "distance_km": 0, "travel_min": 0 },
+    "0,1": { "distance_km": 2.0, "travel_min": 5.0 },
+    "0,2": { "distance_km": 3.0, "travel_min": 8.0 },
+    "1,0": { "distance_km": 2.0, "travel_min": 5.0 },
+    "1,1": { "distance_km": 0, "travel_min": 0 },
+    "1,2": { "distance_km": 1.5, "travel_min": 4.0 },
+    "2,0": { "distance_km": 3.0, "travel_min": 8.0 },
+    "2,1": { "distance_km": 1.5, "travel_min": 4.0 },
+    "2,2": { "distance_km": 0, "travel_min": 0 }
+  },
+  "orders": [
+    {
+      "order_number": "A1",
+      "address": "Addr1",
+      "lat": 59.91,
+      "lon": 30.32,
+      "window_start": "10:00",
+      "window_end": "18:00"
+    },
+    {
+      "order_number": "B2",
+      "address": "Addr2",
+      "lat": 59.92,
+      "lon": 30.33,
+      "window_start": "10:00",
+      "window_end": "18:00"
+    }
+  ]
+}

@@ -5,11 +5,11 @@
 import itertools
 import logging
 import random
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Set
 from datetime import datetime, time, timedelta
 from math import radians, sin, cos, sqrt, atan2
 
-from src.models.order import Order, RoutePoint, OptimizedRoute
+from src.models.route_types import Order, OptimizedRoute, RoutePoint
 from src.services.maps_service import MapsService
 from src.services.user_settings_service import UserSettingsService
 
@@ -39,7 +39,19 @@ class GeneticRouteOptimizer:
         self.maps_service = maps_service
         self.settings_service = UserSettingsService()
         random.seed()  # Инициализация генератора случайных чисел
-    
+        self._service_time_minutes_override: Optional[int] = None
+
+    def _effective_service_minutes(self, user_id: Optional[int]) -> int:
+        """Как в RouteOptimizer: override (Android) > настройки пользователя > 10."""
+        if self._service_time_minutes_override is not None:
+            return int(self._service_time_minutes_override)
+        if user_id is not None:
+            try:
+                return int(self.settings_service.get_settings(user_id).service_time_minutes)
+            except Exception:
+                pass
+        return 10
+
     def optimize_route_sync(
         self,
         orders: List[Order],
@@ -47,7 +59,8 @@ class GeneticRouteOptimizer:
         start_time: datetime,
         vehicle_capacity: int = 50,  # Не используется, но для совместимости
         user_id: int = None,
-        use_fallback: bool = False  # Не используется
+        use_fallback: bool = False,  # Не используется
+        service_time_minutes_override: Optional[int] = None,
     ) -> OptimizedRoute:
         """
         Оптимизировать маршрут для списка заказов с помощью генетического алгоритма
@@ -59,14 +72,17 @@ class GeneticRouteOptimizer:
             vehicle_capacity: Не используется (для совместимости)
             user_id: ID пользователя
             use_fallback: Не используется (для совместимости)
-            
+            service_time_minutes_override: минуты обслуживания (например с Android)
+
         Returns:
             Оптимизированный маршрут
         """
         if not orders:
             logger.info("📦 Нет заказов для оптимизации")
             return OptimizedRoute(points=[], total_distance=0, total_time=0, estimated_completion=start_time)
-        
+
+        self._service_time_minutes_override = service_time_minutes_override
+
         logger.info(f"🧬 ГЕНЕТИЧЕСКАЯ ОПТИМИЗАЦИЯ: {len(orders)} заказов")
         logger.info(f"⏰ Время старта: {start_time.strftime('%H:%M')}")
         
@@ -464,11 +480,8 @@ class GeneticRouteOptimizer:
                         logger.warning(f"   ⚠️ Опоздание {delay:.0f} мин")
             
             # Время обслуживания
-            service_time_minutes = 10
-            if user_id:
-                user_settings = self.settings_service.get_settings(user_id)
-                service_time_minutes = user_settings.service_time_minutes
-            
+            service_time_minutes = self._effective_service_minutes(user_id)
+
             point = RoutePoint(
                 order=order,
                 estimated_arrival=arrival_time,
@@ -735,15 +748,9 @@ class GeneticRouteOptimizer:
         num_orders = len(orders)
         if num_orders == 0:
             return []
-        
-        service_time_minutes = 10
-        if user_id is not None:
-            try:
-                user_settings = self.settings_service.get_settings(user_id)
-                service_time_minutes = user_settings.service_time_minutes
-            except Exception:
-                pass
-        
+
+        service_time_minutes = self._effective_service_minutes(user_id)
+
         chromosome = []
         remaining = set(range(num_orders))
         current_location = start_location
@@ -848,13 +855,10 @@ class GeneticRouteOptimizer:
         current_location = start_location
         current_time = start_time
         order_date = start_time.date()
-        
+
         # Время обслуживания
-        service_time_minutes = 10
-        if user_id:
-            user_settings = self.settings_service.get_settings(user_id)
-            service_time_minutes = user_settings.service_time_minutes
-        
+        service_time_minutes = self._effective_service_minutes(user_id)
+
         for order_idx in chromosome:
             if order_idx >= len(orders):
                 return float('inf')
@@ -1239,13 +1243,10 @@ class GeneticRouteOptimizer:
         current_location = start_location
         current_time = start_time
         order_date = start_time.date()
-        
+
         # Время обслуживания
-        service_time_minutes = 10
-        if user_id:
-            user_settings = self.settings_service.get_settings(user_id)
-            service_time_minutes = user_settings.service_time_minutes
-        
+        service_time_minutes = self._effective_service_minutes(user_id)
+
         for order_idx in chromosome:
             if order_idx >= len(orders):
                 continue
@@ -1892,15 +1893,9 @@ class GeneticRouteOptimizer:
         
         max_exact = 8
         n = len(rescue_orders)
-        
-        service_time_minutes = 10
-        if user_id:
-            try:
-                user_settings = self.settings_service.get_settings(user_id)
-                service_time_minutes = user_settings.service_time_minutes
-            except Exception:
-                pass
-        
+
+        service_time_minutes = self._effective_service_minutes(user_id)
+
         def eval_sequence(seq: List[Order]) -> Tuple[float, float]:
             current_location = start_location
             current_time = start_time
@@ -2008,7 +2003,7 @@ class GeneticRouteOptimizer:
         
         n = len(route.points)
         max_rescue = 8
-        rescue_indices: set[int] = set()
+        rescue_indices: Set[int] = set()
         
         # Опаздывающие и соседи по маршруту
         for idx, _, _ in late_points:
@@ -2059,13 +2054,7 @@ class GeneticRouteOptimizer:
         if prefix_points:
             last_prefix = prefix_points[-1]
             sub_start_location = (last_prefix.order.latitude, last_prefix.order.longitude)
-            service_time_minutes = 10
-            if user_id:
-                try:
-                    user_settings = self.settings_service.get_settings(user_id)
-                    service_time_minutes = user_settings.service_time_minutes
-                except Exception:
-                    pass
+            service_time_minutes = self._effective_service_minutes(user_id)
             sub_start_time = last_prefix.estimated_arrival + timedelta(minutes=service_time_minutes)
         else:
             sub_start_location = start_location
@@ -2145,13 +2134,10 @@ class GeneticRouteOptimizer:
         current_location = start_location
         current_time = start_time
         order_date = start_time.date()
-        
+
         # Время обслуживания
-        service_time_minutes = 10
-        if user_id:
-            user_settings = self.settings_service.get_settings(user_id)
-            service_time_minutes = user_settings.service_time_minutes
-        
+        service_time_minutes = self._effective_service_minutes(user_id)
+
         for point in points_list:
             order = point.order
             
