@@ -69,16 +69,16 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Empty directories
+# Empty directories (only at repo root — не скрывать android/.../com/courierplanning/data/db)
 courier/
 models/
-data/
+/data/
 srcbothandlers/
 tests/e2e/
 
 # Alembic
 # (keep migrations, but ignore generated files if any)
 
-# Chaquopy pre-downloaded wheels (large binaries; keep README in repo)
+# Legacy Chaquopy wheels (optional empty dir)
 android/app/chaquopy-local-wheels/*.whl
 

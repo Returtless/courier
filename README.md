@@ -46,12 +46,12 @@ Telegram бот для оптимизации маршрутов доставк�
 Этот репозиторий содержит 2 части:
 
 1) **Python-бэкенд Telegram-бота** (оптимизация маршрутов, геокодинг/маршрутизация, БД, уведомления).
-2) **Android-клиент** (Jetpack Compose UI + Chaquopy), который дергает Python-оптимизацию локально на устройстве.
+2) **Android-клиент** (Jetpack Compose UI + Kotlin-оптимизатор маршрута с parity-логикой, без встроенного Python).
 
 ### Корень репозитория
 - `main.py` — точка входа Telegram-бота.
 - `src/` — основная логика Python (бот, сервисы, оптимизация, маршрутизация, API).
-- `android/` — Android-приложение (UI, навигация, Chaquopy-bridge).
+- `android/` — Android-приложение (UI, навигация, `KotlinOptimizer`).
 - `alembic/` и `alembic.ini` — миграции БД.
 - `docker-compose.yml`, `Dockerfile` — контейнеризация бэкенда.
 - `docs/` — планы/документы по архитектуре и тестированию.
@@ -80,34 +80,24 @@ Telegram бот для оптимизации маршрутов доставк�
   - `ui/screens/` — экраны:
     - `OrdersScreen` (список заказов + переход к импорту/настройкам),
     - `ImportTextScreen` (импорт заказов текстом),
-    - `RouteScreen` (построение маршрута через Python),
+    - `RouteScreen` (построение маршрута через Kotlin),
     - `CallsScreen` (логика звонков и повторов),
     - `SettingsScreen` (время/координаты старта и параметры маршрута).
-  - `optimizer/PythonOptimizer.kt` — Chaquopy вызов Python модуля `courierpy.optimizer_bridge`.
+  - `optimizer/KotlinOptimizer.kt` — JSON in/out как у бывшего `optimizer_bridge`: кластеризация + матрица (haversine при пустой `route_matrix`) + оптимизация.
   - `settings/StartLocationPrefs.kt` — хранение стартовых координат/времени в SharedPreferences.
   - `AppServices.kt` — инициализация Room DB и репозитория статусов звонков.
-- `android/app/src/main/python/courierpy/optimizer_bridge.py`
-  - `optimize_route_json(payload_json)` — bridge-эндпоинт для Android:
-    1) забирает API-ключи из payload в env,
-    2) импортирует `src.services.route_optimizer.RouteOptimizer`,
-    3) дергает `RouteOptimizer.optimize_route_sync()`,
-    4) возвращает JSON-ответ в контракте, который ожидает `RouteScreen`.
-  - Важно: `call_time_iso` намеренно не передается, потому что `RouteScreen` вычисляет его как `ETA - callAdvanceMinutes`.
+  - `data/db/` — Room: заказы, маршрут, настройки, статусы звонков, **`geocode_cache`** (кэш геокода как у бота).
+    - Версия БД **2**, миграция **`MIGRATION_1_2`**: создаёт таблицу `geocode_cache`, при отсутствии колонки добавляет `orders.gis_id` (проверка через `PRAGMA table_info`).
+    - `CourierApplication` вызывает `AppServices.init`; в `AndroidManifest.xml` укажите `android:name=".CourierApplication"` (или вызовите `AppServices.init` из своего `Application`).
+    - `RouteScreen` передаёт в `KotlinOptimizer.optimizeRouteJson` реализацию **`RoomGeocodeCacheStore`** и обновляет координаты/`gis_id` заказа после геокода.
 - `android/app/build.gradle.kts`
-  - настройки Chaquopy, pip-депы для Python-оптимизации,
-  - `buildConfigField` для прокидывания ключей `YANDEX_MAPS_API_KEY`/`TWO_GIS_API_KEY`.
-  - если `:app:generateDebugPythonRequirements` падает с `ReadTimeoutError` на `chaquo.com` — увеличьте `--timeout` в `pip { options(...) }`, повторите сборку; при нестабильном канале помогает VPN или ручная загрузка нужных `.whl` и `install("относительный/путь/к/колесу.whl")` в том же блоке.
-  - задача pip **долгая**: Chaquopy качает зависимости **отдельно для каждого ABI** (arm64 / armeabi-v7a / x86_64) — первый прогон легко 15–40+ мин при медленном интернете. По умолчанию в `android/gradle.properties` задано **`courier.fastAbi=true`** (только телефон arm64). Для эмулятора x86_64 поставьте `false` или удалите строку. В PowerShell нельзя писать `.fastAbi=true` без `-P` — Gradle воспримет это за **имя задачи**; правильно: `gradlew installDebug "-Pcourier.fastAbi=true"`.
-  - **Pydantic:** на Android в Gradle указан **Pydantic 1.x** (без `pydantic-core`/Rust). На сервере/в venv по-прежнему **Pydantic 2** из `requirements.txt`; `src/config.py`, `src/models/order.py` и `user_settings_service` поддерживают обе версии.
-  - **`mergeDebugPythonSources` / MD5 на Windows:** не подключайте в Chaquopy весь корень репозитория (`srcDir("../../")`). В проекте используется задача **`syncChaquopyPythonSources`**: копируется только каталог **`../src`** в `app/build/generated/chaquopyPythonRoot/`, откуда Chaquopy собирает `import src.*`.
+  - `buildConfigField` для ключей `YANDEX_MAPS_API_KEY`/`TWO_GIS_API_KEY` (на будущее для сетевых карт; текущий Kotlin-путь при пустой матрице использует haversine).
+  - для Room KSP на Windows временная директория SQLite задаётся в начале скрипта (`%TEMP%/courier-room-sqlite-ksp`), см. комментарий в `build.gradle.kts`.
 
 ### Сквозной поток “Заказы -> Маршрут -> Звонки”
 1. `ImportTextScreen` парсит текст заказов в entities (Room).
-2. `RouteScreen` собирает payload (start time/координаты/окна) и вызывает Chaquopy `optimizer_bridge`.
-3. `optimizer_bridge` вызывает Python `RouteOptimizer`:
-   - при необходимости геокодит адреса,
-   - строит матрицу distance/time через `MapsService` (OSRM-first),
-   - решает VRP (OR-Tools) и формирует `route_points`.
+2. `RouteScreen` собирает payload (start time/координаты/окна) и вызывает `KotlinOptimizer.optimizeRouteJson`.
+3. Оптимизатор строит синтетическую матрицу (haversine) и считает маршрут на устройстве (parity-пайплайн в `routeopt/`). Для эталонных сценариев см. `parity_fixtures/` и `tools/export_optimizer_golden.py` на Python.
 4. `RouteScreen` сохраняет маршрут в Room и создает `CallStatusEntity` по `callAdvanceMinutes`.
 5. `CallsScreen` показывает статусы и управляет retry-логикой через `CallStatusRepository`.
 

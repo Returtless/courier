@@ -36,13 +36,15 @@ import com.courierplanning.data.db.CallStatusEntity
 import com.courierplanning.data.db.OrderEntity
 import com.courierplanning.data.db.RouteEntity
 import com.courierplanning.data.db.RoutePointEntity
-import com.courierplanning.optimizer.PythonOptimizer
+import com.courierplanning.maps.RoomGeocodeCacheStore
+import com.courierplanning.optimizer.KotlinOptimizer
 import com.courierplanning.settings.StartLocationPrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.Instant
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.parseToJsonElement
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -65,7 +67,7 @@ fun RouteScreen(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(todayIso) {
-        val (r, p) = loadRouteData(todayIso)
+        val (r, p) = loadRouteData(context, todayIso)
         route = r
         points = p
     }
@@ -108,7 +110,7 @@ fun RouteScreen(onBack: () -> Unit) {
                     scope.launch(Dispatchers.IO) {
                         try {
                             buildAndSaveRoute(context, todayIso)
-                            val (r, p) = loadRouteData(todayIso)
+                            val (r, p) = loadRouteData(context, todayIso)
                             withContext(Dispatchers.Main) {
                                 route = r
                                 points = p
@@ -211,15 +213,18 @@ fun RouteScreen(onBack: () -> Unit) {
     }
 }
 
-private suspend fun loadRouteData(routeDate: String): Pair<RouteEntity?, List<RoutePointEntity>> =
+private suspend fun loadRouteData(context: Context, routeDate: String): Pair<RouteEntity?, List<RoutePointEntity>> =
     withContext(Dispatchers.IO) {
+        AppServices.init(context.applicationContext)
         val r = AppServices.db.routesDao().getByDate(routeDate)
         val p = r?.let { AppServices.db.routePointsDao().list(it.id) } ?: emptyList()
         r to p
     }
 
 private suspend fun buildAndSaveRoute(context: Context, routeDate: String) {
+    AppServices.init(context.applicationContext)
     val db = AppServices.db
+    val geoCache = RoomGeocodeCacheStore(db.geocodeCacheDao())
     val orders = db.ordersDao().listByDate(routeDate)
     if (orders.isEmpty()) throw IllegalStateException("Нет заказов на $routeDate")
     val settings = db.settingsDao().get() ?: com.courierplanning.data.db.SettingsEntity()
@@ -229,8 +234,15 @@ private suspend fun buildAndSaveRoute(context: Context, routeDate: String) {
     val startLat = startCfg.startLat
     val startLon = startCfg.startLon
     val payload = buildPayload(orders, startLat, startLon, startTime, settings.serviceTimeMinutes)
-    PythonOptimizer.ensureStarted(context)
-    val result = PythonOptimizer.optimize(payload)
+    val result = json.parseToJsonElement(
+        KotlinOptimizer.optimizeRouteJson(
+            payload,
+            persistentGeocodeCache = geoCache,
+            onGeocoded = { orderNumber, lat, lon, gisId ->
+                db.ordersDao().updateGeocode(orderNumber, routeDate, lat, lon, gisId)
+            },
+        ),
+    ).jsonObject
     val routePointsJson = result["route_points"]!!.jsonArray
     val totalDistanceKm = result["total_distance_km"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0
     val totalTimeMin = result["total_time_min"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0
@@ -306,8 +318,9 @@ private fun buildPayload(
     serviceTimeMinutes: Int,
 ): String {
     val ordersJson = orders.joinToString(",") { o ->
-        val latJson = if (o.latitude != null) o.latitude.toString() else "null"
-        val lonJson = if (o.longitude != null) o.longitude.toString() else "null"
+        // ParityOptimizeInputJson uses non-null Double for lat/lon; missing coords → 0.0 (filtered out in ParityRouteFacade).
+        val la = o.latitude ?: 0.0
+        val lo = o.longitude ?: 0.0
 
         val windowStartJson =
             if (!o.deliveryTimeStart.isNullOrBlank()) "\"${o.deliveryTimeStart!!.escapeJson()}\"" else "null"
@@ -316,9 +329,18 @@ private fun buildPayload(
 
         val manualArrivalJson = if (o.manualArrivalTime != null) "\"${o.manualArrivalTime}\"" else "null"
 
-        """{"order_number":"${o.orderNumber}","address":"${o.address.escapeJson()}","lat":$latJson,"lon":$lonJson,"window_start":$windowStartJson,"window_end":$windowEndJson,"phone":"${(o.phone ?: "").escapeJson()}","customer_name":"${(o.customerName ?: "").escapeJson()}","manual_arrival_iso":$manualArrivalJson}"""
+        """{"order_number":"${o.orderNumber}","address":"${o.address.escapeJson()}","lat":$la,"lon":$lo,"window_start":$windowStartJson,"window_end":$windowEndJson,"phone":"${(o.phone ?: "").escapeJson()}","customer_name":"${(o.customerName ?: "").escapeJson()}","manual_arrival_iso":$manualArrivalJson}"""
     }
-    return """{"start_location":{"lat":$startLat,"lon":$startLon},"start_time_iso":"$startTimeIso","settings":{"service_time_minutes":$serviceTimeMinutes},"yandex_api_key":"${BuildConfig.YANDEX_MAPS_API_KEY}","two_gis_api_key":"${BuildConfig.TWO_GIS_API_KEY}","orders":[$ordersJson],"route_matrix":{}}"""
+    val nodesJson = buildString {
+        append("""{"lat":$startLat,"lon":$startLon}""")
+        for (o in orders) {
+            append(',')
+            val la = o.latitude ?: 0.0
+            val lo = o.longitude ?: 0.0
+            append("""{"lat":$la,"lon":$lo}""")
+        }
+    }
+    return """{"rng_seed":42,"start_location":{"lat":$startLat,"lon":$startLon},"start_time_iso":"$startTimeIso","settings":{"service_time_minutes":$serviceTimeMinutes},"nodes":[$nodesJson],"yandex_api_key":"${BuildConfig.YANDEX_MAPS_API_KEY}","two_gis_api_key":"${BuildConfig.TWO_GIS_API_KEY}","orders":[$ordersJson],"route_matrix":{}}"""
 }
 
 private fun String.escapeJson(): String = replace("\\", "\\\\").replace("\"", "\\\"")
