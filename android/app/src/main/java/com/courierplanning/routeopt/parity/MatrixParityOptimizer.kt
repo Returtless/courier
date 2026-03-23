@@ -1,5 +1,8 @@
 package com.courierplanning.routeopt.parity
 
+import com.courierplanning.routeopt.core.MatrixRoutingAdapter
+import com.courierplanning.routeopt.genetic.GeneticRoutePostProcessor
+import com.courierplanning.routeopt.genetic.KotlinGeneticRouteOptimizer
 import com.courierplanning.routeopt.math.DeliveryTimeWindowParser
 import java.time.LocalDate
 import java.time.LocalTime
@@ -15,9 +18,11 @@ import kotlin.math.roundToLong
  * Parity path: matrix-only routing, exhaustive permutation search, fitness + route build aligned with
  * [src.services.route_optimizer_genetic.GeneticRouteOptimizer] (_calculate_fitness + core loop of _build_route_from_chromosome).
  *
- * For small N (≤8) picks the chromosome with minimum fitness; sufficient for [parity_fixtures/tiny_two_orders].
+ * For N ≤ [MAX_EXHAUSTIVE_PERM] exhaustive permutation; larger N uses [KotlinGeneticRouteOptimizer] (как бот без OR-Tools).
  */
 object MatrixParityOptimizer {
+
+    const val MAX_EXHAUSTIVE_PERM = 8
 
     private val WINDOW_HH_MM: DateTimeFormatter =
         DateTimeFormatter.ofPattern("HH:mm").withLocale(Locale.ROOT)
@@ -65,7 +70,7 @@ object MatrixParityOptimizer {
         val orderDate: LocalDate = startZdt.toLocalDate()
         val serviceMin = input.settings.serviceTimeMinutes.toDouble()
 
-        val maps = ParityMapsAdapter(
+        val maps: MatrixRoutingAdapter = ParityMapsAdapter(
             input.nodes.map { it.lat to it.lon },
             input.routeMatrix.mapValues { (_, c) ->
                 ParityMapsAdapter.Leg(c.distanceKm, c.travelMin)
@@ -78,6 +83,16 @@ object MatrixParityOptimizer {
                 totalDistanceKm = 0.0,
                 totalTimeMin = 0.0,
                 estimatedCompletionIso = startZdt.toPythonIso(),
+            )
+        }
+
+        if (orders.size > MAX_EXHAUSTIVE_PERM) {
+            return KotlinGeneticRouteOptimizer(input.rngSeed, serviceMin).optimize(
+                orders,
+                maps,
+                input.startLocation.lat,
+                input.startLocation.lon,
+                startZdt,
             )
         }
 
@@ -101,8 +116,15 @@ object MatrixParityOptimizer {
             input.startLocation.lat, input.startLocation.lon,
             startZdt, orderDate, zone, serviceMin,
         )
-
-        return toOutputJson(route, orderDate, zone)
+        val finished = GeneticRoutePostProcessor.applyBotPostProcess(
+            route,
+            maps,
+            input.startLocation.lat,
+            input.startLocation.lon,
+            startZdt,
+            serviceMin,
+        )
+        return toOutputJson(finished, orderDate, zone)
     }
 
     private fun buildUnclusteredInternalOrders(
@@ -122,10 +144,10 @@ object MatrixParityOptimizer {
             )
         }
 
-    private fun fitness(
+    internal fun fitness(
         chromosome: IntArray,
         orders: List<InternalOrder>,
-        maps: ParityMapsAdapter,
+        maps: MatrixRoutingAdapter,
         startLat: Double,
         startLon: Double,
         startZdt: ZonedDateTime,
@@ -207,24 +229,24 @@ object MatrixParityOptimizer {
             totalTime * K_TIME
     }
 
-    private data class BuiltPoint(
+    internal data class BuiltPoint(
         val order: InternalOrder,
         val arrival: ZonedDateTime,
         val distanceFromPrev: Double,
         val timeFromPrev: Double,
     )
 
-    private data class BuiltRoute(
+    internal data class BuiltRoute(
         val points: List<BuiltPoint>,
         val totalDistance: Double,
         val totalTime: Double,
         val completion: ZonedDateTime,
     )
 
-    private fun buildRouteFromChromosome(
+    internal fun buildRouteFromChromosome(
         chromosome: IntArray,
         orders: List<InternalOrder>,
-        maps: ParityMapsAdapter,
+        maps: MatrixRoutingAdapter,
         startLat: Double,
         startLon: Double,
         startZdt: ZonedDateTime,
@@ -283,7 +305,52 @@ object MatrixParityOptimizer {
         return BuiltRoute(points, totalDistance, totalTime, curTime)
     }
 
-    private fun toOutputJson(route: BuiltRoute, orderDate: LocalDate, zone: java.time.ZoneId): ParityOptimizeOutputJson {
+    /**
+     * Как Python [_recalculate_route_times]: пересчёт без учёта manual_arrival (только ожидание начала окна).
+     * Нужен для постобработки fix/rescue/polish в [com.courierplanning.routeopt.genetic.GeneticRoutePostProcessor].
+     */
+    internal fun recalculateRouteFromOrderSequence(
+        sequence: List<InternalOrder>,
+        maps: MatrixRoutingAdapter,
+        startLat: Double,
+        startLon: Double,
+        startZdt: ZonedDateTime,
+        orderDate: LocalDate,
+        zone: java.time.ZoneId,
+        serviceMin: Double,
+    ): BuiltRoute? {
+        val points = mutableListOf<BuiltPoint>()
+        var totalDistance = 0.0
+        var totalTime = 0.0
+        var curLat = startLat
+        var curLon = startLon
+        var curTime = startZdt
+        return try {
+            for (order in sequence) {
+                val (dist, travelMin) = maps.getRouteSync(curLat, curLon, order.lat, order.lon)
+                var arrival = curTime.plusMinutesFp(travelMin)
+                val ws = order.windowStart
+                val we = order.windowEnd
+                if (ws != null && we != null) {
+                    val windowStart = ZonedDateTime.of(orderDate, ws, zone)
+                    if (arrival < windowStart) {
+                        arrival = windowStart
+                    }
+                }
+                points.add(BuiltPoint(order, arrival, dist, travelMin))
+                totalDistance += dist
+                totalTime += travelMin + serviceMin
+                curLat = order.lat
+                curLon = order.lon
+                curTime = arrival.plusMinutesFp(serviceMin)
+            }
+            BuiltRoute(points, totalDistance, totalTime, curTime)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    internal fun toOutputJson(route: BuiltRoute, orderDate: LocalDate, zone: java.time.ZoneId): ParityOptimizeOutputJson {
         val outs = route.points.map { p ->
             val we = p.order.windowEnd
             val windowEndZdt = if (we != null) ZonedDateTime.of(orderDate, we, zone) else null
