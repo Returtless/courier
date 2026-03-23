@@ -9,9 +9,9 @@ Used to compare **Python** `GeneticRouteOptimizer` (reference) with the future *
 
 ### Android golden test
 
-- `tiny_two_orders`: JVM unit test `TinyTwoOrdersGoldenParityTest` runs [ParityRouteFacade](android/app/src/main/java/com/courierplanning/routeopt/parity/ParityRouteFacade.kt) on the same `input.json` and asserts equality with `expected.json` (field-by-field, `meta` ignored). Uses cluster + exhaustive permutation for small N + same fitness weights as `route_optimizer_genetic.py`.
-- `telegram_spb_route_head5`: real coordinates/windows from a Telegram bot sample (first five stops). Matrix = haversine at 40 km/h via [generate_telegram_spb_fixtures.py](../tools/parity/generate_telegram_spb_fixtures.py) — not live routing; JVM test `TelegramSpbRouteHead5ParityTest`.
-- `telegram_spb_all19`: all 19 orders from the same sample (`input.json` only); use after Kotlin GA port (permutation search is too large).
+- `tiny_two_orders`: `TinyTwoOrdersGoldenParityTest` — [ParityRouteFacade] + **GA** (как Python без OR-Tools), **SplitMix64** по `rng_seed`; см. `export_optimizer_golden.py` и `src/services/genetic_rng.py`.
+- `telegram_spb_route_head5`: 5 остановок; матрица в JSON (haversine при генерации, [generate_telegram_spb_fixtures.py](../tools/parity/generate_telegram_spb_fixtures.py)). После смены GA перегенерируйте `expected.json`.
+- `telegram_spb_all19`: все 19 заказов (`input.json`); GA на Kotlin/Python без полного перебора.
 
 ### Cluster phase (intermediate)
 
@@ -31,10 +31,11 @@ Used to compare **Python** `GeneticRouteOptimizer` (reference) with the future *
 From repository root:
 
 ```bash
-python tools/export_optimizer_golden.py --fixture parity_fixtures/tiny_two_orders
+PYTHONPATH=. python tools/export_optimizer_golden.py --fixture parity_fixtures/tiny_two_orders
+PYTHONPATH=. python tools/export_optimizer_golden.py --fixture parity_fixtures/telegram_spb_route_head5
 ```
 
-Set `PYTHONPATH` to repo root if needed (same as running any `src.*` module).
+Экспорт подменяет `random` на **SplitMix64** с тем же seed, что и Kotlin JVM — иначе golden не совпадёт с `SplitMix64Rng(rng_seed)`.
 
 ## Math vectors (Kotlin vs Python)
 

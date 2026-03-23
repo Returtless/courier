@@ -7,7 +7,7 @@ import java.time.ZonedDateTime
 /**
  * Parity pipeline aligned with Python [src.services.route_optimizer_genetic.GeneticRouteOptimizer.optimize_route_sync]:
  * заказы с координатами → кластеризация + синхронизация окон → оптимизация
- * ([MatrixParityOptimizer]: полный перебор при N ≤ [MatrixParityOptimizer.MAX_EXHAUSTIVE_PERM], иначе GA).
+ * ([MatrixParityOptimizer]: один заказ — как [_build_single_order_route], иначе GA как в Python).
  */
 object ParityRouteFacade {
 

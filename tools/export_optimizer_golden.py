@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import random
 import sys
 from datetime import datetime, time
 from pathlib import Path
@@ -27,6 +26,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from src.models.route_types import Order  # noqa: E402
+from src.services.genetic_rng import SplitMix64Rng, patch_random_module  # noqa: E402
 from src.services.route_optimizer_genetic import GeneticRouteOptimizer  # noqa: E402
 from parity.fixture_maps_service import ParityMapsService  # noqa: E402
 
@@ -129,8 +129,8 @@ def run_fixture(fixture_dir: Path, dump_intermediate: bool = False) -> None:
     raw = json.loads(input_path.read_text(encoding="utf-8"))
 
     rng_seed = int(raw.get("rng_seed", 42))
-    random.seed(rng_seed)
-    logger.info("rng_seed=%s", rng_seed)
+    patch_random_module(SplitMix64Rng(rng_seed))
+    logger.info("rng_seed=%s (SplitMix64, same as Kotlin)", rng_seed)
 
     start_loc = raw["start_location"]
     start_lat, start_lon = float(start_loc["lat"]), float(start_loc["lon"])

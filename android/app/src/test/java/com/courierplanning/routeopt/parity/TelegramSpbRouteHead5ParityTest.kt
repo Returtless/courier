@@ -7,7 +7,7 @@ import org.junit.Test
 
 /**
  * Realistic subset of a Telegram CourierPlanningBot route (SPb): first five stops, real coords + windows.
- * Matrix is haversine at 40 km/h (synthetic — not 2GIS); goldens from Python [GeneticRouteOptimizer] + [ParityMapsService].
+ * Matrix from fixture JSON (haversine @ 40 km/h at generation time). Regenerate expected after GA/RNG changes (`export_optimizer_golden.py` + SplitMix).
  *
  * Full 19-order sample lives in [parity_fixtures/telegram_spb_all19] (too large for exhaustive perm until Kotlin GA exists).
  */

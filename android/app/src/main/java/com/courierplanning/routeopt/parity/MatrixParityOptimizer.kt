@@ -18,11 +18,9 @@ import kotlin.math.roundToLong
  * Parity path: matrix-only routing, exhaustive permutation search, fitness + route build aligned with
  * [src.services.route_optimizer_genetic.GeneticRouteOptimizer] (_calculate_fitness + core loop of _build_route_from_chromosome).
  *
- * For N ≤ [MAX_EXHAUSTIVE_PERM] exhaustive permutation; larger N uses [KotlinGeneticRouteOptimizer] (как бот без OR-Tools).
+ * Для N≥2 — только [KotlinGeneticRouteOptimizer], как Python [GeneticRouteOptimizer] без OR-Tools (нет полного перебора).
  */
 object MatrixParityOptimizer {
-
-    const val MAX_EXHAUSTIVE_PERM = 8
 
     private val WINDOW_HH_MM: DateTimeFormatter =
         DateTimeFormatter.ofPattern("HH:mm").withLocale(Locale.ROOT)
@@ -86,45 +84,56 @@ object MatrixParityOptimizer {
             )
         }
 
-        if (orders.size > MAX_EXHAUSTIVE_PERM) {
-            return KotlinGeneticRouteOptimizer(input.rngSeed, serviceMin).optimize(
-                orders,
+        if (orders.size == 1) {
+            val route = buildSingleOrderRouteNoManual(
+                orders[0],
                 maps,
                 input.startLocation.lat,
                 input.startLocation.lon,
                 startZdt,
+                orderDate,
+                zone,
+                serviceMin,
             )
+            return toOutputJson(route, orderDate, zone)
         }
 
-        val perms = allPermutations(orders.size)
-        var best: IntArray? = null
-        var bestFit = Double.POSITIVE_INFINITY
-        for (p in perms) {
-            val f = fitness(
-                p, orders, maps,
-                input.startLocation.lat, input.startLocation.lon,
-                startZdt, orderDate, zone, serviceMin,
-            )
-            if (f < bestFit) {
-                bestFit = f
-                best = p
-            }
-        }
-
-        val route = buildRouteFromChromosome(
-            best!!, orders, maps,
-            input.startLocation.lat, input.startLocation.lon,
-            startZdt, orderDate, zone, serviceMin,
-        )
-        val finished = GeneticRoutePostProcessor.applyBotPostProcess(
-            route,
+        return KotlinGeneticRouteOptimizer(input.rngSeed, serviceMin).optimize(
+            orders,
             maps,
             input.startLocation.lat,
             input.startLocation.lon,
             startZdt,
-            serviceMin,
         )
-        return toOutputJson(finished, orderDate, zone)
+    }
+
+    /**
+     * Как [GeneticRouteOptimizer._build_single_order_route]: окна, без manual_arrival, без постобработки.
+     */
+    internal fun buildSingleOrderRouteNoManual(
+        order: InternalOrder,
+        maps: MatrixRoutingAdapter,
+        startLat: Double,
+        startLon: Double,
+        startZdt: ZonedDateTime,
+        orderDate: LocalDate,
+        zone: java.time.ZoneId,
+        serviceMin: Double,
+    ): BuiltRoute {
+        val (dist, travelMin) = maps.getRouteSync(startLat, startLon, order.lat, order.lon)
+        var arrival = startZdt.plusMinutesFp(travelMin)
+        val ws = order.windowStart
+        val we = order.windowEnd
+        if (ws != null && we != null) {
+            val windowStart = ZonedDateTime.of(orderDate, ws, zone)
+            if (arrival < windowStart) {
+                arrival = windowStart
+            }
+        }
+        val points = listOf(BuiltPoint(order, arrival, dist, travelMin))
+        val totalTime = travelMin + serviceMin
+        val completion = arrival.plusMinutesFp(serviceMin)
+        return BuiltRoute(points, dist, totalTime, completion)
     }
 
     private fun buildUnclusteredInternalOrders(
@@ -379,28 +388,5 @@ object MatrixParityOptimizer {
     private fun ZonedDateTime.plusMinutesFp(minutes: Double): ZonedDateTime {
         val nanos = (minutes * 60_000_000_000.0).roundToLong()
         return this.plusNanos(nanos)
-    }
-
-    private fun allPermutations(n: Int): List<IntArray> {
-        if (n <= 0) return listOf(intArrayOf())
-        val a = IntArray(n) { it }
-        val out = mutableListOf<IntArray>()
-        fun permute(k: Int) {
-            if (k == n) {
-                out.add(a.copyOf())
-                return
-            }
-            for (i in k until n) {
-                val t = a[k]
-                a[k] = a[i]
-                a[i] = t
-                permute(k + 1)
-                val u = a[k]
-                a[k] = a[i]
-                a[i] = u
-            }
-        }
-        permute(0)
-        return out
     }
 }

@@ -5,21 +5,21 @@ import com.courierplanning.routeopt.math.Haversine
 import com.courierplanning.routeopt.parity.MatrixParityOptimizer
 import com.courierplanning.routeopt.parity.MatrixParityOptimizer.InternalOrder
 import com.courierplanning.routeopt.parity.ParityOptimizeOutputJson
+import com.courierplanning.routeopt.rng.SplitMix64Rng
 import java.time.LocalTime
 import java.time.ZonedDateTime
 import java.time.temporal.ChronoUnit
 import kotlin.math.roundToLong
-import kotlin.random.Random
 
 /**
- * Генетика в духе Python [GeneticRouteOptimizer] для N > exhaustive: элитизм, OX, мутации, repair окон.
- * RNG: [kotlin.random.Random] (не byte-parity с Python SplitMix; для прод-маршрутов с OSRM-матрицей).
+ * Порт цикла [src.services.route_optimizer_genetic.GeneticRouteOptimizer] (ветка без OR-Tools).
+ * RNG: [SplitMix64Rng] с seed из JSON — детерминированно; соответствует golden-экспорту при том же seed на Python.
  */
 class KotlinGeneticRouteOptimizer(
     seed: Int,
     private val serviceMin: Double,
 ) {
-    private val rng = Random(seed.toLong())
+    private val rng = SplitMix64Rng(seed.toUInt().toULong())
 
     private companion object {
         const val POPULATION_SIZE = 80
@@ -31,6 +31,9 @@ class KotlinGeneticRouteOptimizer(
         private val EARLY_END: LocalTime = LocalTime.of(13, 0)
     }
 
+    /**
+     * Только для N≥2 (как [_genetic_algorithm] в Python). Пустой список и один заказ — обрабатывает [MatrixParityOptimizer].
+     */
     fun optimize(
         orders: List<InternalOrder>,
         maps: MatrixRoutingAdapter,
@@ -38,27 +41,10 @@ class KotlinGeneticRouteOptimizer(
         startLon: Double,
         startZdt: ZonedDateTime,
     ): ParityOptimizeOutputJson {
+        require(orders.size >= 2) { "GA: ожидается ≥2 заказов" }
         val zone = startZdt.zone
         val orderDate = startZdt.toLocalDate()
         val n = orders.size
-        if (n == 0) {
-            return ParityOptimizeOutputJson(
-                routePoints = emptyList(),
-                totalDistanceKm = 0.0,
-                totalTimeMin = 0.0,
-                estimatedCompletionIso = startZdt.truncatedTo(ChronoUnit.SECONDS)
-                    .format(java.time.format.DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ssXXX").withLocale(java.util.Locale.ROOT)),
-            )
-        }
-        if (n == 1) {
-            val route = MatrixParityOptimizer.buildRouteFromChromosome(
-                intArrayOf(0), orders, maps, startLat, startLon, startZdt, orderDate, zone, serviceMin,
-            )
-            val finished = GeneticRoutePostProcessor.applyBotPostProcess(
-                route, maps, startLat, startLon, startZdt, serviceMin,
-            )
-            return MatrixParityOptimizer.toOutputJson(finished, orderDate, zone)
-        }
 
         var population = generateInitialPopulation(orders, startLat, startLon, startZdt)
         var fitnessScores = population.map {
@@ -78,10 +64,12 @@ class KotlinGeneticRouteOptimizer(
             while (newPop.size < POPULATION_SIZE) {
                 val p1 = tournamentSelection(population, fitnessScores)
                 val p2 = tournamentSelection(population, fitnessScores)
-                val child = if (rng.nextDouble() < CROSSOVER_RATE) orderCrossover(p1, p2) else {
-                    if (rng.nextDouble() < 0.5) p1.copyOf() else p2.copyOf()
+                val child = if (rng.random() < CROSSOVER_RATE) {
+                    orderCrossover(p1, p2)
+                } else {
+                    if (rng.random() < 0.5) p1.copyOf() else p2.copyOf()
                 }
-                val mutated = if (rng.nextDouble() < MUTATION_RATE) mutate(child, n, orders, startZdt) else child
+                val mutated = if (rng.random() < MUTATION_RATE) mutate(child, n, orders, startZdt) else child
                 repairWindowOrder(mutated, orders, startZdt)
                 if (isValidChromosome(mutated, n)) newPop.add(mutated)
             }
@@ -122,8 +110,9 @@ class KotlinGeneticRouteOptimizer(
         val orderDate = startZdt.toLocalDate()
         val zone = startZdt.zone
         repeat(POPULATION_SIZE / 4) {
-            val m = (0 until numOrders).shuffled(rng).toIntArray()
-            pop.add(m)
+            val m = (0 until numOrders).toMutableList()
+            rng.shuffle(m)
+            pop.add(m.toIntArray())
         }
         val indicesByEnd = mutableMapOf<Long, MutableList<Int>>()
         for (i in 0 until numOrders) {
@@ -135,20 +124,20 @@ class KotlinGeneticRouteOptimizer(
             val chrom = mutableListOf<Int>()
             for (endTs in indicesByEnd.keys.sorted()) {
                 val group = indicesByEnd[endTs]!!.toMutableList()
-                group.shuffle(rng)
+                rng.shuffle(group)
                 chrom.addAll(group)
             }
             pop.add(chrom.toIntArray())
         }
-        // Как Python: сортировка по началу окна + случайные обмены
         repeat(POPULATION_SIZE / 8) {
             val sortedIndices = (0 until numOrders).sortedBy { i ->
                 orders[i].windowStart?.let { ZonedDateTime.of(orderDate, it, zone).toEpochSecond() }
                     ?: Long.MAX_VALUE
             }.toMutableList()
-            repeat(rng.nextInt(numOrders / 3 + 1)) {
-                val i = rng.nextInt(numOrders)
-                val j = rng.nextInt(numOrders)
+            repeat(rng.randIntInclusive(0, numOrders / 3)) {
+                val pair = rng.sampleDistinctIndices(numOrders, 2)
+                val i = pair[0]
+                val j = pair[1]
                 val t = sortedIndices[i]
                 sortedIndices[i] = sortedIndices[j]
                 sortedIndices[j] = t
@@ -168,9 +157,10 @@ class KotlinGeneticRouteOptimizer(
         }
         repeat(POPULATION_SIZE / 8) {
             val chrom = (0 until numOrders).sortedBy { endAndWidthKey(it) }.toMutableList()
-            repeat(rng.nextInt(numOrders / 4 + 1)) {
-                val i = rng.nextInt(numOrders)
-                val j = rng.nextInt(numOrders)
+            repeat(rng.randIntInclusive(0, numOrders / 4)) {
+                val pair = rng.sampleDistinctIndices(numOrders, 2)
+                val i = pair[0]
+                val j = pair[1]
                 val t = chrom[i]
                 chrom[i] = chrom[j]
                 chrom[j] = t
@@ -188,7 +178,6 @@ class KotlinGeneticRouteOptimizer(
         return pop
     }
 
-    /** Как [_greedy_nearest_neighbor] в Python. */
     private fun greedyNearestNeighborChromosome(
         orders: List<InternalOrder>,
         startLat: Double,
@@ -268,8 +257,9 @@ class KotlinGeneticRouteOptimizer(
         return chrom.toIntArray()
     }
 
+    /** Как [_tournament_selection]: индексы без повторов (random.sample). */
     private fun tournamentSelection(population: List<IntArray>, fitnessScores: List<Double>): IntArray {
-        val idxs = List(TOURNAMENT_SIZE) { rng.nextInt(population.size) }
+        val idxs = rng.sampleDistinctIndices(population.size, TOURNAMENT_SIZE)
         var bestT = idxs[0]
         var bestF = fitnessScores[bestT]
         for (t in idxs.drop(1)) {
@@ -308,39 +298,39 @@ class KotlinGeneticRouteOptimizer(
         }
     }
 
-    /** Order crossover (OX): сегмент из p1, остальное — в порядке обхода p2, без «дыр». */
+    /** Точная копия [_order_crossover] Python (OX с обходом и пропуском start). */
     private fun orderCrossover(p1: IntArray, p2: IntArray): IntArray {
         if (p1.size != p2.size) return p1.copyOf()
         val n = p1.size
         if (n <= 2) return p1.copyOf()
-        val a = rng.nextInt(n)
-        val b = rng.nextInt(n)
-        val start = minOf(a, b)
-        val end = maxOf(a, b)
-        if (start == end) return p1.copyOf()
-        val child = IntArray(n) { -1 }
-        val inSlice = BooleanArray(n)
-        for (k in start..end) {
-            child[k] = p1[k]
-            inSlice[p1[k]] = true
-        }
+        val start = rng.randIntInclusive(0, n - 2)
+        val end = rng.randIntInclusive(start + 1, n - 1)
+        val child = arrayOfNulls<Int>(n)
+        for (i in start..end) child[i] = p1[i]
+        val used = (start..end).map { p1[it] }.toMutableSet()
         var idx = (end + 1) % n
-        for (x in p2) {
-            if (inSlice[x]) continue
-            while (child[idx] != -1) idx = (idx + 1) % n
-            child[idx] = x
+        for (v in p2) {
+            if (v in used) continue
+            while (child[idx] != null) {
+                idx = (idx + 1) % n
+                if (idx == start) idx = (idx + 1) % n
+            }
+            child[idx] = v
             idx = (idx + 1) % n
+            if (idx == start) idx = (idx + 1) % n
         }
-        return child
+        if (child.any { it == null }) return p1.copyOf()
+        return IntArray(n) { child[it]!! }
     }
 
     private fun mutate(chromosome: IntArray, n: Int, orders: List<InternalOrder>, startZdt: ZonedDateTime): IntArray {
         if (n <= 1) return chromosome.copyOf()
-        val u = rng.nextDouble()
+        val u = rng.random()
         if (u < 0.1) return smartMutationForDelays(chromosome, orders, startZdt)
         if (u < 0.5) {
-            val i = rng.nextInt(n)
-            val j = rng.nextInt(n)
+            val pair = rng.sampleDistinctIndices(n, 2)
+            val i = pair[0]
+            val j = pair[1]
             val m = chromosome.copyOf()
             val tmp = m[i]
             m[i] = m[j]
@@ -349,8 +339,8 @@ class KotlinGeneticRouteOptimizer(
         }
         if (u < 0.8 && n >= 2) {
             val m = chromosome.copyOf()
-            val st = rng.nextInt(n - 1)
-            val en = rng.nextInt(st + 1, n)
+            val st = rng.randIntInclusive(0, n - 2)
+            val en = rng.randIntInclusive(st + 1, n - 1)
             var i = st
             var j = en
             while (i < j) {
@@ -363,13 +353,12 @@ class KotlinGeneticRouteOptimizer(
             return m
         }
         val list = chromosome.toMutableList()
-        val idx = rng.nextInt(list.size)
+        val idx = rng.randIntInclusive(0, list.size - 1)
         val v = list.removeAt(idx)
-        list.add(rng.nextInt(list.size + 1), v)
+        list.add(rng.randIntInclusive(0, list.size), v)
         return list.toIntArray()
     }
 
-    /** Как [_smart_mutation_for_delays] в Python. */
     private fun smartMutationForDelays(chromosome: IntArray, orders: List<InternalOrder>, startZdt: ZonedDateTime): IntArray {
         if (chromosome.size <= 1) return chromosome.copyOf()
         val orderDate = startZdt.toLocalDate()
@@ -395,9 +384,9 @@ class KotlinGeneticRouteOptimizer(
             mutated.removeAt(mutatedPos)
             val upperInclusive = maxOf(3, chromosome.size / 3)
             val newPos = if (mutated.size > 2) {
-                rng.nextInt(2, upperInclusive + 1).coerceAtMost(mutated.size)
+                rng.randIntInclusive(2, upperInclusive).coerceAtMost(mutated.size)
             } else {
-                rng.nextInt(mutated.size + 1)
+                rng.randIntInclusive(0, mutated.size)
             }
             mutated.add(newPos.coerceIn(0, mutated.size), orderIdx)
         }

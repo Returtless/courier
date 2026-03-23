@@ -7,7 +7,7 @@ import org.junit.Test
 
 /**
  * End-to-end parity: same [input.json] as Python [tools.export_optimizer_golden], output must match [expected.json]
- * (excluding `meta`), using [ParityRouteFacade] (cluster/sync like Python, then exhaustive permutations + matrix).
+ * (excluding `meta`): cluster/sync + GA + matrix; RNG SplitMix64 как в `export_optimizer_golden.py`.
  */
 class TinyTwoOrdersGoldenParityTest {
 
